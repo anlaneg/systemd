@@ -1,74 +1,49 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2014 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
 
 #include <errno.h>
 #include <getopt.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 #include "env-util.h"
 #include "log.h"
 #include "macro.h"
+#include "process-util.h"
 #include "string-util.h"
 #include "verbs.h"
 #include "virt.h"
 
-/* Wraps running_in_chroot() which is used in various places,
- * but also adds an environment variable check so external processes
- * can reliably force this on.
+/* Wraps running_in_chroot() which is used in various places, but also adds an environment variable check so external
+ * processes can reliably force this on.
  */
 bool running_in_chroot_or_offline(void) {
         int r;
 
-        /* Added to support use cases like rpm-ostree, where from %post
-         * scripts we only want to execute "preset", but not "start"/"restart"
-         * for example.
+        /* Added to support use cases like rpm-ostree, where from %post scripts we only want to execute "preset", but
+         * not "start"/"restart" for example.
          *
-         * See ENVIRONMENT.md for docs.
+         * See doc/ENVIRONMENT.md for docs.
          */
         r = getenv_bool("SYSTEMD_OFFLINE");
-        if (r < 0)
-                log_debug_errno(r, "Parsing SYSTEMD_OFFLINE: %m");
-        else if (r == 0)
-                return false;
-        else
-                return true;
+        if (r < 0 && r != -ENXIO)
+                log_debug_errno(r, "Failed to parse $SYSTEMD_OFFLINE: %m");
+        else if (r >= 0)
+                return r > 0;
 
-        /* We've had this condition check for a long time which basically
-         * checks for legacy chroot case like Fedora's
-         * "mock", which is used for package builds.  We don't want
-         * to try to start systemd services there, since without --new-chroot
-         * we don't even have systemd running, and even if we did, adding
-         * a concept of background daemons to builds would be an enormous change,
-         * requiring considering things like how the journal output is handled, etc.
-         * And there's really not a use case today for a build talking to a service.
+        /* We've had this condition check for a long time which basically checks for legacy chroot case like Fedora's
+         * "mock", which is used for package builds.  We don't want to try to start systemd services there, since
+         * without --new-chroot we don't even have systemd running, and even if we did, adding a concept of background
+         * daemons to builds would be an enormous change, requiring considering things like how the journal output is
+         * handled, etc.  And there's really not a use case today for a build talking to a service.
          *
          * Note this call itself also looks for a different variable SYSTEMD_IGNORE_CHROOT=1.
          */
         r = running_in_chroot();
         if (r < 0)
                 log_debug_errno(r, "running_in_chroot(): %m");
-        else if (r > 0)
-                return true;
 
-        return false;
+        return r > 0;
 }
 
 int dispatch_verb(int argc, char *argv[], const Verb verbs[], void *userdata) {
@@ -101,7 +76,7 @@ int dispatch_verb(int argc, char *argv[], const Verb verbs[], void *userdata) {
                 if (name)
                         found = streq(name, verbs[i].verb);
                 else
-                        found = !!(verbs[i].flags & VERB_DEFAULT);
+                        found = verbs[i].flags & VERB_DEFAULT;
 
                 if (found) {
                         verb = &verbs[i];

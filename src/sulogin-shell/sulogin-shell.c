@@ -1,21 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 /***
-  This file is part of systemd.
-
-  Copyright 2017 Felipe Sateler
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
+  Copyright © 2017 Felipe Sateler
 ***/
 
 #include <errno.h>
@@ -81,24 +66,19 @@ static int start_default_target(sd_bus *bus) {
 
 static int fork_wait(const char* const cmdline[]) {
         pid_t pid;
+        int r;
 
-        pid = fork();
-        if (pid < 0)
-                return log_error_errno(errno, "fork(): %m");
-        if (pid == 0) {
-
+        r = safe_fork("(sulogin)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG, &pid);
+        if (r < 0)
+                return r;
+        if (r == 0) {
                 /* Child */
-
-                (void) reset_all_signal_handlers();
-                (void) reset_signal_mask();
-                assert_se(prctl(PR_SET_PDEATHSIG, SIGTERM) == 0);
-
                 execv(cmdline[0], (char**) cmdline);
                 log_error_errno(errno, "Failed to execute %s: %m", cmdline[0]);
                 _exit(EXIT_FAILURE); /* Operational error */
         }
 
-        return wait_for_terminate_and_warn(cmdline[0], pid, false);
+        return wait_for_terminate_and_check(cmdline[0], pid, WAIT_LOG_ABNORMAL);
 }
 
 static void print_mode(const char* mode) {

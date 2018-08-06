@@ -1,25 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
 #include <inttypes.h>
 #include <stdbool.h>
 #include <sys/param.h>
@@ -52,6 +33,26 @@
 #define _fallthrough_ __attribute__((fallthrough))
 #else
 #define _fallthrough_
+#endif
+/* Define C11 noreturn without <stdnoreturn.h> and even on older gcc
+ * compiler versions */
+#ifndef _noreturn_
+#if __STDC_VERSION__ >= 201112L
+#define _noreturn_ _Noreturn
+#else
+#define _noreturn_ __attribute__((noreturn))
+#endif
+#endif
+
+#if !defined(HAS_FEATURE_MEMORY_SANITIZER)
+#  if defined(__has_feature)
+#    if __has_feature(memory_sanitizer)
+#      define HAS_FEATURE_MEMORY_SANITIZER 1
+#    endif
+#  endif
+#  if !defined(HAS_FEATURE_MEMORY_SANITIZER)
+#    define HAS_FEATURE_MEMORY_SANITIZER 0
+#  endif
 #endif
 
 /* Temporarily disable some warnings */
@@ -139,11 +140,17 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
         return 1UL << (sizeof(u) * 8 - __builtin_clzl(u - 1UL));
 }
 
+#ifndef __COVERITY__
+#  define VOID_0 ((void)0)
+#else
+#  define VOID_0 ((void*)0)
+#endif
+
 #define ELEMENTSOF(x)                                                    \
         __extension__ (__builtin_choose_expr(                            \
                 !__builtin_types_compatible_p(typeof(x), typeof(&*(x))), \
                 sizeof(x)/sizeof((x)[0]),                                \
-                (void)0))
+                VOID_0))
 
 /*
  * STRLEN - return the length of a string literal, minus the trailing NUL byte.
@@ -181,7 +188,7 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
                 __builtin_constant_p(_B) &&                             \
                 __builtin_types_compatible_p(typeof(_A), typeof(_B)),   \
                 ((_A) > (_B)) ? (_A) : (_B),                            \
-                (void)0))
+                VOID_0))
 
 /* takes two types and returns the size of the larger one */
 #define MAXSIZE(A, B) (sizeof(union _packed_ { typeof(A) a; typeof(B) b; }))
@@ -240,11 +247,47 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
                 (__x / __y + !!(__x % __y));                            \
         })
 
+#ifdef __COVERITY__
+
+/* Use special definitions of assertion macros in order to prevent
+ * false positives of ASSERT_SIDE_EFFECT on Coverity static analyzer
+ * for uses of assert_se() and assert_return().
+ *
+ * These definitions make expression go through a (trivial) function
+ * call to ensure they are not discarded. Also use ! or !! to ensure
+ * the boolean expressions are seen as such.
+ *
+ * This technique has been described and recommended in:
+ * https://community.synopsys.com/s/question/0D534000046Yuzb/suppressing-assertsideeffect-for-functions-that-allow-for-sideeffects
+ */
+
+extern void __coverity_panic__(void);
+
+static inline int __coverity_check__(int condition) {
+        return condition;
+}
+
+#define assert_message_se(expr, message)                                \
+        do {                                                            \
+                if (__coverity_check__(!(expr)))                        \
+                        __coverity_panic__();                           \
+        } while (false)
+
+#define assert_log(expr, message) __coverity_check__(!!(expr))
+
+#else  /* ! __COVERITY__ */
+
 #define assert_message_se(expr, message)                                \
         do {                                                            \
                 if (_unlikely_(!(expr)))                                \
                         log_assert_failed(message, __FILE__, __LINE__, __PRETTY_FUNCTION__); \
         } while (false)
+
+#define assert_log(expr, message) ((_likely_(expr))                     \
+        ? (true)                                                        \
+        : (log_assert_failed_return(message, __FILE__, __LINE__, __PRETTY_FUNCTION__), false))
+
+#endif  /* __COVERITY__ */
 
 #define assert_se(expr) assert_message_se(expr, #expr)
 
@@ -277,10 +320,6 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
         };                                                              \
         REENABLE_WARNING
 #endif
-
-#define assert_log(expr, message) ((_likely_(expr))                     \
-        ? (true)                                                        \
-        : (log_assert_failed_return(message, __FILE__, __LINE__, __PRETTY_FUNCTION__), false))
 
 #define assert_return(expr, r)                                          \
         do {                                                            \
@@ -337,13 +376,15 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
         ({                                              \
                 typeof(x) _x_ = (x);                    \
                 unsigned ans = 1;                       \
-                while (_x_ /= 10)                       \
+                while ((_x_ /= 10) != 0)                \
                         ans++;                          \
                 ans;                                    \
         })
 
 #define SET_FLAG(v, flag, b) \
         (v) = (b) ? ((v) | (flag)) : ((v) & ~(flag))
+#define FLAGS_SET(v, flags) \
+        (((v) & (flags)) == (flags))
 
 #define CASE_F(X) case X:
 #define CASE_F_1(CASE, X) CASE_F(X)
@@ -408,21 +449,10 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
 #endif
 #endif
 
-/* Define C11 noreturn without <stdnoreturn.h> and even on older gcc
- * compiler versions */
-#ifndef noreturn
-#if __STDC_VERSION__ >= 201112L
-#define noreturn _Noreturn
-#else
-#define noreturn __attribute__((noreturn))
-#endif
-#endif
-
 #define DEFINE_TRIVIAL_CLEANUP_FUNC(type, func)                 \
         static inline void func##p(type *p) {                   \
                 if (*p)                                         \
                         func(*p);                               \
-        }                                                       \
-        struct __useless_struct_to_allow_trailing_semicolon__
+        }
 
 #include "log.h"

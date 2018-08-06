@@ -1,22 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2014 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
 
 #include <netinet/tcp.h>
 
@@ -65,12 +47,18 @@ int dns_scope_new(Manager *m, DnsScope **ret, Link *l, DnsProtocol protocol, int
                  * not update it from the on, even if the setting
                  * changes. */
 
-                if (l)
+                if (l) {
                         s->dnssec_mode = link_get_dnssec_mode(l);
-                else
+                        s->dns_over_tls_mode = link_get_dns_over_tls_mode(l);
+                } else {
                         s->dnssec_mode = manager_get_dnssec_mode(m);
-        } else
+                        s->dns_over_tls_mode = manager_get_dns_over_tls_mode(m);
+                }
+
+        } else {
                 s->dnssec_mode = DNSSEC_NO;
+                s->dns_over_tls_mode = DNS_OVER_TLS_NO;
+        }
 
         LIST_PREPEND(scopes, m->dns_scopes, s);
 
@@ -234,7 +222,7 @@ static int dns_scope_emit_one(DnsScope *s, int fd, DnsPacket *p) {
                 if (DNS_PACKET_QDCOUNT(p) > 1)
                         return -EOPNOTSUPP;
 
-                if (!ratelimit_test(&s->ratelimit))
+                if (!ratelimit_below(&s->ratelimit))
                         return -EBUSY;
 
                 family = s->family;
@@ -259,7 +247,7 @@ static int dns_scope_emit_one(DnsScope *s, int fd, DnsPacket *p) {
         case DNS_PROTOCOL_MDNS:
                 assert(fd < 0);
 
-                if (!ratelimit_test(&s->ratelimit))
+                if (!ratelimit_below(&s->ratelimit))
                         return -EBUSY;
 
                 family = s->family;
@@ -319,13 +307,14 @@ static int dns_scope_socket(
                 int family,
                 const union in_addr_union *address,
                 DnsServer *server,
-                uint16_t port) {
+                uint16_t port,
+                union sockaddr_union *ret_socket_address) {
 
         _cleanup_close_ int fd = -1;
-        union sockaddr_union sa = {};
+        union sockaddr_union sa;
         socklen_t salen;
         static const int one = 1;
-        int ret, r, ifindex;
+        int r, ifindex;
 
         assert(s);
 
@@ -335,36 +324,54 @@ static int dns_scope_socket(
 
                 ifindex = dns_server_ifindex(server);
 
-                sa.sa.sa_family = server->family;
-                if (server->family == AF_INET) {
-                        sa.in.sin_port = htobe16(port);
-                        sa.in.sin_addr = server->address.in;
+                switch (server->family) {
+                case AF_INET:
+                        sa = (union sockaddr_union) {
+                                .in.sin_family = server->family,
+                                .in.sin_port = htobe16(port),
+                                .in.sin_addr = server->address.in,
+                        };
                         salen = sizeof(sa.in);
-                } else if (server->family == AF_INET6) {
-                        sa.in6.sin6_port = htobe16(port);
-                        sa.in6.sin6_addr = server->address.in6;
-                        sa.in6.sin6_scope_id = ifindex;
+                        break;
+                case AF_INET6:
+                        sa = (union sockaddr_union) {
+                                .in6.sin6_family = server->family,
+                                .in6.sin6_port = htobe16(port),
+                                .in6.sin6_addr = server->address.in6,
+                                .in6.sin6_scope_id = ifindex,
+                        };
                         salen = sizeof(sa.in6);
-                } else
+                        break;
+                default:
                         return -EAFNOSUPPORT;
+                }
         } else {
                 assert(family != AF_UNSPEC);
                 assert(address);
 
-                sa.sa.sa_family = family;
                 ifindex = s->link ? s->link->ifindex : 0;
 
-                if (family == AF_INET) {
-                        sa.in.sin_port = htobe16(port);
-                        sa.in.sin_addr = address->in;
+                switch (family) {
+                case AF_INET:
+                        sa = (union sockaddr_union) {
+                                .in.sin_family = family,
+                                .in.sin_port = htobe16(port),
+                                .in.sin_addr = address->in,
+                        };
                         salen = sizeof(sa.in);
-                } else if (family == AF_INET6) {
-                        sa.in6.sin6_port = htobe16(port);
-                        sa.in6.sin6_addr = address->in6;
-                        sa.in6.sin6_scope_id = ifindex;
+                        break;
+                case AF_INET6:
+                        sa = (union sockaddr_union) {
+                                .in6.sin6_family = family,
+                                .in6.sin6_port = htobe16(port),
+                                .in6.sin6_addr = address->in6,
+                                .in6.sin6_scope_id = ifindex,
+                        };
                         salen = sizeof(sa.in6);
-                } else
+                        break;
+                default:
                         return -EAFNOSUPPORT;
+                }
         }
 
         fd = socket(sa.sa.sa_family, type|SOCK_CLOEXEC|SOCK_NONBLOCK, 0);
@@ -405,22 +412,27 @@ static int dns_scope_socket(
                 }
         }
 
-        r = connect(fd, &sa.sa, salen);
-        if (r < 0 && errno != EINPROGRESS)
-                return -errno;
+        if (ret_socket_address)
+                *ret_socket_address = sa;
+        else {
+                r = connect(fd, &sa.sa, salen);
+                if (r < 0 && errno != EINPROGRESS)
+                        return -errno;
+        }
 
-        ret = fd;
-        fd = -1;
-
-        return ret;
+        return TAKE_FD(fd);
 }
 
 int dns_scope_socket_udp(DnsScope *s, DnsServer *server, uint16_t port) {
-        return dns_scope_socket(s, SOCK_DGRAM, AF_UNSPEC, NULL, server, port);
+        return dns_scope_socket(s, SOCK_DGRAM, AF_UNSPEC, NULL, server, port, NULL);
 }
 
-int dns_scope_socket_tcp(DnsScope *s, int family, const union in_addr_union *address, DnsServer *server, uint16_t port) {
-        return dns_scope_socket(s, SOCK_STREAM, family, address, server, port);
+int dns_scope_socket_tcp(DnsScope *s, int family, const union in_addr_union *address, DnsServer *server, uint16_t port, union sockaddr_union *ret_socket_address) {
+        /* If ret_socket_address is not NULL, the caller is responisble
+         * for calling connect() or sendmsg(). This is required by TCP
+         * Fast Open, to be able to send the initial SYN packet along
+         * with the first data packet. */
+        return dns_scope_socket(s, SOCK_STREAM, family, address, server, port, ret_socket_address);
 }
 
 DnsScopeMatch dns_scope_good_domain(DnsScope *s, int ifindex, uint64_t flags, const char *domain) {
@@ -684,8 +696,7 @@ int dns_scope_make_reply_packet(
                 return r;
         DNS_PACKET_HEADER(p)->arcount = htobe16(dns_answer_size(soa));
 
-        *ret = p;
-        p = NULL;
+        *ret = TAKE_PTR(p);
 
         return 0;
 }
@@ -776,7 +787,7 @@ void dns_scope_process_query(DnsScope *s, DnsStream *stream, DnsPacket *p) {
         } else {
                 int fd;
 
-                if (!ratelimit_test(&s->ratelimit))
+                if (!ratelimit_below(&s->ratelimit))
                         return;
 
                 if (p->family == AF_INET)
@@ -869,8 +880,7 @@ static int dns_scope_make_conflict_packet(
         if (r < 0)
                 return r;
 
-        *ret = p;
-        p = NULL;
+        *ret = TAKE_PTR(p);
 
         return 0;
 }
@@ -885,12 +895,16 @@ static int on_conflict_dispatch(sd_event_source *es, usec_t usec, void *userdata
         scope->conflict_event_source = sd_event_source_unref(scope->conflict_event_source);
 
         for (;;) {
+                _cleanup_(dns_resource_key_unrefp) DnsResourceKey *key = NULL;
                 _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *rr = NULL;
                 _cleanup_(dns_packet_unrefp) DnsPacket *p = NULL;
 
-                rr = ordered_hashmap_steal_first(scope->conflict_queue);
-                if (!rr)
+                key = ordered_hashmap_first_key(scope->conflict_queue);
+                if (!key)
                         break;
+
+                rr = ordered_hashmap_remove(scope->conflict_queue, key);
+                assert(rr);
 
                 r = dns_scope_make_conflict_packet(scope, rr, &p);
                 if (r < 0) {
@@ -930,6 +944,7 @@ int dns_scope_notify_conflict(DnsScope *scope, DnsResourceRecord *rr) {
         if (r < 0)
                 return log_debug_errno(r, "Failed to queue conflicting RR: %m");
 
+        dns_resource_key_ref(rr->key);
         dns_resource_record_ref(rr);
 
         if (scope->conflict_event_source)
@@ -953,7 +968,7 @@ int dns_scope_notify_conflict(DnsScope *scope, DnsResourceRecord *rr) {
 }
 
 void dns_scope_check_conflicts(DnsScope *scope, DnsPacket *p) {
-        unsigned i;
+        DnsResourceRecord *rr;
         int r;
 
         assert(scope);
@@ -984,21 +999,24 @@ void dns_scope_check_conflicts(DnsScope *scope, DnsPacket *p) {
 
         log_debug("Checking for conflicts...");
 
-        for (i = 0; i < p->answer->n_rrs; i++) {
+        DNS_ANSWER_FOREACH(rr, p->answer) {
+                /* No conflict if it is DNS-SD RR used for service enumeration. */
+                if (dns_resource_key_is_dnssd_ptr(rr->key))
+                        continue;
 
                 /* Check for conflicts against the local zone. If we
                  * found one, we won't check any further */
-                r = dns_zone_check_conflicts(&scope->zone, p->answer->items[i].rr);
+                r = dns_zone_check_conflicts(&scope->zone, rr);
                 if (r != 0)
                         continue;
 
                 /* Check for conflicts against the local cache. If so,
                  * send out an advisory query, to inform everybody */
-                r = dns_cache_check_conflicts(&scope->cache, p->answer->items[i].rr, p->family, &p->sender);
+                r = dns_cache_check_conflicts(&scope->cache, rr, p->family, &p->sender);
                 if (r <= 0)
                         continue;
 
-                dns_scope_notify_conflict(scope, p->answer->items[i].rr);
+                dns_scope_notify_conflict(scope, rr);
         }
 }
 

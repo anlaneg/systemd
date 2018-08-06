@@ -1,22 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2013 Tom Gundersen <teg@jklm.no>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
 
 #include <poll.h>
 #include <sys/socket.h>
@@ -30,6 +12,7 @@
 #include "missing.h"
 #include "netlink-internal.h"
 #include "netlink-util.h"
+#include "process-util.h"
 #include "socket-util.h"
 #include "util.h"
 
@@ -46,6 +29,7 @@ static int sd_netlink_new(sd_netlink **ret) {
         rtnl->fd = -1;
         rtnl->sockaddr.nl.nl_family = AF_NETLINK;
         rtnl->original_pid = getpid_cached();
+        rtnl->protocol = -1;
 
         LIST_HEAD_INIT(rtnl->match_callbacks);
 
@@ -60,8 +44,7 @@ static int sd_netlink_new(sd_netlink **ret) {
          * responses with notifications from the kernel */
         rtnl->serial = 1;
 
-        *ret = rtnl;
-        rtnl = NULL;
+        *ret = TAKE_PTR(rtnl);
 
         return 0;
 }
@@ -88,8 +71,7 @@ int sd_netlink_new_from_netlink(sd_netlink **ret, int fd) {
 
         rtnl->fd = fd;
 
-        *ret = rtnl;
-        rtnl = NULL;
+        *ret = TAKE_PTR(rtnl);
 
         return 0;
 }
@@ -106,6 +88,8 @@ static bool rtnl_pid_changed(sd_netlink *rtnl) {
 int sd_netlink_open_fd(sd_netlink **ret, int fd) {
         _cleanup_(sd_netlink_unrefp) sd_netlink *rtnl = NULL;
         int r;
+        int protocol;
+        socklen_t l;
 
         assert_return(ret, -EINVAL);
         assert_return(fd >= 0, -EBADF);
@@ -114,25 +98,31 @@ int sd_netlink_open_fd(sd_netlink **ret, int fd) {
         if (r < 0)
                 return r;
 
+        l = sizeof(protocol);
+        r = getsockopt(fd, SOL_SOCKET, SO_PROTOCOL, &protocol, &l);
+        if (r < 0)
+                return r;
+
         rtnl->fd = fd;
+        rtnl->protocol = protocol;
 
         r = socket_bind(rtnl);
         if (r < 0) {
                 rtnl->fd = -1; /* on failure, the caller remains owner of the fd, hence don't close it here */
+                rtnl->protocol = -1;
                 return r;
         }
 
-        *ret = rtnl;
-        rtnl = NULL;
+        *ret = TAKE_PTR(rtnl);
 
         return 0;
 }
 
-int sd_netlink_open(sd_netlink **ret) {
+int netlink_open_family(sd_netlink **ret, int family) {
         _cleanup_close_ int fd = -1;
         int r;
 
-        fd = socket_open(NETLINK_ROUTE);
+        fd = socket_open(family);
         if (fd < 0)
                 return fd;
 
@@ -143,6 +133,10 @@ int sd_netlink_open(sd_netlink **ret) {
         fd = -1;
 
         return 0;
+}
+
+int sd_netlink_open(sd_netlink **ret) {
+        return netlink_open_family(ret, NETLINK_ROUTE);
 }
 
 int sd_netlink_inc_rcvbuf(sd_netlink *rtnl, size_t size) {
@@ -309,7 +303,7 @@ static int process_timeout(sd_netlink *rtnl) {
         if (c->timeout > n)
                 return 0;
 
-        r = rtnl_message_new_synthetic_error(-ETIMEDOUT, c->serial, &m);
+        r = rtnl_message_new_synthetic_error(rtnl, -ETIMEDOUT, c->serial, &m);
         if (r < 0)
                 return r;
 
@@ -410,8 +404,7 @@ static int process_running(sd_netlink *rtnl, sd_netlink_message **ret) {
         }
 
         if (ret) {
-                *ret = m;
-                m = NULL;
+                *ret = TAKE_PTR(m);
 
                 return 1;
         }
@@ -654,10 +647,8 @@ int sd_netlink_call(sd_netlink *rtnl,
                                         return 0;
                                 }
 
-                                if (ret) {
-                                        *ret = incoming;
-                                        incoming = NULL;
-                                }
+                                if (ret)
+                                        *ret = TAKE_PTR(incoming);
 
                                 return 1;
                         }

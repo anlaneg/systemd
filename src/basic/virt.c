@@ -1,23 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
 
-  Copyright 2011 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
+#if defined(__i386__) || defined(__x86_64__)
+#include <cpuid.h>
+#endif
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -54,34 +39,19 @@ static int detect_vm_cpuid(void) {
                 { "Microsoft Hv", VIRTUALIZATION_MICROSOFT },
                 /* https://wiki.freebsd.org/bhyve */
                 { "bhyve bhyve ", VIRTUALIZATION_BHYVE     },
+                { "QNXQVMBSQG",   VIRTUALIZATION_QNX       },
         };
 
-        uint32_t eax, ecx;
+        uint32_t eax, ebx, ecx, edx;
         bool hypervisor;
 
         /* http://lwn.net/Articles/301888/ */
 
-#if defined (__i386__)
-#define REG_a "eax"
-#define REG_b "ebx"
-#elif defined (__amd64__)
-#define REG_a "rax"
-#define REG_b "rbx"
-#endif
-
         /* First detect whether there is a hypervisor */
-        eax = 1;
-        __asm__ __volatile__ (
-                /* ebx/rbx is being used for PIC! */
-                "  push %%"REG_b"         \n\t"
-                "  cpuid                  \n\t"
-                "  pop %%"REG_b"          \n\t"
+        if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) == 0)
+                return VIRTUALIZATION_NONE;
 
-                : "=a" (eax), "=c" (ecx)
-                : "0" (eax)
-        );
-
-        hypervisor = !!(ecx & 0x80000000U);
+        hypervisor = ecx & 0x80000000U;
 
         if (hypervisor) {
                 union {
@@ -91,17 +61,11 @@ static int detect_vm_cpuid(void) {
                 unsigned j;
 
                 /* There is a hypervisor, see what it is */
-                eax = 0x40000000U;
-                __asm__ __volatile__ (
-                        /* ebx/rbx is being used for PIC! */
-                        "  push %%"REG_b"         \n\t"
-                        "  cpuid                  \n\t"
-                        "  mov %%ebx, %1          \n\t"
-                        "  pop %%"REG_b"          \n\t"
+                __cpuid(0x40000000U, eax, ebx, ecx, edx);
 
-                        : "=a" (eax), "=r" (sig.sig32[0]), "=c" (sig.sig32[1]), "=d" (sig.sig32[2])
-                        : "0" (eax)
-                );
+                sig.sig32[0] = ebx;
+                sig.sig32[1] = ecx;
+                sig.sig32[2] = edx;
 
                 log_debug("Virtualization found, CPUID=%s", sig.text);
 
@@ -241,8 +205,10 @@ static int detect_vm_xen_dom0(void) {
         if (r == 0) {
                 unsigned long features;
 
-                r = safe_atolu(domcap, &features);
-                if (r == 0) {
+                /* Here, we need to use sscanf() instead of safe_atoul()
+                 * as the string lacks the leading "0x". */
+                r = sscanf(domcap, "%lx", &features);
+                if (r == 1) {
                         r = !!(features & (1U << XENFEAT_dom0));
                         log_debug("Virtualization XEN, found %s with value %08lx, "
                                   "XENFEAT_dom0 (indicating the 'hardware domain') is%s set.",
@@ -298,6 +264,10 @@ static int detect_vm_uml(void) {
 
         /* Detect User-Mode Linux by reading /proc/cpuinfo */
         r = read_full_file("/proc/cpuinfo", &cpuinfo_contents, NULL);
+        if (r == -ENOENT) {
+                log_debug("/proc/cpuinfo not found, assuming no UML virtualization.");
+                return VIRTUALIZATION_NONE;
+        }
         if (r < 0)
                 return r;
 
@@ -306,7 +276,7 @@ static int detect_vm_uml(void) {
                 return VIRTUALIZATION_UML;
         }
 
-        log_debug("No virtualization found in /proc/cpuinfo.");
+        log_debug("UML virtualization not found in /proc/cpuinfo.");
         return VIRTUALIZATION_NONE;
 }
 
@@ -336,21 +306,24 @@ static int detect_vm_zvm(void) {
 /* Returns a short identifier for the various VM implementations */
 int detect_vm(void) {
         static thread_local int cached_found = _VIRTUALIZATION_INVALID;
-        int r, dmi;
         bool other = false;
+        int r, dmi;
 
         if (cached_found >= 0)
                 return cached_found;
 
         /* We have to use the correct order here:
          *
-         * -> First try to detect Oracle Virtualbox, even if it uses KVM.
-         * -> Second try to detect from cpuid, this will report KVM for
-         *    whatever software is used even if info in dmi is overwritten.
-         * -> Third try to detect from dmi. */
+         * → First, try to detect Oracle Virtualbox, even if it uses KVM, as well as Xen even if it cloaks as Microsoft
+         *   Hyper-V.
+         *
+         * → Second, try to detect from CPUID, this will report KVM for whatever software is used even if info in DMI is
+         *   overwritten.
+         *
+         * → Third, try to detect from DMI. */
 
         dmi = detect_vm_dmi();
-        if (dmi == VIRTUALIZATION_ORACLE) {
+        if (IN_SET(dmi, VIRTUALIZATION_ORACLE, VIRTUALIZATION_XEN)) {
                 r = dmi;
                 goto finish;
         }
@@ -358,68 +331,58 @@ int detect_vm(void) {
         r = detect_vm_cpuid();
         if (r < 0)
                 return r;
-        if (r != VIRTUALIZATION_NONE) {
-                if (r == VIRTUALIZATION_VM_OTHER)
-                        other = true;
-                else
-                        goto finish;
-        }
+        if (r == VIRTUALIZATION_VM_OTHER)
+                other = true;
+        else if (r != VIRTUALIZATION_NONE)
+                goto finish;
 
-        r = dmi;
-        if (r < 0)
-                return r;
-        if (r != VIRTUALIZATION_NONE) {
-                if (r == VIRTUALIZATION_VM_OTHER)
-                        other = true;
-                else
-                        goto finish;
+        /* Now, let's get back to DMI */
+        if (dmi < 0)
+                return dmi;
+        if (dmi == VIRTUALIZATION_VM_OTHER)
+                other = true;
+        else if (dmi != VIRTUALIZATION_NONE) {
+                r = dmi;
+                goto finish;
         }
 
         /* x86 xen will most likely be detected by cpuid. If not (most likely
          * because we're not an x86 guest), then we should try the /proc/xen
          * directory next. If that's not found, then we check for the high-level
          * hypervisor sysfs file.
-	 */
+         */
 
         r = detect_vm_xen();
         if (r < 0)
                 return r;
-        if (r != VIRTUALIZATION_NONE) {
-                if (r == VIRTUALIZATION_VM_OTHER)
-                        other = true;
-                else
-                        goto finish;
-        }
+        if (r == VIRTUALIZATION_VM_OTHER)
+                other = true;
+        else if (r != VIRTUALIZATION_NONE)
+                goto finish;
 
         r = detect_vm_hypervisor();
         if (r < 0)
                 return r;
-        if (r != VIRTUALIZATION_NONE) {
-                if (r == VIRTUALIZATION_VM_OTHER)
-                        other = true;
-                else
-                        goto finish;
-        }
+        if (r == VIRTUALIZATION_VM_OTHER)
+                other = true;
+        else if (r != VIRTUALIZATION_NONE)
+                goto finish;
 
         r = detect_vm_device_tree();
         if (r < 0)
                 return r;
-        if (r != VIRTUALIZATION_NONE) {
-                if (r == VIRTUALIZATION_VM_OTHER)
-                        other = true;
-                else
-                        goto finish;
-        }
+        if (r == VIRTUALIZATION_VM_OTHER)
+                other = true;
+        else if (r != VIRTUALIZATION_NONE)
+                goto finish;
 
         r = detect_vm_uml();
         if (r < 0)
                 return r;
-        if (r != VIRTUALIZATION_NONE) {
-                if (r == VIRTUALIZATION_VM_OTHER)
-                        other = true;
-                else
-                        goto finish;
-        }
+        if (r == VIRTUALIZATION_VM_OTHER)
+                other = true;
+        else if (r != VIRTUALIZATION_NONE)
+                goto finish;
 
         r = detect_vm_zvm();
         if (r < 0)
@@ -430,10 +393,12 @@ finish:
          * In order to detect the Dom0 as not virtualization we need to
          * double-check it */
         if (r == VIRTUALIZATION_XEN) {
-                int ret = detect_vm_xen_dom0();
-                if (ret < 0)
-                        return ret;
-                if (ret > 0)
+                int dom0;
+
+                dom0 = detect_vm_xen_dom0();
+                if (dom0 < 0)
+                        return dom0;
+                if (dom0 > 0)
                         r = VIRTUALIZATION_NONE;
         } else if (r == VIRTUALIZATION_NONE && other)
                 r = VIRTUALIZATION_VM_OTHER;
@@ -620,16 +585,16 @@ int running_in_userns(void) {
 }
 
 int running_in_chroot(void) {
-        int ret;
+        int r;
 
         if (getenv_bool("SYSTEMD_IGNORE_CHROOT") > 0)
                 return 0;
 
-        ret = files_same("/proc/1/root", "/", 0);
-        if (ret < 0)
-                return ret;
+        r = files_same("/proc/1/root", "/", 0);
+        if (r < 0)
+                return r;
 
-        return ret == 0;
+        return r == 0;
 }
 
 static const char *const virtualization_table[_VIRTUALIZATION_MAX] = {
@@ -645,6 +610,7 @@ static const char *const virtualization_table[_VIRTUALIZATION_MAX] = {
         [VIRTUALIZATION_ZVM] = "zvm",
         [VIRTUALIZATION_PARALLELS] = "parallels",
         [VIRTUALIZATION_BHYVE] = "bhyve",
+        [VIRTUALIZATION_QNX] = "qnx",
         [VIRTUALIZATION_VM_OTHER] = "vm-other",
 
         [VIRTUALIZATION_SYSTEMD_NSPAWN] = "systemd-nspawn",

@@ -1,23 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2013-2015 Kay Sievers
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
 
 #include <blkid.h>
 #include <ctype.h>
@@ -35,6 +16,8 @@
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <unistd.h>
+
+#include "sd-id128.h"
 
 #include "alloc-util.h"
 #include "blkid-util.h"
@@ -294,7 +277,7 @@ static int status_entries(const char *esp_path, sd_id128_t partition) {
                                        esp_path);
 
         if (config.default_entry < 0)
-                printf("%zu entries, no entry suitable as default", config.n_entries);
+                printf("%zu entries, no entry suitable as default\n", config.n_entries);
         else {
                 const BootEntry *e = &config.entries[config.default_entry];
 
@@ -408,7 +391,7 @@ static int copy_file_with_version_check(const char *from, const char *to, bool f
                                 return r;
 
                         if (lseek(fd_from, 0, SEEK_SET) == (off_t) -1)
-                                return log_error_errno(errno, "Failed to seek in \%s\": %m", from);
+                                return log_error_errno(errno, "Failed to seek in \"%s\": %m", from);
 
                         fd_to = safe_close(fd_to);
                 }
@@ -432,14 +415,14 @@ static int copy_file_with_version_check(const char *from, const char *to, bool f
 
         (void) copy_times(fd_from, fd_to);
 
-        r = fsync(fd_to);
-        if (r < 0) {
+        if (fsync(fd_to) < 0) {
                 (void) unlink_noerrno(t);
                 return log_error_errno(errno, "Failed to copy data from \"%s\" to \"%s\": %m", from, t);
         }
 
-        r = renameat(AT_FDCWD, t, AT_FDCWD, to);
-        if (r < 0) {
+        (void) fsync_directory_of_file(fd_to);
+
+        if (renameat(AT_FDCWD, t, AT_FDCWD, to) < 0) {
                 (void) unlink_noerrno(t);
                 return log_error_errno(errno, "Failed to rename \"%s\" to \"%s\": %m", t, to);
         }
@@ -824,6 +807,7 @@ static int install_loader_config(const char *esp_path) {
         }
 
         fprintf(f, "#timeout 3\n");
+        fprintf(f, "#console-mode keep\n");
         fprintf(f, "default %s-*\n", sd_id128_to_string(machine_id, machine_string));
 
         r = fflush_sync_and_check(f);
@@ -948,12 +932,13 @@ static int verb_status(int argc, char *argv[], void *userdata) {
                 * can show */
 
         if (is_efi_boot()) {
-                _cleanup_free_ char *fw_type = NULL, *fw_info = NULL, *loader = NULL, *loader_path = NULL;
+                _cleanup_free_ char *fw_type = NULL, *fw_info = NULL, *loader = NULL, *loader_path = NULL, *stub = NULL;
                 sd_id128_t loader_part_uuid = SD_ID128_NULL;
 
                 read_loader_efi_var("LoaderFirmwareType", &fw_type);
                 read_loader_efi_var("LoaderFirmwareInfo", &fw_info);
                 read_loader_efi_var("LoaderInfo", &loader);
+                read_loader_efi_var("StubInfo", &stub);
                 read_loader_efi_var("LoaderImageIdentifier", &loader_path);
 
                 if (loader_path)
@@ -965,22 +950,14 @@ static int verb_status(int argc, char *argv[], void *userdata) {
 
                 printf("System:\n");
                 printf("     Firmware: %s (%s)\n", strna(fw_type), strna(fw_info));
-
-                k = is_efi_secure_boot();
-                if (k < 0)
-                        r = log_warning_errno(k, "Failed to query secure boot status: %m");
-                else
-                        printf("  Secure Boot: %sd\n", enable_disable(k));
-
-                k = is_efi_secure_boot_setup_mode();
-                if (k < 0)
-                        r = log_warning_errno(k, "Failed to query secure boot mode: %m");
-                else
-                        printf("   Setup Mode: %s\n", k ? "setup" : "user");
+                printf("  Secure Boot: %sd\n", enable_disable(is_efi_secure_boot()));
+                printf("   Setup Mode: %s\n", is_efi_secure_boot_setup_mode() ? "setup" : "user");
                 printf("\n");
 
                 printf("Current Loader:\n");
                 printf("      Product: %s\n", strna(loader));
+                if (stub)
+                        printf("         Stub: %s\n", stub);
                 if (!sd_id128_is_null(loader_part_uuid))
                         printf("          ESP: /dev/disk/by-partuuid/%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
                                SD_ID128_FORMAT_VAL(loader_part_uuid));

@@ -1,16 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation; either version 2.1 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * Lesser General Public License for more details.
- *
- */
 
 #if ENABLE_TPM
 
@@ -188,7 +176,6 @@ typedef struct tdEFI_TCG2_PROTOCOL {
         EFI_TCG2_GET_RESULT_OF_SET_ACTIVE_PCR_BANKS GetResultOfSetActivePcrBanks;
 } EFI_TCG2;
 
-
 static EFI_STATUS tpm1_measure_to_pcr_and_event_log(const EFI_TCG *tcg, UINT32 pcrindex, const EFI_PHYSICAL_ADDRESS buffer,
                                                     UINTN buffer_size, const CHAR16 *description) {
         EFI_STATUS status;
@@ -232,8 +219,11 @@ static EFI_STATUS tpm1_measure_to_pcr_and_event_log(const EFI_TCG *tcg, UINT32 p
  */
 static EFI_STATUS trigger_tcg2_final_events_table(const EFI_TCG2 *tcg, EFI_TCG2_EVENT_LOG_FORMAT log_fmt)
 {
+        EFI_PHYSICAL_ADDRESS loc;
+        EFI_PHYSICAL_ADDRESS last_loc;
+        BOOLEAN truncated;
         return uefi_call_wrapper(tcg->GetEventLog, 5, (EFI_TCG2 *) tcg,
-                                 log_fmt, 0, 0, 0);
+                                 log_fmt, &loc, &last_loc, &truncated);
 }
 
 static EFI_STATUS tpm2_measure_to_pcr_and_event_log(const EFI_TCG2 *tcg, UINT32 pcrindex, const EFI_PHYSICAL_ADDRESS buffer,

@@ -1,22 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2014 Tom Gundersen <teg@jklm.no>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
 
 #include "sd-daemon.h"
 #include "sd-event.h"
@@ -62,7 +44,7 @@ int main(int argc, char *argv[]) {
         }
 
         /* Always create the directory where resolv.conf will live */
-        r = mkdir_safe_label("/run/systemd/resolve", 0755, uid, gid, false);
+        r = mkdir_safe_label("/run/systemd/resolve", 0755, uid, gid, MKDIR_WARN_MODE);
         if (r < 0) {
                 log_error_errno(r, "Could not create runtime directory: %m");
                 goto finish;
@@ -97,6 +79,8 @@ int main(int argc, char *argv[]) {
 
         /* Write finish default resolv.conf to avoid a dangling symlink */
         (void) manager_write_resolv_conf(m);
+
+        (void) manager_check_resolv_conf(m);
 
         /* Let's drop the remaining caps now */
         r = capability_bounding_set_drop(0, true);

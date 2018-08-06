@@ -1,25 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
 #include <stdbool.h>
 
 #include "cgroup-util.h"
@@ -101,6 +82,7 @@ struct CGroupContext {
         LIST_HEAD(CGroupIODeviceWeight, io_device_weights);
         LIST_HEAD(CGroupIODeviceLimit, io_device_limits);
 
+        uint64_t memory_min;
         uint64_t memory_low;
         uint64_t memory_high;
         uint64_t memory_max;
@@ -140,7 +122,8 @@ typedef enum CGroupIPAccountingMetric {
         _CGROUP_IP_ACCOUNTING_METRIC_INVALID = -1,
 } CGroupIPAccountingMetric;
 
-#include "unit.h"
+typedef struct Unit Unit;
+typedef struct Manager Manager;
 
 void cgroup_context_init(CGroupContext *c);
 void cgroup_context_done(CGroupContext *c);
@@ -167,6 +150,7 @@ bool unit_get_needs_bpf(Unit *u);
 
 void unit_update_cgroup_members_masks(Unit *u);
 
+const char *unit_get_realized_cgroup_path(Unit *u, CGroupMask mask);
 char *unit_default_cgroup_path(Unit *u);
 int unit_set_cgroup_path(Unit *u, const char *path);
 int unit_pick_cgroup_path(Unit *u);
@@ -178,7 +162,7 @@ int unit_watch_cgroup(Unit *u);
 
 void unit_add_to_cgroup_empty_queue(Unit *u);
 
-int unit_attach_pids_to_cgroup(Unit *u);
+int unit_attach_pids_to_cgroup(Unit *u, Set *pids, const char *suffix_path);
 
 int manager_setup_cgroup(Manager *m);
 void manager_shutdown_cgroup(Manager *m, bool delete);
@@ -191,6 +175,8 @@ Unit* manager_get_unit_by_pid(Manager *m, pid_t pid);
 
 int unit_search_main_pid(Unit *u, pid_t *ret);
 int unit_watch_all_pids(Unit *u);
+
+int unit_synthesize_cgroup_empty_event(Unit *u);
 
 int unit_get_memory_current(Unit *u, uint64_t *ret);
 int unit_get_tasks_current(Unit *u, uint64_t *ret);
@@ -206,6 +192,9 @@ int unit_reset_ip_accounting(Unit *u);
         cc ? cc->name : false;                          \
         })
 
+bool manager_owns_root_cgroup(Manager *m);
+bool unit_has_root_cgroup(Unit *u);
+
 int manager_notify_cgroup_empty(Manager *m, const char *group);
 
 void unit_invalidate_cgroup(Unit *u, CGroupMask m);
@@ -215,3 +204,5 @@ void manager_invalidate_startup_units(Manager *m);
 
 const char* cgroup_device_policy_to_string(CGroupDevicePolicy i) _const_;
 CGroupDevicePolicy cgroup_device_policy_from_string(const char *s) _pure_;
+
+bool unit_cgroup_delegate(Unit *u);

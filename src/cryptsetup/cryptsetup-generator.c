@@ -1,22 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
 
 #include <errno.h>
 #include <stdio_ext.h>
@@ -106,9 +88,11 @@ static int create_disk(
         if (r < 0)
                 return log_error_errno(r, "Failed to generate unit name: %m");
 
-        password_escaped = specifier_escape(password);
-        if (password && !password_escaped)
-                return log_oom();
+        if (password) {
+                password_escaped = specifier_escape(password);
+                if (!password_escaped)
+                        return log_oom();
+        }
 
         r = generator_open_unit_file(arg_dest, NULL, n, &f);
         if (r < 0)
@@ -167,18 +151,24 @@ static int create_disk(
                         fputs("Before=dev-mapper-%i.swap\n",
                               f);
         } else
+                /* For loopback devices, add systemd-tmpfiles-setup-dev.service
+                   dependency to ensure that loopback support is available in
+                   the kernel (/dev/loop-control needs to exist) */
                 fprintf(f,
-                        "RequiresMountsFor=%s\n",
+                        "RequiresMountsFor=%s\n"
+                        "Requires=systemd-tmpfiles-setup-dev.service\n"
+                        "After=systemd-tmpfiles-setup-dev.service\n",
                         u_escaped);
-
 
         r = generator_write_timeouts(arg_dest, device, name, options, &filtered);
         if (r < 0)
                 return r;
 
-        filtered_escaped = specifier_escape(filtered);
-        if (filtered && !filtered_escaped)
-                return log_oom();
+        if (filtered) {
+                filtered_escaped = specifier_escape(filtered);
+                if (!filtered_escaped)
+                        return log_oom();
+        }
 
         fprintf(f,
                 "\n[Service]\n"
@@ -468,7 +458,8 @@ int main(int argc, char *argv[]) {
         if (argc > 1)
                 arg_dest = argv[1];
 
-        log_set_target(LOG_TARGET_SAFE);
+        log_set_prohibit_ipc(true);
+        log_set_target(LOG_TARGET_AUTO);
         log_parse_environment();
         log_open();
 

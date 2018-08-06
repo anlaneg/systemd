@@ -1,22 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2014 Tom Gundersen <teg@jklm.no>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
- ***/
 
 #include <resolv.h>
 #include <stdio_ext.h>
@@ -39,8 +21,48 @@
 /* A resolv.conf file containing the domain data we learnt from uplink, but our own DNS server address. */
 #define PRIVATE_STUB_RESOLV_CONF "/run/systemd/resolve/stub-resolv.conf"
 
-/* A static resolv.conf file containing no domains, but only our own DNS sever address */
+/* A static resolv.conf file containing no domains, but only our own DNS server address */
 #define PRIVATE_STATIC_RESOLV_CONF ROOTLIBEXECDIR "/resolv.conf"
+
+int manager_check_resolv_conf(const Manager *m) {
+        const char *path;
+        struct stat st;
+        int r;
+
+        assert(m);
+
+        /* This warns only when our stub listener is disabled and /etc/resolv.conf is a symlink to
+         * PRIVATE_STATIC_RESOLV_CONF or PRIVATE_STUB_RESOLV_CONF. */
+
+        if (m->dns_stub_listener_mode != DNS_STUB_LISTENER_NO)
+                return 0;
+
+        r = stat("/etc/resolv.conf", &st);
+        if (r < 0) {
+                if (errno == ENOENT)
+                        return 0;
+
+                return log_warning_errno(errno, "Failed to stat /etc/resolv.conf: %m");
+        }
+
+        FOREACH_STRING(path,
+                       PRIVATE_STUB_RESOLV_CONF,
+                       PRIVATE_STATIC_RESOLV_CONF) {
+
+                struct stat own;
+
+                /* Is it symlinked to our own uplink file? */
+                if (stat(path, &own) >= 0 &&
+                    st.st_dev == own.st_dev &&
+                    st.st_ino == own.st_ino) {
+                        log_warning("DNSStubListener= is disabled, but /etc/resolv.conf is a symlink to %s "
+                                    "which expects DNSStubListener= to be enabled.", path);
+                        return -EOPNOTSUPP;
+                }
+        }
+
+        return 0;
+}
 
 static bool file_is_our_own(const struct stat *st) {
         const char *path;
@@ -68,6 +90,7 @@ int manager_read_resolv_conf(Manager *m) {
         _cleanup_fclose_ FILE *f = NULL;
         struct stat st;
         char line[LINE_MAX];
+        unsigned n = 0;
         int r;
 
         assert(m);
@@ -118,8 +141,10 @@ int manager_read_resolv_conf(Manager *m) {
                 const char *a;
                 char *l;
 
+                n++;
+
                 l = strstrip(line);
-                if (IN_SET(*l, '#', ';'))
+                if (IN_SET(*l, '#', ';', 0))
                         continue;
 
                 a = first_word(l, "nameserver");
@@ -139,6 +164,8 @@ int manager_read_resolv_conf(Manager *m) {
                         if (r < 0)
                                 log_warning_errno(r, "Failed to parse search domain string '%s', ignoring.", a);
                 }
+
+                log_syntax(NULL, LOG_DEBUG, "/etc/resolv.conf", n, 0, "Ignoring resolv.conf line: %s", l);
         }
 
         m->resolv_conf_mtime = timespec_load(&st.st_mtim);
@@ -187,7 +214,7 @@ static void write_resolv_conf_server(DnsServer *s, FILE *f, unsigned *count) {
         assert(count);
 
         if (!dns_server_string(s)) {
-                log_warning("Our of memory, or invalid DNS address. Ignoring server.");
+                log_warning("Out of memory, or invalid DNS address. Ignoring server.");
                 return;
         }
 
@@ -276,7 +303,7 @@ static int write_stub_resolv_conf_contents(FILE *f, OrderedSet *dns, OrderedSet 
                        "# internal DNS stub resolver of systemd-resolved. This file lists all\n"
                        "# configured search domains.\n"
                        "#\n"
-                       "# Run \"systemd-resolve --status\" to see details about the uplink DNS servers\n"
+                       "# Run \"resolvectl status\" to see details about the uplink DNS servers\n"
                        "# currently in use.\n"
                        "#\n"
                        "# Third party programs must not access this file directly, but only through the\n"

@@ -1,22 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
 
 #include <errno.h>
 #include <getopt.h>
@@ -77,65 +59,6 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
         return 0;
 }
 
-static int load_module(struct kmod_ctx *ctx, const char *m) {
-        const int probe_flags = KMOD_PROBE_APPLY_BLACKLIST;
-        struct kmod_list *itr;
-        _cleanup_(kmod_module_unref_listp) struct kmod_list *modlist = NULL;
-        int r = 0;
-
-        log_debug("load: %s", m);
-
-        r = kmod_module_new_from_lookup(ctx, m, &modlist);
-        if (r < 0)
-                return log_error_errno(r, "Failed to lookup alias '%s': %m", m);
-
-        if (!modlist) {
-                log_error("Failed to find module '%s'", m);
-                return -ENOENT;
-        }
-
-        kmod_list_foreach(itr, modlist) {
-                _cleanup_(kmod_module_unrefp) struct kmod_module *mod = NULL;
-                int state, err;
-
-                mod = kmod_module_get_module(itr);
-                state = kmod_module_get_initstate(mod);
-
-                switch (state) {
-                case KMOD_MODULE_BUILTIN:
-                        log_info("Module '%s' is builtin", kmod_module_get_name(mod));
-                        break;
-
-                case KMOD_MODULE_LIVE:
-                        log_debug("Module '%s' is already loaded", kmod_module_get_name(mod));
-                        break;
-
-                default:
-                        err = kmod_module_probe_insert_module(mod, probe_flags,
-                                                              NULL, NULL, NULL, NULL);
-
-                        if (err == 0)
-                                log_info("Inserted module '%s'", kmod_module_get_name(mod));
-                        else if (err == KMOD_PROBE_APPLY_BLACKLIST)
-                                log_info("Module '%s' is blacklisted", kmod_module_get_name(mod));
-                        else {
-                                assert(err < 0);
-
-                                log_full_errno(err == ENODEV ? LOG_NOTICE :
-                                               err == ENOENT ? LOG_WARNING :
-                                                               LOG_ERR,
-                                               err,
-                                               "Failed to insert '%s': %m",
-                                               kmod_module_get_name(mod));
-                                if (!IN_SET(err, ENODEV, ENOENT))
-                                        r = err;
-                        }
-                }
-        }
-
-        return r;
-}
-
 static int apply_file(struct kmod_ctx *ctx, const char *path, bool ignore_enoent) {
         _cleanup_fclose_ FILE *f = NULL;
         int r;
@@ -169,7 +92,7 @@ static int apply_file(struct kmod_ctx *ctx, const char *path, bool ignore_enoent
                 if (strchr(COMMENTS "\n", *l))
                         continue;
 
-                k = load_module(ctx, l);
+                k = module_load_and_warn(ctx, l, true);
                 if (k < 0 && r == 0)
                         r = k;
         }
@@ -266,7 +189,7 @@ int main(int argc, char *argv[]) {
                 char **fn, **i;
 
                 STRV_FOREACH(i, arg_proc_cmdline_modules) {
-                        k = load_module(ctx, *i);
+                        k = module_load_and_warn(ctx, *i, true);
                         if (k < 0 && r == 0)
                                 r = k;
                 }

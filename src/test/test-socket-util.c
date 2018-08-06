@@ -1,22 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd
 
-  Copyright 2014 Ronny Chevalier
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
+#include <sys/types.h>
+#include <unistd.h>
+#include <grp.h>
 
 #include "alloc-util.h"
 #include "async.h"
@@ -24,6 +10,7 @@
 #include "in-addr-util.h"
 #include "log.h"
 #include "macro.h"
+#include "process-util.h"
 #include "socket-util.h"
 #include "string-util.h"
 #include "util.h"
@@ -113,6 +100,19 @@ static void test_socket_address_parse_netlink(void) {
         assert_se(socket_address_parse_netlink(&a, "route 10") >= 0);
         assert_se(a.sockaddr.sa.sa_family == AF_NETLINK);
         assert_se(a.protocol == NETLINK_ROUTE);
+
+        /* With spaces and tabs */
+        assert_se(socket_address_parse_netlink(&a, " kobject-uevent ") >= 0);
+        assert_se(socket_address_parse_netlink(&a, " \t kobject-uevent \t 10 \t") >= 0);
+        assert_se(a.sockaddr.sa.sa_family == AF_NETLINK);
+        assert_se(a.protocol == NETLINK_KOBJECT_UEVENT);
+
+        assert_se(socket_address_parse_netlink(&a, "kobject-uevent\t10") >= 0);
+        assert_se(a.sockaddr.sa.sa_family == AF_NETLINK);
+        assert_se(a.protocol == NETLINK_KOBJECT_UEVENT);
+
+        /* oss-fuzz #6884 */
+        assert_se(socket_address_parse_netlink(&a, "\xff") < 0);
 }
 
 static void test_socket_address_equal(void) {
@@ -355,58 +355,6 @@ static void test_in_addr_ifindex_from_string_auto(void) {
         assert_se(in_addr_ifindex_from_string_auto("fe80::19%thisinterfacecantexist", &family, &ua, &ifindex) == -ENODEV);
 }
 
-static void *connect_thread(void *arg) {
-        union sockaddr_union *sa = arg;
-        _cleanup_close_ int fd = -1;
-
-        fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-        assert_se(fd >= 0);
-
-        assert_se(connect(fd, &sa->sa, sizeof(sa->in)) == 0);
-
-        return NULL;
-}
-
-static void test_nameinfo_pretty(void) {
-        _cleanup_free_ char *stdin_name = NULL, *localhost = NULL;
-
-        union sockaddr_union s = {
-                .in.sin_family = AF_INET,
-                .in.sin_port = 0,
-                .in.sin_addr.s_addr = htobe32(INADDR_ANY),
-        };
-        int r;
-
-        union sockaddr_union c = {};
-        socklen_t slen = sizeof(c.in), clen = sizeof(c.in);
-
-        _cleanup_close_ int sfd = -1, cfd = -1;
-        r = getnameinfo_pretty(STDIN_FILENO, &stdin_name);
-        log_info_errno(r, "No connection remote: %m");
-
-        assert_se(r < 0);
-
-        sfd = socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, 0);
-        assert_se(sfd >= 0);
-
-        assert_se(bind(sfd, &s.sa, sizeof(s.in)) == 0);
-
-        /* find out the port number */
-        assert_se(getsockname(sfd, &s.sa, &slen) == 0);
-
-        assert_se(listen(sfd, 1) == 0);
-
-        assert_se(asynchronous_job(connect_thread, &s) == 0);
-
-        log_debug("Accepting new connection on fd:%d", sfd);
-        cfd = accept4(sfd, &c.sa, &clen, SOCK_CLOEXEC);
-        assert_se(cfd >= 0);
-
-        r = getnameinfo_pretty(cfd, &localhost);
-        log_info("Connection from %s", localhost);
-        assert_se(r == 0);
-}
-
 static void test_sockaddr_equal(void) {
         union sockaddr_union a = {
                 .in.sin_family = AF_INET,
@@ -474,6 +422,68 @@ static void test_in_addr_is_multicast(void) {
         assert_se(in_addr_is_multicast(f, &b) == 0);
 }
 
+static void test_getpeercred_getpeergroups(void) {
+        int r;
+
+        r = safe_fork("(getpeercred)", FORK_DEATHSIG|FORK_LOG|FORK_WAIT, NULL);
+        assert_se(r >= 0);
+
+        if (r == 0) {
+                static const gid_t gids[] = { 3, 4, 5, 6, 7 };
+                gid_t *test_gids;
+                _cleanup_free_ gid_t *peer_groups = NULL;
+                size_t n_test_gids;
+                uid_t test_uid;
+                gid_t test_gid;
+                struct ucred ucred;
+                int pair[2];
+
+                if (geteuid() == 0) {
+                        test_uid = 1;
+                        test_gid = 2;
+                        test_gids = (gid_t*) gids;
+                        n_test_gids = ELEMENTSOF(gids);
+
+                        assert_se(setgroups(n_test_gids, test_gids) >= 0);
+                        assert_se(setresgid(test_gid, test_gid, test_gid) >= 0);
+                        assert_se(setresuid(test_uid, test_uid, test_uid) >= 0);
+
+                } else {
+                        long ngroups_max;
+
+                        test_uid = getuid();
+                        test_gid = getgid();
+
+                        ngroups_max = sysconf(_SC_NGROUPS_MAX);
+                        assert(ngroups_max > 0);
+
+                        test_gids = newa(gid_t, ngroups_max);
+
+                        r = getgroups(ngroups_max, test_gids);
+                        assert_se(r >= 0);
+                        n_test_gids = (size_t) r;
+                }
+
+                assert_se(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) >= 0);
+
+                assert_se(getpeercred(pair[0], &ucred) >= 0);
+
+                assert_se(ucred.uid == test_uid);
+                assert_se(ucred.gid == test_gid);
+                assert_se(ucred.pid == getpid_cached());
+
+                r = getpeergroups(pair[0], &peer_groups);
+                assert_se(r >= 0 || IN_SET(r, -EOPNOTSUPP, -ENOPROTOOPT));
+
+                if (r >= 0) {
+                        assert_se((size_t) r == n_test_gids);
+                        assert_se(memcmp(peer_groups, test_gids, sizeof(gid_t) * n_test_gids) == 0);
+                }
+
+                safe_close_pair(pair);
+        }
+}
+
 int main(int argc, char *argv[]) {
 
         log_set_max_level(LOG_DEBUG);
@@ -494,13 +504,13 @@ int main(int argc, char *argv[]) {
         test_in_addr_ifindex_to_string();
         test_in_addr_ifindex_from_string_auto();
 
-        test_nameinfo_pretty();
-
         test_sockaddr_equal();
 
         test_sockaddr_un_len();
 
         test_in_addr_is_multicast();
+
+        test_getpeercred_getpeergroups();
 
         return 0;
 }

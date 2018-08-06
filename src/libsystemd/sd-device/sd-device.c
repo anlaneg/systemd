@@ -1,23 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2008-2012 Kay Sievers <kay@vrfy.org>
-  Copyright 2014 Tom Gundersen <teg@jklm.no>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
 
 #include <ctype.h>
 #include <net/if.h>
@@ -46,7 +27,7 @@
 #include "util.h"
 
 int device_new_aux(sd_device **ret) {
-        _cleanup_(sd_device_unrefp) sd_device *device = NULL;
+        sd_device *device = NULL;
 
         assert(ret);
 
@@ -58,7 +39,6 @@ int device_new_aux(sd_device **ret) {
         device->watch_handle = -1;
 
         *ret = device;
-        device = NULL;
 
         return 0;
 }
@@ -166,23 +146,33 @@ int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
         }
 
         if (verify) {
-                r = readlink_and_canonicalize(_syspath, NULL, &syspath);
+                r = chase_symlinks(_syspath, NULL, 0, &syspath);
                 if (r == -ENOENT)
-                        /* the device does not exist (any more?) */
-                        return -ENODEV;
-                else if (r == -EINVAL) {
-                        /* not a symlink */
-                        syspath = canonicalize_file_name(_syspath);
-                        if (!syspath) {
-                                if (errno == ENOENT)
-                                        /* the device does not exist (any more?) */
-                                        return -ENODEV;
+                        return -ENODEV; /* the device does not exist (any more?) */
+                if (r < 0)
+                        return log_debug_errno(r, "sd-device: could not get target of '%s': %m", _syspath);
 
-                                return log_debug_errno(errno, "sd-device: could not canonicalize '%s': %m", _syspath);
+                if (!path_startswith(syspath, "/sys")) {
+                        _cleanup_free_ char *real_sys = NULL, *new_syspath = NULL;
+                        char *p;
+
+                        /* /sys is a symlink to somewhere sysfs is mounted on? In that case, we convert the path to real sysfs to "/sys". */
+                        r = chase_symlinks("/sys", NULL, 0, &real_sys);
+                        if (r < 0)
+                                return log_debug_errno(r, "sd-device: could not chase symlink /sys: %m");
+
+                        p = path_startswith(syspath, real_sys);
+                        if (!p) {
+                                log_debug("sd-device: canonicalized path '%s' does not starts with sysfs mount point '%s'", syspath, real_sys);
+                                return -ENODEV;
                         }
-                } else if (r < 0) {
-                        log_debug_errno(r, "sd-device: could not get target of '%s': %m", _syspath);
-                        return r;
+
+                        new_syspath = strjoin("/sys/", p);
+                        if (!new_syspath)
+                                return log_oom();
+
+                        free_and_replace(syspath, new_syspath);
+                        path_simplify(syspath, false);
                 }
 
                 if (path_startswith(syspath,  "/sys/devices/")) {
@@ -237,8 +227,7 @@ _public_ int sd_device_new_from_syspath(sd_device **ret, const char *syspath) {
         if (r < 0)
                 return r;
 
-        *ret = device;
-        device = NULL;
+        *ret = TAKE_PTR(device);
 
         return 0;
 }
@@ -649,8 +638,7 @@ _public_ int sd_device_new_from_device_id(sd_device **ret, const char *id) {
                 if (ifr.ifr_ifindex != ifindex)
                         return -ENODEV;
 
-                *ret = device;
-                device = NULL;
+                *ret = TAKE_PTR(device);
 
                 return 0;
         }
@@ -659,7 +647,7 @@ _public_ int sd_device_new_from_device_id(sd_device **ret, const char *id) {
                 char subsys[PATH_MAX];
                 char *sysname;
 
-                (void)strscpy(subsys, sizeof(subsys), id + 1);
+                (void) strscpy(subsys, sizeof(subsys), id + 1);
                 sysname = strchr(subsys, ':');
                 if (!sysname)
                         return -EINVAL;
@@ -729,7 +717,7 @@ _public_ int sd_device_get_parent(sd_device *child, sd_device **ret) {
         if (!child->parent_set) {
                 child->parent_set = true;
 
-                (void)device_new_from_child(&child->parent, child);
+                (void) device_new_from_child(&child->parent, child);
         }
 
         if (!child->parent)
@@ -876,12 +864,12 @@ _public_ int sd_device_get_parent_with_subsystem_devtype(sd_device *child, const
                 const char *parent_subsystem = NULL;
                 const char *parent_devtype = NULL;
 
-                (void)sd_device_get_subsystem(parent, &parent_subsystem);
+                (void) sd_device_get_subsystem(parent, &parent_subsystem);
                 if (streq_ptr(parent_subsystem, subsystem)) {
                         if (!devtype)
                                 break;
 
-                        (void)sd_device_get_devtype(parent, &parent_devtype);
+                        (void) sd_device_get_devtype(parent, &parent_devtype);
                         if (streq_ptr(parent_devtype, devtype))
                                 break;
                 }
@@ -1284,8 +1272,7 @@ int device_get_id_filename(sd_device *device, const char **ret) {
                         }
                 }
 
-                device->id_filename = id;
-                id = NULL;
+                device->id_filename = TAKE_PTR(id);
         }
 
         *ret = device->id_filename;
@@ -1824,8 +1811,7 @@ _public_ int sd_device_get_sysattr_value(sd_device *device, const char *sysattr,
         if (r < 0)
                 return r;
 
-        *_value = value;
-        value = NULL;
+        *_value = TAKE_PTR(value);
 
         return 0;
 }

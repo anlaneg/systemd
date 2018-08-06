@@ -1,25 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
-/***
-  This file is part of systemd.
-
-  Copyright 2014 Tom Gundersen <teg@jklm.no>
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
-
 #include "sd-event.h"
 #include "sd-netlink.h"
 #include "sd-network.h"
@@ -42,12 +23,19 @@ typedef struct Manager Manager;
 #define MANAGER_SEARCH_DOMAINS_MAX 32
 #define MANAGER_DNS_SERVERS_MAX 32
 
+typedef struct EtcHosts {
+        Hashmap *by_address;
+        Hashmap *by_name;
+        Set *no_address;
+} EtcHosts;
+
 struct Manager {
         sd_event *event;
 
         ResolveSupport llmnr_support;
         ResolveSupport mdns_support;
         DnssecMode dnssec_mode;
+        DnsOverTlsMode dns_over_tls_mode;
         bool enable_cache;
         DnsStubListenerMode dns_stub_listener_mode;
 
@@ -110,7 +98,6 @@ struct Manager {
 
         /* dbus */
         sd_bus *bus;
-        sd_event_source *bus_retry_event_source;
 
         /* The hostname we publish on LLMNR and mDNS */
         char *full_hostname;
@@ -125,9 +112,6 @@ struct Manager {
         int hostname_fd;
         sd_event_source *hostname_event_source;
 
-        /* Watch for system suspends */
-        sd_bus_slot *prepare_for_sleep_slot;
-
         sd_event_source *sigusr1_event_source;
         sd_event_source *sigusr2_event_source;
         sd_event_source *sigrtmin1_event_source;
@@ -136,9 +120,9 @@ struct Manager {
         unsigned n_dnssec_verdict[_DNSSEC_VERDICT_MAX];
 
         /* Data from /etc/hosts */
-        Set* etc_hosts_by_address;
-        Hashmap* etc_hosts_by_name;
+        EtcHosts etc_hosts;
         usec_t etc_hosts_last, etc_hosts_mtime;
+        bool read_etc_hosts;
 
         /* Local DNS stub on 127.0.0.53:53 */
         int dns_stub_udp_fd;
@@ -185,6 +169,8 @@ int manager_compile_search_domains(Manager *m, OrderedSet **domains, int filter_
 
 DnssecMode manager_get_dnssec_mode(Manager *m);
 bool manager_dnssec_supported(Manager *m);
+
+DnsOverTlsMode manager_get_dns_over_tls_mode(Manager *m);
 
 void manager_dnssec_verdict(Manager *m, DnssecVerdict verdict, const DnsResourceKey *key);
 

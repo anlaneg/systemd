@@ -11,13 +11,12 @@
  * number of missing IDs otherwise.
  * A negative number is returned on error.
  *
- * Copyright(C) 2007, Hannes Reinecke <hare@suse.de>
+ * Copyright © 2007, Hannes Reinecke <hare@suse.de>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 2 of the License, or
  * (at your option) any later version.
- *
  */
 
 #include <errno.h>
@@ -58,9 +57,9 @@ static inline struct _mate *node_to_mate(struct udev_list_node *node)
         return container_of(node, struct _mate, node);
 }
 
-noreturn static void sig_alrm(int signo)
+_noreturn_ static void sig_alrm(int signo)
 {
-        exit(4);
+        _exit(4);
 }
 
 static void usage(void)
@@ -94,7 +93,7 @@ static int prepare(char *dir, char *filename)
         if (r < 0 && errno != EEXIST)
                 return -errno;
 
-        xsprintf(buf, "%s/%s", dir, filename);
+        snprintf(buf, sizeof buf, "%s/%s", dir, filename);
 
         fd = open(buf, O_RDWR|O_CREAT|O_CLOEXEC, S_IRUSR|S_IWUSR);
         if (fd < 0)
