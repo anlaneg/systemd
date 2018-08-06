@@ -209,6 +209,7 @@ static int sd_is_socket_internal(int fd, int type, int listening) {
                 int other_type = 0;
                 socklen_t l = sizeof(other_type);
 
+                //取fd对应的socket类型
                 if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &other_type, &l) < 0)
                         return -errno;
 

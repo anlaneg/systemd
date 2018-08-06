@@ -32,4 +32,7 @@
 /mkosi.builddir/
 /mkosi.output/
 /tags
+.cproject
+.project
+.settings/
 __pycache__/

@@ -102,6 +102,7 @@ char **strv_copy(char * const *l) {
         return r;
 }
 
+//计算字符串vector长度
 size_t strv_length(char * const *l) {
         size_t n = 0;
 
@@ -109,7 +110,7 @@ size_t strv_length(char * const *l) {
                 return 0;
 
         for (; *l; l++)
-                n++;
+                n++;//跳指针
 
         return n;
 }
@@ -373,6 +374,7 @@ char *strv_join(char **l, const char *separator) {
         return r;
 }
 
+//将字符串value指针，存放到*l指向的字符串指针数组中
 int strv_push(char ***l, char *value) {
         char **c;
         size_t n, m;
@@ -383,10 +385,12 @@ int strv_push(char ***l, char *value) {
         n = strv_length(*l);
 
         /* Increase and check for overflow */
+        //防字符串数组过长
         m = n + 2;
         if (m < n)
                 return -ENOMEM;
 
+        //增*l长度为m，并将value指针存入*l中
         c = reallocarray(*l, m, sizeof(char*));
         if (!c)
                 return -ENOMEM;
@@ -459,10 +463,11 @@ int strv_insert(char ***l, size_t position, char *value) {
         return 0;
 }
 
+//将value填充到l指向的字符串数组中
 int strv_consume(char ***l, char *value) {
         int r;
 
-        r = strv_push(l, value);
+        r = strv_push(l, value);//将value填充到l指向的字符串数组中
         if (r < 0)
                 free(value);
 
@@ -497,7 +502,7 @@ int strv_extend(char ***l, const char *value) {
         if (!value)
                 return 0;
 
-        v = strdup(value);
+        v = strdup(value);//实现value的一个副本
         if (!v)
                 return -ENOMEM;
 
@@ -644,6 +649,7 @@ char **strv_split_nulstr(const char *s) {
         const char *i;
         char **r = NULL;
 
+        //遍历s中所有字符串i，将其指针添加到r指向的字符串数组中
         NULSTR_FOREACH(i, s)
                 if (strv_extend(&r, i) < 0) {
                         strv_free(r);
@@ -651,7 +657,7 @@ char **strv_split_nulstr(const char *s) {
                 }
 
         if (!r)
-                return strv_new(NULL, NULL);
+                return strv_new(NULL, NULL);//构造空数组
 
         return r;
 }

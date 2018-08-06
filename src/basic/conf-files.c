@@ -291,6 +291,7 @@ int conf_files_list_nulstr(char ***strv, const char *suffix, const char *root, u
 
         assert(strv);
 
+        //将dirs构造为字符串指针数组
         d = strv_split_nulstr(dirs);
         if (!d)
                 return -ENOMEM;

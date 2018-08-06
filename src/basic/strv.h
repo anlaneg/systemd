@@ -62,6 +62,7 @@ static inline const char* STRV_IFNOTNULL(const char *x) {
         return x ? x : STRV_IGNORE;
 }
 
+//检查字符串vector是否为空
 static inline bool strv_isempty(char * const *l) {
         return !l || !*l;
 }

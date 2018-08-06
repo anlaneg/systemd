@@ -68,6 +68,7 @@ _alloc_(2, 3) static inline void *reallocarray(void *p, size_t need, size_t size
         if (size_multiply_overflow(size, need))
                 return NULL;
 
+        //增大p指针的指向的空间长度为size*need
         return realloc(p, size * need);
 }
 #endif

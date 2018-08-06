@@ -29,6 +29,7 @@
 #include "time-util.h"
 #include "utf8.h"
 
+//p指向的路径是否为绝对地址
 bool path_is_absolute(const char *p) {
         return p[0] == '/';
 }
@@ -244,10 +245,12 @@ char **path_strv_resolve(char **l, const char *root) {
          * the path. This works in place and won't rollback any
          * changes on failure. */
 
+        //遍历字符串vector中每一个元素s
         STRV_FOREACH(s, l) {
                 _cleanup_free_ char *orig = NULL;
                 char *t, *u;
 
+                //每一个元素必须为绝对路径
                 if (!path_is_absolute(*s)) {
                         free(*s);
                         continue;
@@ -316,7 +319,7 @@ char **path_strv_resolve(char **l, const char *root) {
 char **path_strv_resolve_uniq(char **l, const char *root) {
 
         if (strv_isempty(l))
-                return l;
+                return l;//如果为空，则返回空
 
         if (!path_strv_resolve(l, root))
                 return NULL;

@@ -640,8 +640,10 @@ static int config_parse_crash_chvt(
         return 0;
 }
 
+//完成配置文件解析
 static int parse_config_file(void) {
 
+	//指定配置文件中不同字段如何解析
         const ConfigTableItem items[] = {
                 { "Manager", "LogLevel",                  config_parse_level2,           0, NULL                                   },
                 { "Manager", "LogTarget",                 config_parse_target,           0, NULL                                   },
@@ -703,10 +705,12 @@ static int parse_config_file(void) {
 
         const char *fn, *conf_dirs_nulstr;
 
+        //定位对应的配置文件，一般非pid=1,则采用/etc/systemd/user.conf文件
         fn = arg_system ?
                 PKGSYSCONFDIR "/system.conf" :
                 PKGSYSCONFDIR "/user.conf";
 
+        //这段代码很有意思，通过编译器来构造字符串数组
         conf_dirs_nulstr = arg_system ?
                 CONF_PATHS_NULSTR("systemd/system.conf.d") :
                 CONF_PATHS_NULSTR("systemd/user.conf.d");
@@ -901,7 +905,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_USER:
-                        arg_system = false;
+                        arg_system = false;//Run a user instance
                         break;
 
                 case ARG_TEST:
@@ -1953,6 +1957,7 @@ static int load_configuration(int argc, char **argv, const char **ret_error_mess
 
         arg_default_tasks_max = system_tasks_max_scale(DEFAULT_TASKS_MAX_PERCENTAGE, 100U);
 
+        //解析配置文件
         r = parse_config_file();
         if (r < 0) {
                 *ret_error_message = "Failed to parse config file";
@@ -1976,6 +1981,7 @@ static int load_configuration(int argc, char **argv, const char **ret_error_mess
 
         /* Initialize default unit */
         if (!arg_default_unit) {
+        		//如果未指定default_unit,则使用default.target
                 arg_default_unit = strdup(SPECIAL_DEFAULT_TARGET);
                 if (!arg_default_unit) {
                         *ret_error_message = "Failed to set default unit";

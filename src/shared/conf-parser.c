@@ -450,8 +450,8 @@ static int config_parse_many_files(
 
 /* Parse each config file in the directories specified as nulstr. */
 int config_parse_many_nulstr(
-                const char *conf_file,
-                const char *conf_file_dirs,
+                const char *conf_file,//配置文件
+                const char *conf_file_dirs,//配置文件所在目录集合（多个字符串连续存放）
                 const char *sections,
                 ConfigItemLookup lookup,
                 const void *table,
@@ -461,6 +461,7 @@ int config_parse_many_nulstr(
         _cleanup_strv_free_ char **files = NULL;
         int r;
 
+        //列出conf_file_dirs目录下所有.conf文件
         r = conf_files_list_nulstr(&files, ".conf", NULL, 0, conf_file_dirs);
         if (r < 0)
                 return r;
