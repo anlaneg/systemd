@@ -34,6 +34,7 @@ int strcmp_ptr(const char *a, const char *b) {
         return 0;
 }
 
+//检查s的后缀是否为postfix
 char* endswith(const char *s, const char *postfix) {
         size_t sl, pl;
 
@@ -47,7 +48,7 @@ char* endswith(const char *s, const char *postfix) {
                 return (char*) s + sl;
 
         if (sl < pl)
-                return NULL;
+                return NULL;//sl比pattern要小，无法匹配
 
         if (memcmp(s + sl - pl, postfix, pl) != 0)
                 return NULL;

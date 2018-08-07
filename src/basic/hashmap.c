@@ -818,6 +818,7 @@ static struct HashmapBase *hashmap_base_new(const struct hash_ops *hash_ops, enu
         return h;
 }
 
+//创建hashmap
 Hashmap *internal_hashmap_new(const struct hash_ops *hash_ops  HASHMAP_DEBUG_PARAMS) {
         return (Hashmap*)        hashmap_base_new(hash_ops, HASHMAP_TYPE_PLAIN HASHMAP_DEBUG_PASS_ARGS);
 }

@@ -190,6 +190,7 @@ struct udev_monitor *udev_monitor_new_from_netlink_fd(struct udev *udev, const c
                 return NULL;
 
         if (fd < 0) {
+        		//创建netlink socket,监听kernel的kobj事件
                 udev_monitor->sock = socket(PF_NETLINK, SOCK_RAW|SOCK_CLOEXEC|SOCK_NONBLOCK, NETLINK_KOBJECT_UEVENT);
                 if (udev_monitor->sock < 0) {
                         log_debug_errno(errno, "error getting socket: %m");
@@ -597,6 +598,7 @@ retry:
         smsg.msg_name = &snl;
         smsg.msg_namelen = sizeof(snl);
 
+        //自socket中收取消息
         buflen = recvmsg(udev_monitor->sock, &smsg, 0);
         if (buflen < 0) {
                 if (errno != EINTR)

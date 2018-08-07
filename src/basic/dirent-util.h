@@ -15,6 +15,7 @@ bool dirent_is_file_with_suffix(const struct dirent *de, const char *suffix) _pu
 
 struct dirent* readdir_no_dot(DIR *dirp);
 
+//遍历d目录下所有文件，排除掉hidden_or_backup_file
 #define FOREACH_DIRENT(de, d, on_error)                                 \
         for (errno = 0, de = readdir(d);; errno = 0, de = readdir(d))   \
                 if (!de) {                                              \

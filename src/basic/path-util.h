@@ -111,10 +111,11 @@ char *prefix_root(const char *root, const char *path);
                 char *_p, *_n;                                          \
                 size_t _l;                                              \
                 while (_path[0] == '/' && _path[1] == '/')              \
-                        _path ++;                                       \
+                        _path ++;/*防止出现多个'/'*/                      \
                 if (empty_or_root(_root))                               \
-                        _ret = _path;                                   \
+                        _ret = _path;/*root为空，仅_path生效*/            \
                 else {                                                  \
+                	    /*合并_root,_path生成新的路径*/                    \
                         _l = strlen(_root) + 1 + strlen(_path) + 1;     \
                         _n = alloca(_l);                                \
                         _p = stpcpy(_n, _root);                         \

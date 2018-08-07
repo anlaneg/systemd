@@ -29,7 +29,7 @@
  * Opaque object representing the library context.
  */
 struct udev {
-        int refcount;
+        int refcount;//引用计数
         void (*log_fn)(struct udev *udev,
                        int priority, const char *file, int line, const char *fn,
                        const char *format, va_list args);
@@ -74,6 +74,7 @@ _public_ void udev_set_userdata(struct udev *udev, void *userdata) {
  *
  * Returns: a new udev library context
  **/
+//新建udev,并置其引用计数为1
 _public_ struct udev *udev_new(void) {
         struct udev *udev;
 

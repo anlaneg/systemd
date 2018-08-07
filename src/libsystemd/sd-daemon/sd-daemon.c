@@ -49,6 +49,7 @@ _public_ int sd_listen_fds(int unset_environment) {
                 goto finish;
         }
 
+        //解析pid
         r = parse_pid(e, &pid);
         if (r < 0)
                 goto finish;

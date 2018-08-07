@@ -40,6 +40,7 @@ static int files_add(
         assert((flags & CONF_FILES_FILTER_MASKED) == 0 || masked);
         assert(path);
 
+        //生成路径
         dirpath = prefix_roota(root, path);
 
         dir = opendir(dirpath);
@@ -50,11 +51,13 @@ static int files_add(
                 return log_debug_errno(errno, "Failed to open directory '%s': %m", dirpath);
         }
 
+        //遍历dir下所有文件
         FOREACH_DIRENT(de, dir, return -errno) {
                 struct stat st;
                 char *p, *key;
 
                 /* Does this match the suffix? */
+                //后缀不相等
                 if (suffix && !endswith(de->d_name, suffix))
                         continue;
 
@@ -154,6 +157,7 @@ static int conf_files_list_strv_internal(char ***strv, const char *suffix, const
         if (!path_strv_resolve_uniq(dirs, root))
                 return -ENOMEM;
 
+        //创建hashmap
         fh = hashmap_new(&path_hash_ops);
         if (!fh)
                 return -ENOMEM;
@@ -164,6 +168,7 @@ static int conf_files_list_strv_internal(char ***strv, const char *suffix, const
                         return -ENOMEM;
         }
 
+        //遍历每个目录，将找到的文件存放fh中
         STRV_FOREACH(p, dirs) {
                 r = files_add(fh, masked, suffix, root, flags, *p);
                 if (r == -ENOMEM)
@@ -172,6 +177,7 @@ static int conf_files_list_strv_internal(char ***strv, const char *suffix, const
                         log_debug_errno(r, "Failed to search for files in %s, ignoring: %m", *p);
         }
 
+        //获取hash表中所有value,并编成string vector
         files = hashmap_get_strv(fh);
         if (!files)
                 return -ENOMEM;
@@ -258,6 +264,8 @@ int conf_files_insert_nulstr(char ***strv, const char *root, const char *dirs, c
         return conf_files_insert(strv, root, d, path);
 }
 
+//在dirs指定的目录中查找所有以suffix结尾的文件，将其存放在strv中
+//root是dirs的路径前缀
 int conf_files_list_strv(char ***strv, const char *suffix, const char *root, unsigned flags, const char* const* dirs) {
         _cleanup_strv_free_ char **copy = NULL;
 

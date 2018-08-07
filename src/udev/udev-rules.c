@@ -999,6 +999,7 @@ static int sort_token(struct udev_rules *rules, struct rule_tmp *rule_tmp) {
 #define LOG_RULE_DEBUG(fmt, ...) log_debug("%s:%u: " fmt, filename, lineno, ##__VA_ARGS__)
 #define LOG_AND_RETURN(fmt, ...) { LOG_RULE_ERROR(fmt, __VA_ARGS__); return; }
 
+//解析udev规则文件
 static void add_rule(struct udev_rules *rules, char *line,
                      const char *filename, unsigned int filename_off, unsigned int lineno) {
         char *linepos;
@@ -1430,6 +1431,7 @@ static void add_rule(struct udev_rules *rules, char *line,
                 LOG_RULE_ERROR("failed to add rule token");
 }
 
+//解析rule配置文件
 static int parse_file(struct udev_rules *rules, const char *filename) {
         _cleanup_fclose_ FILE *f = NULL;
         unsigned int first_token;
@@ -1455,24 +1457,29 @@ static int parse_file(struct udev_rules *rules, const char *filename) {
         first_token = rules->token_cur;
         filename_off = rules_add_string(rules, filename);
 
+        //读取一行内容
         while (fgets(line, sizeof(line), f) != NULL) {
                 char *key;
                 size_t len;
 
                 /* skip whitespace */
+                //跳达行首的空白符
                 line_nr++;
                 key = line;
                 while (isspace(key[0]))
                         key++;
 
                 /* comment */
+                //跳过注释行
                 if (key[0] == '#')
                         continue;
 
+                //跳过小于3的行
                 len = strlen(line);
                 if (len < 3)
                         continue;
 
+                //遇到续行符，继续读取下一行
                 /* continue reading if backslash+newline is found */
                 while (line[len-2] == '\\') {
                         if (fgets(&line[len-2], (sizeof(line)-len)+2, f) == NULL)
@@ -1483,10 +1490,12 @@ static int parse_file(struct udev_rules *rules, const char *filename) {
                         len = strlen(line);
                 }
 
+                //续行也不能超过行字符最大值
                 if (len+1 >= sizeof(line)) {
                         log_error("line too long '%s':%u, ignored", filename, line_nr);
                         continue;
                 }
+                //添加规则
                 add_rule(rules, key, filename, filename_off, line_nr);
         }
 
@@ -1539,8 +1548,10 @@ struct udev_rules *udev_rules_new(struct udev *udev, int resolve_names) {
 
         udev_rules_check_timestamp(rules);
 
+        //在rules_dirs目录中查找.rules结尾的文件
         r = conf_files_list_strv(&files, ".rules", NULL, 0, rules_dirs);
         if (r < 0) {
+        		//枚举配置文件失败
                 log_error_errno(r, "failed to enumerate rules files: %m");
                 return udev_rules_unref(rules);
         }
@@ -1552,6 +1563,7 @@ struct udev_rules *udev_rules_new(struct udev *udev, int resolve_names) {
         STRV_FOREACH(f, files)
                 rules_add_string(rules, *f);
 
+        //遍历每个规则文件，进行解析生成规则
         STRV_FOREACH(f, files)
                 parse_file(rules, *f);
 

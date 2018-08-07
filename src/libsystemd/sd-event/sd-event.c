@@ -3098,6 +3098,7 @@ static int source_dispatch(sd_event_source *s) {
         switch (s->type) {
 
         case SOURCE_IO:
+        		//发生io事件，触发io对应的回调
                 r = s->io.callback(s, s->io.fd, s->io.revents, s->userdata);
                 break;
 

@@ -29,6 +29,7 @@ int parse_boolean(const char *v) {
         return -EINVAL;
 }
 
+//将e解析为pid
 int parse_pid(const char *s, pid_t* ret_pid) {
         unsigned long ul = 0;
         pid_t pid;

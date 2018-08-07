@@ -1511,6 +1511,7 @@ static int manager_new(Manager **ret, int fd_ctrl, int fd_uevent, const char *cg
 
         udev_builtin_init(manager->udev);
 
+        //加载并解析udev规则文件
         manager->rules = udev_rules_new(manager->udev, arg_resolve_names);
         if (!manager->rules)
                 return log_error_errno(ENOMEM, "error reading rules");
@@ -1609,6 +1610,7 @@ static int run(int fd_ctrl, int fd_uevent, const char *cgroup) {
         _cleanup_(manager_freep) Manager *manager = NULL;
         int r;
 
+        //创建manager
         r = manager_new(&manager, fd_ctrl, fd_uevent, cgroup);
         if (r < 0) {
                 r = log_error_errno(r, "failed to allocate manager object: %m");
@@ -1697,6 +1699,7 @@ int main(int argc, char *argv[]) {
                 goto exit;
         }
 
+        //创建/run/udev目录
         r = mkdir_errno_wrapper("/run/udev", 0755);
         if (r < 0 && r != -EEXIST) {
                 log_error_errno(r, "could not create /run/udev: %m");
@@ -1724,6 +1727,7 @@ int main(int argc, char *argv[]) {
                 goto exit;
         }
 
+        //制作daemon
         if (arg_daemonize) {
                 pid_t pid;
 
