@@ -32,8 +32,8 @@
 
 int config_item_table_lookup(
                 const void *table,
-                const char *section,
-                const char *lvalue,
+                const char *section,//对应的段
+                const char *lvalue,//段下的key
                 ConfigParserCallback *func,
                 int *ltype,
                 void **data,
@@ -47,6 +47,7 @@ int config_item_table_lookup(
         assert(ltype);
         assert(data);
 
+        //查找表，通过不同的段名称，段下配置名称找到其对应的parse
         for (t = table; t->lvalue; t++) {
 
                 if (!streq(lvalue, t->lvalue))
@@ -177,6 +178,7 @@ static int parse_line(
         if (strchr(COMMENTS "\n", *l))
                 return 0;
 
+        //.include指令，用于实现文件包含，已被.d/目录方式替代
         include = first_word(l, ".include");
         if (include) {
                 _cleanup_free_ char *fn = NULL;
@@ -209,6 +211,7 @@ static int parse_line(
         if (!utf8_is_valid(l))
                 return log_syntax_invalid_utf8(unit, LOG_WARNING, filename, line, l);
 
+        //解析section
         if (*l == '[') {
                 size_t k;
                 char *n;
@@ -221,10 +224,12 @@ static int parse_line(
                         return -EBADMSG;
                 }
 
+                //提取section名称
                 n = strndup(l+1, k-2);
                 if (!n)
                         return -ENOMEM;
 
+                //检查sections中是否包含对应的n
                 if (sections && !nulstr_contains(sections, n)) {
 
                         if (!(flags & CONFIG_PARSE_RELAXED) && !startswith(n, "X-"))
@@ -243,6 +248,7 @@ static int parse_line(
                 return 0;
         }
 
+        //非section,但目前不存section下，说明存在一些选项不在了section下，报错
         if (sections && !*section) {
 
                 if (!(flags & CONFIG_PARSE_RELAXED) && !*section_ignored)
@@ -251,6 +257,7 @@ static int parse_line(
                 return 0;
         }
 
+        //找到key,value形式配置
         e = strchr(l, '=');
         if (!e) {
                 log_syntax(unit, LOG_WARNING, filename, line, 0, "Missing '='.");
@@ -267,8 +274,8 @@ static int parse_line(
                                table,
                                *section,
                                *section_line,
-                               strstrip(l),
-                               strstrip(e),
+                               strstrip(l),//此行表示的key
+                               strstrip(e),//此行表示的value
                                flags,
                                userdata);
 }
@@ -292,6 +299,7 @@ int config_parse(const char *unit,
         assert(filename);
         assert(lookup);
 
+        //如果未指定FILE,则打开filename做为FILE
         if (!f) {
                 f = ours = fopen(filename, "re");
                 if (!f) {
@@ -304,6 +312,7 @@ int config_parse(const char *unit,
                 }
         }
 
+        //权限检查
         fd_warn_permissions(filename, fileno(f));
 
         for (;;) {
@@ -311,6 +320,7 @@ int config_parse(const char *unit,
                 bool escaped = false;
                 char *l, *p, *e;
 
+                //读取文件
                 r = read_line(f, LONG_LINE_MAX, &buf);
                 if (r == 0)
                         break;
@@ -377,6 +387,7 @@ int config_parse(const char *unit,
                         continue;
                 }
 
+                //解析单行数据
                 r = parse_line(unit,
                                filename,
                                ++line,
@@ -433,12 +444,14 @@ static int config_parse_many_files(
         char **fn;
         int r;
 
+        //有配置文件，先解析配置文件
         if (conf_file) {
                 r = config_parse(NULL, conf_file, NULL, sections, lookup, table, flags, userdata);
                 if (r < 0)
                         return r;
         }
 
+        //再解析其它配置文件
         STRV_FOREACH(fn, files) {
                 r = config_parse(NULL, *fn, NULL, sections, lookup, table, flags, userdata);
                 if (r < 0)
