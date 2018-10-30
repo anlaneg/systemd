@@ -730,20 +730,28 @@ static int parse_unix_address(sd_bus *b, const char **p, char **guid) {
 
         if (path) {
                 l = strlen(path);
-                if (l > sizeof(b->sockaddr.un.sun_path))
+                if (l >= sizeof(b->sockaddr.un.sun_path)) /* We insist on NUL termination */
                         return -E2BIG;
 
-                b->sockaddr.un.sun_family = AF_UNIX;
-                strncpy(b->sockaddr.un.sun_path, path, sizeof(b->sockaddr.un.sun_path));
-                b->sockaddr_size = offsetof(struct sockaddr_un, sun_path) + l;
-        } else if (abstract) {
+                b->sockaddr.un = (struct sockaddr_un) {
+                        .sun_family = AF_UNIX,
+                };
+
+                memcpy(b->sockaddr.un.sun_path, path, l);
+                b->sockaddr_size = offsetof(struct sockaddr_un, sun_path) + l + 1;
+
+        } else {
+                assert(abstract);
+
                 l = strlen(abstract);
-                if (l > sizeof(b->sockaddr.un.sun_path) - 1)
+                if (l >= sizeof(b->sockaddr.un.sun_path) - 1) /* We insist on NUL termination */
                         return -E2BIG;
 
-                b->sockaddr.un.sun_family = AF_UNIX;
-                b->sockaddr.un.sun_path[0] = 0;
-                strncpy(b->sockaddr.un.sun_path+1, abstract, sizeof(b->sockaddr.un.sun_path)-1);
+                b->sockaddr.un = (struct sockaddr_un) {
+                        .sun_family = AF_UNIX,
+                };
+
+                memcpy(b->sockaddr.un.sun_path+1, abstract, l);
                 b->sockaddr_size = offsetof(struct sockaddr_un, sun_path) + 1 + l;
         }
 
@@ -964,9 +972,11 @@ static int parse_container_unix_address(sd_bus *b, const char **p, char **guid) 
         } else
                 b->nspid = 0;
 
-        b->sockaddr.un.sun_family = AF_UNIX;
-        /* Note that we use the old /var/run prefix here, to increase compatibility with really old containers */
-        strncpy(b->sockaddr.un.sun_path, "/var/run/dbus/system_bus_socket", sizeof(b->sockaddr.un.sun_path));
+        b->sockaddr.un = (struct sockaddr_un) {
+                .sun_family = AF_UNIX,
+                /* Note that we use the old /var/run prefix here, to increase compatibility with really old containers */
+                .sun_path = "/var/run/dbus/system_bus_socket",
+        };
         b->sockaddr_size = SOCKADDR_UN_LEN(b->sockaddr.un);
         b->is_local = false;
 
@@ -1357,38 +1367,88 @@ _public_ int sd_bus_open_user(sd_bus **ret) {
 
 int bus_set_address_system_remote(sd_bus *b, const char *host) {
         _cleanup_free_ char *e = NULL;
-        char *m = NULL, *c = NULL, *a;
+        char *m = NULL, *c = NULL, *a, *rbracket = NULL, *p = NULL;
 
         assert(b);
         assert(host);
 
-        /* Let's see if we shall enter some container */
-        m = strchr(host, ':');
-        if (m) {
-                m++;
+        /* Skip ":"s in ipv6 addresses */
+        if (*host == '[') {
+                char *t;
 
-                /* Let's make sure this is not a port of some kind,
-                 * and is a valid machine name. */
-                if (!in_charset(m, DIGITS) && machine_name_is_valid(m)) {
-                        char *t;
+                rbracket = strchr(host, ']');
+                if (!rbracket)
+                        return -EINVAL;
+                t = strndupa(host + 1, rbracket - host - 1);
+                e = bus_address_escape(t);
+                if (!e)
+                        return -ENOMEM;
+        } else if ((a = strchr(host, '@'))) {
+                if (*(a + 1) == '[') {
+                        _cleanup_free_ char *t = NULL;
 
-                        /* Cut out the host part */
-                        t = strndupa(host, m - host - 1);
+                        rbracket = strchr(a + 1, ']');
+                        if (!rbracket)
+                                return -EINVAL;
+                        t = new0(char, strlen(host));
+                        if (!t)
+                                return -ENOMEM;
+                        strncat(t, host, a - host + 1);
+                        strncat(t, a + 2, rbracket - a - 2);
                         e = bus_address_escape(t);
                         if (!e)
                                 return -ENOMEM;
+                } else if (*(a + 1) == '\0' || strchr(a + 1, '@'))
+                        return -EINVAL;
+        }
 
-                        c = strjoina(",argv5=--machine=", m);
+        /* Let's see if a port was given */
+        m = strchr(rbracket ? rbracket + 1 : host, ':');
+        if (m) {
+                char *t;
+                bool got_forward_slash = false;
+
+                p = m + 1;
+
+                t = strchr(p, '/');
+                if (t) {
+                        p = strndupa(p, t - p);
+                        got_forward_slash = true;
+                }
+
+                if (!in_charset(p, "0123456789") || *p == '\0') {
+                        if (!machine_name_is_valid(p) || got_forward_slash)
+                                return -EINVAL;
+
+                        m = TAKE_PTR(p);
+                        goto interpret_port_as_machine_old_syntax;
                 }
         }
 
+        /* Let's see if a machine was given */
+        m = strchr(rbracket ? rbracket + 1 : host, '/');
+        if (m) {
+                m++;
+interpret_port_as_machine_old_syntax:
+                /* Let's make sure this is not a port of some kind,
+                 * and is a valid machine name. */
+                if (!in_charset(m, "0123456789") && machine_name_is_valid(m))
+                        c = strjoina(",argv", p ? "7" : "5", "=--machine=", m);
+        }
+
         if (!e) {
-                e = bus_address_escape(host);
+                char *t;
+
+                t = strndupa(host, strcspn(host, ":/"));
+
+                e = bus_address_escape(t);
                 if (!e)
                         return -ENOMEM;
         }
 
-        a = strjoin("unixexec:path=ssh,argv1=-xT,argv2=--,argv3=", e, ",argv4=systemd-stdio-bridge", c);
+        a = strjoin("unixexec:path=ssh,argv1=-xT", p ? ",argv2=-p,argv3=" : "", strempty(p),
+                                ",argv", p ? "4" : "2", "=--,argv", p ? "5" : "3", "=", e,
+                                ",argv", p ? "6" : "4", "=systemd-stdio-bridge", c);
         if (!a)
                 return -ENOMEM;
 
@@ -1515,27 +1575,7 @@ void bus_enter_closing(sd_bus *bus) {
         bus_set_state(bus, BUS_CLOSING);
 }
 
-_public_ sd_bus *sd_bus_ref(sd_bus *bus) {
-        if (!bus)
-                return NULL;
-
-        assert_se(REFCNT_INC(bus->n_ref) >= 2);
-
-        return bus;
-}
-
-_public_ sd_bus *sd_bus_unref(sd_bus *bus) {
-        unsigned i;
-
-        if (!bus)
-                return NULL;
-
-        i = REFCNT_DEC(bus->n_ref);
-        if (i > 0)
-                return NULL;
-
-        return bus_free(bus);
-}
+DEFINE_PUBLIC_ATOMIC_REF_UNREF_FUNC(sd_bus, sd_bus, bus_free);
 
 _public_ int sd_bus_is_open(sd_bus *bus) {
         assert_return(bus, -EINVAL);
@@ -1913,13 +1953,7 @@ static int timeout_compare(const void *a, const void *b) {
         if (x->timeout_usec == 0 && y->timeout_usec != 0)
                 return 1;
 
-        if (x->timeout_usec < y->timeout_usec)
-                return -1;
-
-        if (x->timeout_usec > y->timeout_usec)
-                return 1;
-
-        return 0;
+        return CMP(x->timeout_usec, y->timeout_usec);
 }
 
 _public_ int sd_bus_call_async(

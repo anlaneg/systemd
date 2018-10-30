@@ -98,25 +98,8 @@ int dns_server_new(
         return 0;
 }
 
-DnsServer* dns_server_ref(DnsServer *s)  {
-        if (!s)
-                return NULL;
-
-        assert(s->n_ref > 0);
-        s->n_ref++;
-
-        return s;
-}
-
-DnsServer* dns_server_unref(DnsServer *s)  {
-        if (!s)
-                return NULL;
-
-        assert(s->n_ref > 0);
-        s->n_ref--;
-
-        if (s->n_ref > 0)
-                return NULL;
+static DnsServer* dns_server_free(DnsServer *s)  {
+        assert(s);
 
         dns_stream_unref(s->stream);
 
@@ -127,6 +110,8 @@ DnsServer* dns_server_unref(DnsServer *s)  {
         free(s->server_string);
         return mfree(s);
 }
+
+DEFINE_TRIVIAL_REF_UNREF_FUNC(DnsServer, dns_server, dns_server_free);
 
 void dns_server_unlink(DnsServer *s) {
         assert(s);
@@ -624,19 +609,17 @@ static int dns_server_compare_func(const void *a, const void *b) {
         const DnsServer *x = a, *y = b;
         int r;
 
-        if (x->family < y->family)
-                return -1;
-        if (x->family > y->family)
-                return 1;
+        r = CMP(x->family, y->family);
+        if (r != 0)
+                return r;
 
         r = memcmp(&x->address, &y->address, FAMILY_ADDRESS_SIZE(x->family));
         if (r != 0)
                 return r;
 
-        if (x->ifindex < y->ifindex)
-                return -1;
-        if (x->ifindex > y->ifindex)
-                return 1;
+        r = CMP(x->ifindex, y->ifindex);
+        if (r != 0)
+                return r;
 
         return 0;
 }

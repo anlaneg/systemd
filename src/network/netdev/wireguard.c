@@ -41,7 +41,7 @@ static WireguardPeer *wireguard_peer_new(Wireguard *w, unsigned section) {
 
 static int set_wireguard_interface(NetDev *netdev) {
         int r;
-        unsigned int i, j;
+        unsigned i, j;
         WireguardPeer *peer, *peer_start;
         WireguardIPmask *mask, *mask_start = NULL;
         _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *message = NULL;
@@ -107,7 +107,7 @@ static int set_wireguard_interface(NetDev *netdev) {
                                 if (r < 0)
                                         break;
 
-                                r = sd_netlink_message_append_u32(message, WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL, peer->persistent_keepalive_interval);
+                                r = sd_netlink_message_append_u16(message, WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL, peer->persistent_keepalive_interval);
                                 if (r < 0)
                                         break;
 

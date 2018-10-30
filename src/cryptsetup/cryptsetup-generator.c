@@ -4,6 +4,7 @@
 #include <stdio_ext.h>
 
 #include "alloc-util.h"
+#include "def.h"
 #include "dropin.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -24,6 +25,7 @@
 typedef struct crypto_device {
         char *uuid;
         char *keyfile;
+        char *keydev;
         char *name;
         char *options;
         bool create;
@@ -37,14 +39,71 @@ static Hashmap *arg_disks = NULL;
 static char *arg_default_options = NULL;
 static char *arg_default_keyfile = NULL;
 
+static int generate_keydev_mount(const char *name, const char *keydev, char **unit, char **mount) {
+        _cleanup_free_ char *u = NULL, *what = NULL, *where = NULL;
+        _cleanup_fclose_ FILE *f = NULL;
+        int r;
+
+        assert(name);
+        assert(keydev);
+        assert(unit);
+        assert(mount);
+
+        r = mkdir_parents("/run/systemd/cryptsetup", 0755);
+        if (r < 0)
+                return r;
+
+        r = mkdir("/run/systemd/cryptsetup", 0700);
+        if (r < 0)
+                return r;
+
+        where = strjoin("/run/systemd/cryptsetup/keydev-", name);
+        if (!where)
+                return -ENOMEM;
+
+        r = mkdir(where, 0700);
+        if (r < 0)
+                return r;
+
+        r = unit_name_from_path(where, ".mount", &u);
+        if (r < 0)
+                return r;
+
+        r = generator_open_unit_file(arg_dest, NULL, u, &f);
+        if (r < 0)
+                return r;
+
+        what = fstab_node_to_udev_node(keydev);
+        if (!what)
+                return -ENOMEM;
+
+        fprintf(f,
+                "[Unit]\n"
+                "DefaultDependencies=no\n\n"
+                "[Mount]\n"
+                "What=%s\n"
+                "Where=%s\n"
+                "Options=ro\n", what, where);
+
+        r = fflush_and_check(f);
+        if (r < 0)
+                return r;
+
+        *unit = TAKE_PTR(u);
+        *mount = TAKE_PTR(where);
+
+        return 0;
+}
+
 static int create_disk(
                 const char *name,
                 const char *device,
+                const char *keydev,
                 const char *password,
                 const char *options) {
 
         _cleanup_free_ char *n = NULL, *d = NULL, *u = NULL, *e = NULL,
-                *filtered = NULL, *u_escaped = NULL, *password_escaped = NULL, *filtered_escaped = NULL, *name_escaped = NULL;
+                *filtered = NULL, *u_escaped = NULL, *password_escaped = NULL, *filtered_escaped = NULL, *name_escaped = NULL, *keydev_mount = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         const char *dmname;
         bool noauto, nofail, tmp, swap, netdev;
@@ -94,6 +153,11 @@ static int create_disk(
                         return log_oom();
         }
 
+        if (keydev && !password) {
+                log_error("Key device is specified, but path to the password file is missing.");
+                return -EINVAL;
+        }
+
         r = generator_open_unit_file(arg_dest, NULL, n, &f);
         if (r < 0)
                 return r;
@@ -109,13 +173,27 @@ static int create_disk(
                 "After=%s\n",
                 netdev ? "remote-fs-pre.target" : "cryptsetup-pre.target");
 
+        if (keydev) {
+                _cleanup_free_ char *unit = NULL, *p = NULL;
+
+                r = generate_keydev_mount(name, keydev, &unit, &keydev_mount);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to generate keydev mount unit: %m");
+
+                p = prefix_root(keydev_mount, password_escaped);
+                if (!p)
+                        return log_oom();
+
+                free_and_replace(password_escaped, p);
+        }
+
         if (!nofail)
                 fprintf(f,
                         "Before=%s\n",
                         netdev ? "remote-cryptsetup.target" : "cryptsetup.target");
 
         if (password) {
-                if (STR_IN_SET(password, "/dev/urandom", "/dev/random", "/dev/hw_random"))
+                if (PATH_IN_SET(password, "/dev/urandom", "/dev/random", "/dev/hw_random"))
                         fputs("After=systemd-random-seed.service\n", f);
                 else if (!STR_IN_SET(password, "-", "none")) {
                         _cleanup_free_ char *uu;
@@ -191,6 +269,11 @@ static int create_disk(
                         "ExecStartPost=/sbin/mkswap '/dev/mapper/%s'\n",
                         name_escaped);
 
+        if (keydev)
+                fprintf(f,
+                        "ExecStartPost=" UMOUNT_PATH " %s\n\n",
+                        keydev_mount);
+
         r = fflush_and_check(f);
         if (r < 0)
                 return log_error_errno(r, "Failed to write unit file %s: %m", n);
@@ -226,6 +309,7 @@ static int create_disk(
 static void crypt_device_free(crypto_device *d) {
         free(d->uuid);
         free(d->keyfile);
+        free(d->keydev);
         free(d->name);
         free(d->options);
         free(d);
@@ -314,11 +398,27 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
                 r = sscanf(value, "%m[0-9a-fA-F-]=%ms", &uuid, &uuid_value);
                 if (r == 2) {
+                        char *c;
+                        _cleanup_free_ char *keyfile = NULL, *keydev = NULL;
+
                         d = get_crypto_device(uuid);
                         if (!d)
                                 return log_oom();
 
-                        free_and_replace(d->keyfile, uuid_value);
+                        c = strrchr(uuid_value, ':');
+                        if (!c)
+                                /* No keydev specified */
+                                return free_and_replace(d->keyfile, uuid_value);
+
+                        *c = '\0';
+                        keyfile = strdup(uuid_value);
+                        keydev = strdup(++c);
+
+                        if (!keyfile || !keydev)
+                                return log_oom();
+
+                        free_and_replace(d->keyfile, keyfile);
+                        free_and_replace(d->keydev, keydev);
                 } else if (free_and_strdup(&arg_default_keyfile, value) < 0)
                         return log_oom();
 
@@ -344,9 +444,10 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 }
 
 static int add_crypttab_devices(void) {
-        struct stat st;
-        unsigned crypttab_line = 0;
         _cleanup_fclose_ FILE *f = NULL;
+        unsigned crypttab_line = 0;
+        struct stat st;
+        int r;
 
         if (!arg_read_crypttab)
                 return 0;
@@ -366,18 +467,21 @@ static int add_crypttab_devices(void) {
         }
 
         for (;;) {
-                int r, k;
-                char line[LINE_MAX], *l, *uuid;
+                _cleanup_free_ char *line = NULL, *name = NULL, *device = NULL, *keyfile = NULL, *options = NULL;
                 crypto_device *d = NULL;
-                _cleanup_free_ char *name = NULL, *device = NULL, *keyfile = NULL, *options = NULL;
+                char *l, *uuid;
+                int k;
 
-                if (!fgets(line, sizeof(line), f))
+                r = read_line(f, LONG_LINE_MAX, &line);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to read /etc/crypttab: %m");
+                if (r == 0)
                         break;
 
                 crypttab_line++;
 
                 l = strstrip(line);
-                if (IN_SET(*l, 0, '#'))
+                if (IN_SET(l[0], 0, '#'))
                         continue;
 
                 k = sscanf(l, "%ms %ms %ms %ms", &name, &device, &keyfile, &options);
@@ -399,7 +503,7 @@ static int add_crypttab_devices(void) {
                         continue;
                 }
 
-                r = create_disk(name, device, keyfile, (d && d->options) ? d->options : options);
+                r = create_disk(name, device, NULL, keyfile, (d && d->options) ? d->options : options);
                 if (r < 0)
                         return r;
 
@@ -439,7 +543,7 @@ static int add_proc_cmdline_devices(void) {
                 else
                         options = "timeout=0";
 
-                r = create_disk(d->name, device, d->keyfile ?: arg_default_keyfile, options);
+                r = create_disk(d->name, device, d->keydev, d->keyfile ?: arg_default_keyfile, options);
                 if (r < 0)
                         return r;
         }

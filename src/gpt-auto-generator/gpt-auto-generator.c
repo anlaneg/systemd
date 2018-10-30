@@ -5,13 +5,14 @@
 #include <sys/statfs.h>
 #include <unistd.h>
 
-#include "libudev.h"
+#include "sd-device.h"
 #include "sd-id128.h"
 
 #include "alloc-util.h"
 #include "blkid-util.h"
 #include "blockdev-util.h"
 #include "btrfs-util.h"
+#include "device-util.h"
 #include "dirent-util.h"
 #include "dissect-image.h"
 #include "efivars.h"
@@ -30,7 +31,7 @@
 #include "specifier.h"
 #include "stat-util.h"
 #include "string-util.h"
-#include "udev-util.h"
+#include "strv.h"
 #include "unit-name.h"
 #include "util.h"
 #include "virt.h"
@@ -446,63 +447,58 @@ static int add_esp(DissectedPartition *p) {
 #endif
 
 static int open_parent(dev_t devnum, int *ret) {
-        _cleanup_(udev_device_unrefp) struct udev_device *d = NULL;
-        _cleanup_(udev_unrefp) struct udev *udev = NULL;
+        _cleanup_(sd_device_unrefp) sd_device *d = NULL;
         const char *name, *devtype, *node;
-        struct udev_device *parent;
+        sd_device *parent;
         dev_t pn;
-        int fd;
+        int fd, r;
 
         assert(ret);
 
-        udev = udev_new();
-        if (!udev)
-                return log_oom();
+        r = sd_device_new_from_devnum(&d, 'b', devnum);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to open device: %m");
 
-        d = udev_device_new_from_devnum(udev, 'b', devnum);
-        if (!d)
-                return log_oom();
-
-        name = udev_device_get_devnode(d);
-        if (!name)
-                name = udev_device_get_syspath(d);
-        if (!name) {
-                log_debug("Device %u:%u does not have a name, ignoring.", major(devnum), minor(devnum));
-                goto not_found;
+        if (sd_device_get_devname(d, &name) < 0) {
+                r = sd_device_get_syspath(d, &name);
+                if (r < 0) {
+                        log_device_debug_errno(d, r, "Device %u:%u does not have a name, ignoring: %m", major(devnum), minor(devnum));
+                        return 0;
+                }
         }
 
-        parent = udev_device_get_parent(d);
-        if (!parent) {
-                log_debug("%s: not a partitioned device, ignoring.", name);
-                goto not_found;
+        r = sd_device_get_parent(d, &parent);
+        if (r < 0) {
+                log_device_debug_errno(d, r, "Not a partitioned device, ignoring: %m");
+                return 0;
         }
 
         /* Does it have a devtype? */
-        devtype = udev_device_get_devtype(parent);
-        if (!devtype) {
-                log_debug("%s: parent doesn't have a device type, ignoring.", name);
-                goto not_found;
+        r = sd_device_get_devtype(parent, &devtype);
+        if (r < 0) {
+                log_device_debug_errno(parent, r, "Parent doesn't have a device type, ignoring: %m");
+                return 0;
         }
 
         /* Is this a disk or a partition? We only care for disks... */
         if (!streq(devtype, "disk")) {
-                log_debug("%s: parent isn't a raw disk, ignoring.", name);
-                goto not_found;
+                log_device_debug(parent, "Parent isn't a raw disk, ignoring.");
+                return 0;
         }
 
         /* Does it have a device node? */
-        node = udev_device_get_devnode(parent);
-        if (!node) {
-                log_debug("%s: parent device does not have device node, ignoring.", name);
-                goto not_found;
+        r = sd_device_get_devname(parent, &node);
+        if (r < 0) {
+                log_device_debug_errno(parent, r, "Parent device does not have device node, ignoring: %m");
+                return 0;
         }
 
-        log_debug("%s: root device %s.", name, node);
+        log_device_debug(d, "Root device %s.", node);
 
-        pn = udev_device_get_devnum(parent);
-        if (major(pn) == 0) {
-                log_debug("%s: parent device is not a proper block device, ignoring.", name);
-                goto not_found;
+        r = sd_device_get_devnum(parent, &pn);
+        if (r < 0) {
+                log_device_debug_errno(parent, r, "Parent device is not a proper block device, ignoring: %m");
+                return 0;
         }
 
         fd = open(node, O_RDONLY|O_CLOEXEC|O_NOCTTY);
@@ -511,14 +507,9 @@ static int open_parent(dev_t devnum, int *ret) {
 
         *ret = fd;
         return 1;
-
-not_found:
-        *ret = -1;
-        return 0;
 }
 
 static int enumerate_partitions(dev_t devnum) {
-
         _cleanup_close_ int fd = -1;
         _cleanup_(dissected_image_unrefp) DissectedImage *m = NULL;
         int r, k;
@@ -571,7 +562,7 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
                 r = value ? parse_boolean(value) : 1;
                 if (r < 0)
-                        log_warning("Failed to parse gpt-auto switch \"%s\". Ignoring.", value);
+                        log_warning_errno(r, "Failed to parse gpt-auto switch \"%s\", ignoring: %m", value);
                 else
                         arg_enabled = r;
 

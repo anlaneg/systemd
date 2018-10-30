@@ -12,6 +12,7 @@ typedef struct CGroupContext CGroupContext;
 typedef struct CGroupDeviceAllow CGroupDeviceAllow;
 typedef struct CGroupIODeviceWeight CGroupIODeviceWeight;
 typedef struct CGroupIODeviceLimit CGroupIODeviceLimit;
+typedef struct CGroupIODeviceLatency CGroupIODeviceLatency;
 typedef struct CGroupBlockIODeviceWeight CGroupBlockIODeviceWeight;
 typedef struct CGroupBlockIODeviceBandwidth CGroupBlockIODeviceBandwidth;
 
@@ -51,6 +52,12 @@ struct CGroupIODeviceLimit {
         uint64_t limits[_CGROUP_IO_LIMIT_TYPE_MAX];
 };
 
+struct CGroupIODeviceLatency {
+        LIST_FIELDS(CGroupIODeviceLatency, device_latencies);
+        char *path;
+        usec_t target_usec;
+};
+
 struct CGroupBlockIODeviceWeight {
         LIST_FIELDS(CGroupBlockIODeviceWeight, device_weights);
         char *path;
@@ -81,6 +88,7 @@ struct CGroupContext {
         uint64_t startup_io_weight;
         LIST_HEAD(CGroupIODeviceWeight, io_device_weights);
         LIST_HEAD(CGroupIODeviceLimit, io_device_limits);
+        LIST_HEAD(CGroupIODeviceLatency, io_device_latencies);
 
         uint64_t memory_min;
         uint64_t memory_low;
@@ -134,8 +142,11 @@ CGroupMask cgroup_context_get_mask(CGroupContext *c);
 void cgroup_context_free_device_allow(CGroupContext *c, CGroupDeviceAllow *a);
 void cgroup_context_free_io_device_weight(CGroupContext *c, CGroupIODeviceWeight *w);
 void cgroup_context_free_io_device_limit(CGroupContext *c, CGroupIODeviceLimit *l);
+void cgroup_context_free_io_device_latency(CGroupContext *c, CGroupIODeviceLatency *l);
 void cgroup_context_free_blockio_device_weight(CGroupContext *c, CGroupBlockIODeviceWeight *w);
 void cgroup_context_free_blockio_device_bandwidth(CGroupContext *c, CGroupBlockIODeviceBandwidth *b);
+
+int cgroup_add_device_allow(CGroupContext *c, const char *dev, const char *mode);
 
 CGroupMask unit_get_own_mask(Unit *u);
 CGroupMask unit_get_delegate_mask(Unit *u);
@@ -146,7 +157,8 @@ CGroupMask unit_get_subtree_mask(Unit *u);
 CGroupMask unit_get_target_mask(Unit *u);
 CGroupMask unit_get_enable_mask(Unit *u);
 
-bool unit_get_needs_bpf(Unit *u);
+bool unit_get_needs_bpf_firewall(Unit *u);
+CGroupMask unit_get_bpf_mask(Unit *u);
 
 void unit_update_cgroup_members_masks(Unit *u);
 

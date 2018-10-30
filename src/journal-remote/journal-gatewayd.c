@@ -22,6 +22,7 @@
 #include "os-util.h"
 #include "parse-util.h"
 #include "sigbus.h"
+#include "terminal-util.h"
 #include "util.h"
 
 #define JOURNAL_WAIT_TIMEOUT (10*USEC_PER_SEC)
@@ -57,6 +58,7 @@ static const char* const mime_types[_OUTPUT_MODE_MAX] = {
         [OUTPUT_SHORT] = "text/plain",
         [OUTPUT_JSON] = "application/json",
         [OUTPUT_JSON_SSE] = "text/event-stream",
+        [OUTPUT_JSON_SEQ] = "application/json-seq",
         [OUTPUT_EXPORT] = "application/vnd.fdo.journal",
 };
 
@@ -266,6 +268,8 @@ static int request_parse_accept(
                 m->mode = OUTPUT_JSON;
         else if (streq(header, mime_types[OUTPUT_JSON_SSE]))
                 m->mode = OUTPUT_JSON_SSE;
+        else if (streq(header, mime_types[OUTPUT_JSON_SEQ]))
+                m->mode = OUTPUT_JSON_SEQ;
         else if (streq(header, mime_types[OUTPUT_EXPORT]))
                 m->mode = OUTPUT_EXPORT;
         else
@@ -859,7 +863,14 @@ static int request_handler(
         return mhd_respond(connection, MHD_HTTP_NOT_FOUND, "Not found.");
 }
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-journal-gatewayd.service", "8", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] ...\n\n"
                "HTTP server for journal events.\n\n"
                "  -h --help           Show this help\n"
@@ -867,8 +878,13 @@ static void help(void) {
                "     --cert=CERT.PEM  Server certificate in PEM format\n"
                "     --key=KEY.PEM    Server key in PEM format\n"
                "     --trust=CERT.PEM Certificate authority certificate in PEM format\n"
-               "  -D --directory=PATH Serve journal files in directory\n",
-               program_invocation_short_name);
+               "  -D --directory=PATH Serve journal files in directory\n"
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -899,8 +915,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch(c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();

@@ -79,7 +79,7 @@ static int retrieve_key(key_serial_t serial, char ***ret) {
                 if (n < m)
                         break;
 
-                explicit_bzero(p, n);
+                explicit_bzero_safe(p, n);
                 free(p);
                 m *= 2;
         }
@@ -88,7 +88,7 @@ static int retrieve_key(key_serial_t serial, char ***ret) {
         if (!l)
                 return -ENOMEM;
 
-        explicit_bzero(p, n);
+        explicit_bzero_safe(p, n);
 
         *ret = l;
         return 0;
@@ -124,7 +124,7 @@ static int add_to_keyring(const char *keyname, AskPasswordFlags flags, char **pa
                 return r;
 
         serial = add_key("user", keyname, p, n, KEY_SPEC_USER_KEYRING);
-        explicit_bzero(p, n);
+        explicit_bzero_safe(p, n);
         if (serial == -1)
                 return -errno;
 
@@ -349,7 +349,7 @@ int ask_password_tty(
                         if (!(flags & ASK_PASSWORD_SILENT))
                                 backspace_string(ttyfd, passphrase);
 
-                        explicit_bzero(passphrase, sizeof(passphrase));
+                        explicit_bzero_safe(passphrase, sizeof(passphrase));
                         p = codepoint = 0;
 
                 } else if (IN_SET(c, '\b', 127)) {
@@ -379,7 +379,7 @@ int ask_password_tty(
                                 }
 
                                 p = codepoint = q == (size_t) -1 ? p - 1 : q;
-                                explicit_bzero(passphrase + p, sizeof(passphrase) - p);
+                                explicit_bzero_safe(passphrase + p, sizeof(passphrase) - p);
 
                         } else if (!dirty && !(flags & ASK_PASSWORD_SILENT)) {
 
@@ -430,7 +430,7 @@ int ask_password_tty(
         }
 
         x = strndup(passphrase, p);
-        explicit_bzero(passphrase, sizeof(passphrase));
+        explicit_bzero_safe(passphrase, sizeof(passphrase));
         if (!x) {
                 r = -ENOMEM;
                 goto finish;
@@ -451,41 +451,36 @@ finish:
         return r;
 }
 
-static int create_socket(char **name) {
-        union sockaddr_union sa = {
-                .un.sun_family = AF_UNIX,
-        };
+static int create_socket(char **ret) {
+        _cleanup_free_ char *path = NULL;
+        union sockaddr_union sa = {};
         _cleanup_close_ int fd = -1;
-        static const int one = 1;
-        char *c;
-        int r;
+        int salen, r;
 
-        assert(name);
+        assert(ret);
 
         fd = socket(AF_UNIX, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0);
         if (fd < 0)
                 return -errno;
 
-        snprintf(sa.un.sun_path, sizeof(sa.un.sun_path)-1, "/run/systemd/ask-password/sck.%" PRIx64, random_u64());
+        if (asprintf(&path, "/run/systemd/ask-password/sck.%" PRIx64, random_u64()) < 0)
+                return -ENOMEM;
+
+        salen = sockaddr_un_set_path(&sa.un, path);
+        if (salen < 0)
+                return salen;
 
         RUN_WITH_UMASK(0177) {
-                if (bind(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0)
+                if (bind(fd, &sa.sa, salen) < 0)
                         return -errno;
         }
 
-        if (setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &one, sizeof(one)) < 0)
-                return -errno;
+        r = setsockopt_int(fd, SOL_SOCKET, SO_PASSCRED, true);
+        if (r < 0)
+                return r;
 
-        c = strdup(sa.un.sun_path);
-        if (!c)
-                return -ENOMEM;
-
-        *name = c;
-
-        r = fd;
-        fd = -1;
-
-        return r;
+        *ret = TAKE_PTR(path);
+        return TAKE_FD(fd);
 }
 
 int ask_password_agent(
@@ -686,7 +681,7 @@ int ask_password_agent(
                                 l = strv_new("", NULL);
                         else
                                 l = strv_parse_nulstr(passphrase+1, n-1);
-                        explicit_bzero(passphrase, n);
+                        explicit_bzero_safe(passphrase, n);
                         if (!l) {
                                 r = -ENOMEM;
                                 goto finish;

@@ -73,6 +73,7 @@
 #include "stdio-util.h"
 #include "strv.h"
 #include "switch-root.h"
+#include "sysctl-util.h"
 #include "terminal-util.h"
 #include "umask-util.h"
 #include "user-util.h"
@@ -109,6 +110,7 @@ static usec_t arg_default_start_limit_interval = DEFAULT_START_LIMIT_INTERVAL;
 static unsigned arg_default_start_limit_burst = DEFAULT_START_LIMIT_BURST;
 static usec_t arg_runtime_watchdog = 0;
 static usec_t arg_shutdown_watchdog = 10 * USEC_PER_MINUTE;
+static char *arg_early_core_pattern = NULL;
 static char *arg_watchdog_device = NULL;
 static char **arg_default_environment = NULL;
 static struct rlimit *arg_default_rlimit[_RLIMIT_MAX] = {};
@@ -347,22 +349,35 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
                 r = value ? parse_boolean(value) : true;
                 if (r < 0)
-                        log_warning("Failed to parse dump core switch %s. Ignoring.", value);
+                        log_warning_errno(r, "Failed to parse dump core switch %s, ignoring: %m", value);
                 else
                         arg_dump_core = r;
+
+        } else if (proc_cmdline_key_streq(key, "systemd.early_core_pattern")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
+                if (path_is_absolute(value))
+                        (void) parse_path_argument_and_warn(value, false, &arg_early_core_pattern);
+                else
+                        log_warning("Specified core pattern '%s' is not an absolute path, ignoring.", value);
 
         } else if (proc_cmdline_key_streq(key, "systemd.crash_chvt")) {
 
                 if (!value)
                         arg_crash_chvt = 0; /* turn on */
-                else if (parse_crash_chvt(value) < 0)
-                        log_warning("Failed to parse crash chvt switch %s. Ignoring.", value);
+                else {
+                        r = parse_crash_chvt(value);
+                        if (r < 0)
+                                log_warning_errno(r, "Failed to parse crash chvt switch %s, ignoring: %m", value);
+                }
 
         } else if (proc_cmdline_key_streq(key, "systemd.crash_shell")) {
 
                 r = value ? parse_boolean(value) : true;
                 if (r < 0)
-                        log_warning("Failed to parse crash shell switch %s. Ignoring.", value);
+                        log_warning_errno(r, "Failed to parse crash shell switch %s, ignoring: %m", value);
                 else
                         arg_crash_shell = r;
 
@@ -370,7 +385,7 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
                 r = value ? parse_boolean(value) : true;
                 if (r < 0)
-                        log_warning("Failed to parse crash reboot switch %s. Ignoring.", value);
+                        log_warning_errno(r, "Failed to parse crash reboot switch %s, ignoring: %m", value);
                 else
                         arg_crash_reboot = r;
 
@@ -379,17 +394,15 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
                 r = parse_confirm_spawn(value, &s);
                 if (r < 0)
-                        log_warning_errno(r, "Failed to parse confirm_spawn switch %s. Ignoring.", value);
-                else {
-                        free(arg_confirm_spawn);
-                        arg_confirm_spawn = s;
-                }
+                        log_warning_errno(r, "Failed to parse confirm_spawn switch %s, ignoring: %m", value);
+                else
+                        free_and_replace(arg_confirm_spawn, s);
 
         } else if (proc_cmdline_key_streq(key, "systemd.service_watchdogs")) {
 
                 r = value ? parse_boolean(value) : true;
                 if (r < 0)
-                        log_warning("Failed to parse service watchdog switch %s. Ignoring.", value);
+                        log_warning_errno(r, "Failed to parse service watchdog switch %s, ignoring: %m", value);
                 else
                         arg_service_watchdogs = r;
 
@@ -398,7 +411,7 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
                 if (value) {
                         r = parse_show_status(value, &arg_show_status);
                         if (r < 0)
-                                log_warning("Failed to parse show status switch %s. Ignoring.", value);
+                                log_warning_errno(r, "Failed to parse show status switch %s, ignoring: %m", value);
                 } else
                         arg_show_status = SHOW_STATUS_YES;
 
@@ -409,7 +422,7 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
                 r = exec_output_from_string(value);
                 if (r < 0)
-                        log_warning("Failed to parse default standard output switch %s. Ignoring.", value);
+                        log_warning_errno(r, "Failed to parse default standard output switch %s, ignoring: %m", value);
                 else
                         arg_default_std_output = r;
 
@@ -420,7 +433,7 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
                 r = exec_output_from_string(value);
                 if (r < 0)
-                        log_warning("Failed to parse default standard error switch %s. Ignoring.", value);
+                        log_warning_errno(r, "Failed to parse default standard error switch %s, ignoring: %m", value);
                 else
                         arg_default_std_error = r;
 
@@ -447,7 +460,7 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
                 r = set_machine_id(value);
                 if (r < 0)
-                        log_warning("MachineID '%s' is not valid. Ignoring.", value);
+                        log_warning_errno(r, "MachineID '%s' is not valid, ignoring: %m", value);
 
         } else if (proc_cmdline_key_streq(key, "systemd.default_timeout_start_sec")) {
 
@@ -456,7 +469,7 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
                 r = parse_sec(value, &arg_default_timeout_start_usec);
                 if (r < 0)
-                        log_warning_errno(r, "Failed to parse default start timeout: %s, ignoring.", value);
+                        log_warning_errno(r, "Failed to parse default start timeout '%s', ignoring: %m", value);
 
                 if (arg_default_timeout_start_usec <= 0)
                         arg_default_timeout_start_usec = USEC_INFINITY;
@@ -466,7 +479,7 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
                 if (proc_cmdline_value_missing(key, value))
                         return 0;
 
-                parse_path_argument_and_warn(value, false, &arg_watchdog_device);
+                (void) parse_path_argument_and_warn(value, false, &arg_watchdog_device);
 
         } else if (streq(key, "quiet") && !value) {
 
@@ -1070,6 +1083,12 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd", "1", &link);
+        if (r < 0)
+                return log_oom();
 
         printf("%s [OPTIONS...]\n\n"
                "Starts up and maintains the system or user services.\n\n"
@@ -1093,20 +1112,28 @@ static int help(void) {
                "     --log-color[=BOOL]          Highlight important log messages\n"
                "     --log-location[=BOOL]       Include code location in log messages\n"
                "     --default-standard-output=  Set default standard output for services\n"
-               "     --default-standard-error=   Set default standard error output for services\n",
-               program_invocation_short_name);
+               "     --default-standard-error=   Set default standard error output for services\n"
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
 
         return 0;
 }
 
-static int prepare_reexecute(Manager *m, FILE **_f, FDSet **_fds, bool switching_root) {
+static int prepare_reexecute(
+                Manager *m,
+                FILE **ret_f,
+                FDSet **ret_fds,
+                bool switching_root) {
+
         _cleanup_fdset_free_ FDSet *fds = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         int r;
 
         assert(m);
-        assert(_f);
-        assert(_fds);
+        assert(ret_f);
+        assert(ret_fds);
 
         r = manager_open_serialization(m, &f);
         if (r < 0)
@@ -1122,7 +1149,7 @@ static int prepare_reexecute(Manager *m, FILE **_f, FDSet **_fds, bool switching
 
         r = manager_serialize(m, f, fds, switching_root);
         if (r < 0)
-                return log_error_errno(r, "Failed to serialize state: %m");
+                return r;
 
         if (fseeko(f, 0, SEEK_SET) == (off_t) -1)
                 return log_error_errno(errno, "Failed to rewind serialization fd: %m");
@@ -1135,10 +1162,92 @@ static int prepare_reexecute(Manager *m, FILE **_f, FDSet **_fds, bool switching
         if (r < 0)
                 return log_error_errno(r, "Failed to disable O_CLOEXEC for serialization fds: %m");
 
-        *_f = TAKE_PTR(f);
-        *_fds = TAKE_PTR(fds);
+        *ret_f = TAKE_PTR(f);
+        *ret_fds = TAKE_PTR(fds);
 
         return 0;
+}
+
+static void bump_file_max_and_nr_open(void) {
+
+        /* Let's bump fs.file-max and fs.nr_open to their respective maximums. On current kernels large numbers of file
+         * descriptors are no longer a performance problem and their memory is properly tracked by memcg, thus counting
+         * them and limiting them in another two layers of limits is unnecessary and just complicates things. This
+         * function hence turns off 2 of the 4 levels of limits on file descriptors, and makes RLIMIT_NOLIMIT (soft +
+         * hard) the only ones that really matter. */
+
+#if BUMP_PROC_SYS_FS_FILE_MAX || BUMP_PROC_SYS_FS_NR_OPEN
+        _cleanup_free_ char *t = NULL;
+        int r;
+#endif
+
+#if BUMP_PROC_SYS_FS_FILE_MAX
+        /* I so wanted to use STRINGIFY(ULONG_MAX) here, but alas we can't as glibc/gcc define that as
+         * "(0x7fffffffffffffffL * 2UL + 1UL)". Seriously. 😢 */
+        if (asprintf(&t, "%lu\n", ULONG_MAX) < 0) {
+                log_oom();
+                return;
+        }
+
+        r = sysctl_write("fs/file-max", t);
+        if (r < 0)
+                log_full_errno(IN_SET(r, -EROFS, -EPERM, -EACCES) ? LOG_DEBUG : LOG_WARNING, r, "Failed to bump fs.file-max, ignoring: %m");
+#endif
+
+#if BUMP_PROC_SYS_FS_FILE_MAX && BUMP_PROC_SYS_FS_NR_OPEN
+        t = mfree(t);
+#endif
+
+#if BUMP_PROC_SYS_FS_NR_OPEN
+        int v = INT_MAX;
+
+        /* Arg! The kernel enforces maximum and minimum values on the fs.nr_open, but we don't really know what they
+         * are. The expression by which the maximum is determined is dependent on the architecture, and is something we
+         * don't really want to copy to userspace, as it is dependent on implementation details of the kernel. Since
+         * the kernel doesn't expose the maximum value to us, we can only try and hope. Hence, let's start with
+         * INT_MAX, and then keep halving the value until we find one that works. Ugly? Yes, absolutely, but kernel
+         * APIs are kernel APIs, so what do can we do... 🤯 */
+
+        for (;;) {
+                int k;
+
+                v &= ~(__SIZEOF_POINTER__ - 1); /* Round down to next multiple of the pointer size */
+                if (v < 1024) {
+                        log_warning("Can't bump fs.nr_open, value too small.");
+                        break;
+                }
+
+                k = read_nr_open();
+                if (k < 0) {
+                        log_error_errno(k, "Failed to read fs.nr_open: %m");
+                        break;
+                }
+                if (k >= v) { /* Already larger */
+                        log_debug("Skipping bump, value is already larger.");
+                        break;
+                }
+
+                if (asprintf(&t, "%i\n", v) < 0) {
+                        log_oom();
+                        return;
+                }
+
+                r = sysctl_write("fs/nr_open", t);
+                t = mfree(t);
+                if (r == -EINVAL) {
+                        log_debug("Couldn't write fs.nr_open as %i, halving it.", v);
+                        v /= 2;
+                        continue;
+                }
+                if (r < 0) {
+                        log_full_errno(IN_SET(r, -EROFS, -EPERM, -EACCES) ? LOG_DEBUG : LOG_WARNING, r, "Failed to bump fs.nr_open, ignoring: %m");
+                        break;
+                }
+
+                log_debug("Successfully bumped fs.nr_open to %i", v);
+                break;
+        }
+#endif
 }
 
 static int bump_rlimit_nofile(struct rlimit *saved_rlimit) {
@@ -1146,13 +1255,15 @@ static int bump_rlimit_nofile(struct rlimit *saved_rlimit) {
 
         assert(saved_rlimit);
 
-        /* Save the original RLIMIT_NOFILE so that we can reset it
-         * later when transitioning from the initrd to the main
+        /* Save the original RLIMIT_NOFILE so that we can reset it later when transitioning from the initrd to the main
          * systemd or suchlike. */
         if (getrlimit(RLIMIT_NOFILE, saved_rlimit) < 0)
                 return log_warning_errno(errno, "Reading RLIMIT_NOFILE failed, ignoring: %m");
 
-        /* Make sure forked processes get the default kernel setting */
+        /* Get the underlying absolute limit the kernel enforces */
+        nr = read_nr_open();
+
+        /* Make sure forked processes get limits based on the original kernel setting */
         if (!arg_default_rlimit[RLIMIT_NOFILE]) {
                 struct rlimit *rl;
 
@@ -1160,11 +1271,25 @@ static int bump_rlimit_nofile(struct rlimit *saved_rlimit) {
                 if (!rl)
                         return log_oom();
 
+                /* Bump the hard limit for system services to a substantially higher value. The default hard limit
+                 * current kernels set is pretty low (4K), mostly for historical reasons. According to kernel
+                 * developers, the fd handling in recent kernels has been optimized substantially enough, so that we
+                 * can bump the limit now, without paying too high a price in memory or performance. Note however that
+                 * we only bump the hard limit, not the soft limit. That's because select() works the way it works, and
+                 * chokes on fds >= 1024. If we'd bump the soft limit globally, it might accidentally happen to
+                 * unexpecting programs that they get fds higher than what they can process using select(). By only
+                 * bumping the hard limit but leaving the low limit as it is we avoid this pitfall: programs that are
+                 * written by folks aware of the select() problem in mind (and thus use poll()/epoll instead of
+                 * select(), the way everybody should) can explicitly opt into high fds by bumping their soft limit
+                 * beyond 1024, to the hard limit we pass. */
+                if (arg_system)
+                        rl->rlim_max = MIN((rlim_t) nr, MAX(rl->rlim_max, (rlim_t) HIGH_RLIMIT_NOFILE));
+
                 arg_default_rlimit[RLIMIT_NOFILE] = rl;
         }
 
-        /* Bump up the resource limit for ourselves substantially, all the way to the maximum the kernel allows */
-        nr = read_nr_open();
+        /* Bump up the resource limit for ourselves substantially, all the way to the maximum the kernel allows, for
+         * both hard and soft. */
         r = setrlimit_closest(RLIMIT_NOFILE, &RLIMIT_MAKE_CONST(nr));
         if (r < 0)
                 return log_warning_errno(r, "Setting RLIMIT_NOFILE failed, ignoring: %m");
@@ -1176,16 +1301,15 @@ static int bump_rlimit_memlock(struct rlimit *saved_rlimit) {
         int r;
 
         assert(saved_rlimit);
-        assert(getuid() == 0);
 
-        /* BPF_MAP_TYPE_LPM_TRIE bpf maps are charged against RLIMIT_MEMLOCK, even though we have CAP_IPC_LOCK which
-         * should normally disable such checks. We need them to implement IPAccessAllow= and IPAccessDeny=, hence let's
-         * bump the value high enough for the root user. */
+        /* BPF_MAP_TYPE_LPM_TRIE bpf maps are charged against RLIMIT_MEMLOCK, even if we have CAP_IPC_LOCK which should
+         * normally disable such checks. We need them to implement IPAccessAllow= and IPAccessDeny=, hence let's bump
+         * the value high enough for our user. */
 
         if (getrlimit(RLIMIT_MEMLOCK, saved_rlimit) < 0)
                 return log_warning_errno(errno, "Reading RLIMIT_MEMLOCK failed, ignoring: %m");
 
-        r = setrlimit_closest(RLIMIT_MEMLOCK, &RLIMIT_MAKE_CONST(1024ULL*1024ULL*16ULL));
+        r = setrlimit_closest(RLIMIT_MEMLOCK, &RLIMIT_MAKE_CONST(HIGH_RLIMIT_MEMLOCK));
         if (r < 0)
                 return log_warning_errno(r, "Setting RLIMIT_MEMLOCK failed, ignoring: %m");
 
@@ -1477,11 +1601,27 @@ static void initialize_coredump(bool skip_setup) {
         if (setrlimit(RLIMIT_CORE, &RLIMIT_MAKE_CONST(RLIM_INFINITY)) < 0)
                 log_warning_errno(errno, "Failed to set RLIMIT_CORE: %m");
 
-        /* But at the same time, turn off the core_pattern logic by default, so that no coredumps are stored
-         * until the systemd-coredump tool is enabled via sysctl. */
+        /* But at the same time, turn off the core_pattern logic by default, so that no
+         * coredumps are stored until the systemd-coredump tool is enabled via
+         * sysctl. However it can be changed via the kernel command line later so core
+         * dumps can still be generated during early startup and in initramfs. */
         if (!skip_setup)
                 disable_coredumps();
 #endif
+}
+
+static void initialize_core_pattern(bool skip_setup) {
+        int r;
+
+        if (skip_setup || !arg_early_core_pattern)
+                return;
+
+        if (getpid_cached() != 1)
+                return;
+
+        r = write_string_file("/proc/sys/kernel/core_pattern", arg_early_core_pattern, 0);
+        if (r < 0)
+                log_warning_errno(r, "Failed to write '%s' to /proc/sys/kernel/core_pattern, ignoring: %m", arg_early_core_pattern);
 }
 
 static void do_reexecute(
@@ -1636,7 +1776,7 @@ static int invoke_main_loop(
                         return log_emergency_errno(r, "Failed to run main loop: %m");
                 }
 
-                switch (m->exit_code) {
+                switch ((ManagerObjective) r) {
 
                 case MANAGER_RELOAD: {
                         LogTarget saved_log_target;
@@ -1663,7 +1803,8 @@ static int invoke_main_loop(
 
                         r = manager_reload(m);
                         if (r < 0)
-                                log_warning_errno(r, "Failed to reload, ignoring: %m");
+                                /* Reloading failed before the point of no return. Let's continue running as if nothing happened. */
+                                m->objective = MANAGER_OK;
 
                         break;
                 }
@@ -1727,19 +1868,19 @@ static int invoke_main_loop(
                 case MANAGER_POWEROFF:
                 case MANAGER_HALT:
                 case MANAGER_KEXEC: {
-                        static const char * const table[_MANAGER_EXIT_CODE_MAX] = {
-                                [MANAGER_EXIT] = "exit",
-                                [MANAGER_REBOOT] = "reboot",
+                        static const char * const table[_MANAGER_OBJECTIVE_MAX] = {
+                                [MANAGER_EXIT]     = "exit",
+                                [MANAGER_REBOOT]   = "reboot",
                                 [MANAGER_POWEROFF] = "poweroff",
-                                [MANAGER_HALT] = "halt",
-                                [MANAGER_KEXEC] = "kexec"
+                                [MANAGER_HALT]     = "halt",
+                                [MANAGER_KEXEC]    = "kexec",
                         };
 
                         log_notice("Shutting down.");
 
                         *ret_reexecute = false;
                         *ret_retval = m->return_value;
-                        assert_se(*ret_shutdown_verb = table[m->exit_code]);
+                        assert_se(*ret_shutdown_verb = table[m->objective]);
                         *ret_fds = NULL;
                         *ret_switch_root_dir = *ret_switch_root_init = NULL;
 
@@ -1747,7 +1888,7 @@ static int invoke_main_loop(
                 }
 
                 default:
-                        assert_not_reached("Unknown exit code.");
+                        assert_not_reached("Unknown or unexpected manager objective.");
                 }
         }
 }
@@ -1830,6 +1971,7 @@ static int initialize_runtime(
                         machine_id_setup(NULL, arg_machine_id, NULL);
                         loopback_setup();
                         bump_unix_max_dgram_qlen();
+                        bump_file_max_and_nr_open();
                         test_usr();
                         write_container_id();
                 }
@@ -1882,11 +2024,9 @@ static int initialize_runtime(
                 if (prctl(PR_SET_CHILD_SUBREAPER, 1) < 0)
                         log_warning_errno(errno, "Failed to make us a subreaper: %m");
 
-        if (arg_system) {
-                /* Bump up RLIMIT_NOFILE for systemd itself */
-                (void) bump_rlimit_nofile(saved_rlimit_nofile);
-                (void) bump_rlimit_memlock(saved_rlimit_memlock);
-        }
+        /* Bump up RLIMIT_NOFILE for systemd itself */
+        (void) bump_rlimit_nofile(saved_rlimit_nofile);
+        (void) bump_rlimit_memlock(saved_rlimit_memlock);
 
         return 0;
 }
@@ -2320,7 +2460,7 @@ int main(int argc, char *argv[]) {
                 skip_setup = true;
 
         if (arg_action == ACTION_HELP) {
-                retval = help();
+                retval = help() < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
                 goto finish;
         } else if (arg_action == ACTION_VERSION) {
                 retval = version();
@@ -2341,6 +2481,9 @@ int main(int argc, char *argv[]) {
         assert_se(chdir("/") == 0);
 
         if (arg_action == ACTION_RUN) {
+
+                /* A core pattern might have been specified via the cmdline.  */
+                initialize_core_pattern(skip_setup);
 
                 /* Close logging fds, in order not to confuse collecting passed fds and terminal logic below */
                 log_close();
@@ -2392,7 +2535,6 @@ int main(int argc, char *argv[]) {
 
         r = manager_startup(m, arg_serialization, fds);
         if (r < 0) {
-                log_error_errno(r, "Failed to fully start up daemon: %m");
                 error_message = "Failed to start up manager";
                 goto finish;
         }

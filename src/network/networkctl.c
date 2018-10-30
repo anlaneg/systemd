@@ -39,16 +39,13 @@ static bool arg_legend = true;
 static bool arg_all = false;
 
 static char *link_get_type_string(unsigned short iftype, sd_device *d) {
-        const char *t;
+        const char *t, *devtype;
         char *p;
 
-        if (d) {
-                const char *devtype = NULL;
-
-                (void) sd_device_get_devtype(d, &devtype);
-                if (!isempty(devtype))
-                        return strdup(devtype);
-        }
+        if (d &&
+            sd_device_get_devtype(d, &devtype) >= 0 &&
+            !isempty(devtype))
+                return strdup(devtype);
 
         t = arphrd_to_name(iftype);
         if (!t)
@@ -104,10 +101,8 @@ typedef struct LinkInfo {
         bool has_mtu:1;
 } LinkInfo;
 
-static int link_info_compare(const void *a, const void *b) {
-        const LinkInfo *x = a, *y = b;
-
-        return x->ifindex - y->ifindex;
+static int link_info_compare(const LinkInfo *a, const LinkInfo *b) {
+        return CMP(a->ifindex, b->ifindex);
 }
 
 static int decode_link(sd_netlink_message *m, LinkInfo *info) {
@@ -190,7 +185,7 @@ static int acquire_link_info_strv(sd_netlink *rtnl, char **l, LinkInfo **ret) {
                         c++;
         }
 
-        qsort_safe(links, c, sizeof(LinkInfo), link_info_compare);
+        typesafe_qsort(links, c, link_info_compare);
 
         *ret = TAKE_PTR(links);
 
@@ -230,7 +225,7 @@ static int acquire_link_info_all(sd_netlink *rtnl, LinkInfo **ret) {
                         c++;
         }
 
-        qsort_safe(links, c, sizeof(LinkInfo), link_info_compare);
+        typesafe_qsort(links, c, link_info_compare);
 
         *ret = TAKE_PTR(links);
 
@@ -770,12 +765,10 @@ static int link_status_one(
                 (void) sd_device_get_property_value(d, "ID_NET_DRIVER", &driver);
                 (void) sd_device_get_property_value(d, "ID_PATH", &path);
 
-                r = sd_device_get_property_value(d, "ID_VENDOR_FROM_DATABASE", &vendor);
-                if (r < 0)
+                if (sd_device_get_property_value(d, "ID_VENDOR_FROM_DATABASE", &vendor) < 0)
                         (void) sd_device_get_property_value(d, "ID_VENDOR", &vendor);
 
-                r = sd_device_get_property_value(d, "ID_MODEL_FROM_DATABASE", &model);
-                if (r < 0)
+                if (sd_device_get_property_value(d, "ID_MODEL_FROM_DATABASE", &model) < 0)
                         (void) sd_device_get_property_value(d, "ID_MODEL", &model);
         }
 
@@ -1067,7 +1060,14 @@ static int link_lldp_status(int argc, char *argv[], void *userdata) {
         return 0;
 }
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("networkctl", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...]\n\n"
                "Query and control the networking subsystem.\n\n"
                "  -h --help             Show this help\n"
@@ -1080,7 +1080,12 @@ static void help(void) {
                "  status [LINK...]      Show link status\n"
                "  lldp [LINK...]        Show LLDP neighbors\n"
                "  label                 Show current address label entries in the kernel\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -1110,8 +1115,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();

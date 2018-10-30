@@ -53,7 +53,27 @@ typedef enum NetDevPort {
         _NET_DEV_PORT_INVALID = -1
 } NetDevPort;
 
+typedef enum NetDevAdvertise {
+        NET_DEV_ADVERTISE_10BASET_HALF        =  1 << ETHTOOL_LINK_MODE_10baseT_Half_BIT,
+        NET_DEV_ADVERTISE_10BASET_FULL        =  1 << ETHTOOL_LINK_MODE_10baseT_Full_BIT,
+        NET_DEV_ADVERTISE_100BASET_HALF       =  1 << ETHTOOL_LINK_MODE_100baseT_Half_BIT,
+        NET_DEV_ADVERTISE_100BASET_FULL       =  1 << ETHTOOL_LINK_MODE_100baseT_Full_BIT,
+        NET_DEV_ADVERTISE_1000BASET_HALF      =  1 << ETHTOOL_LINK_MODE_1000baseT_Half_BIT,
+        NET_DEV_ADVERTISE_1000BASET_FULL      =  1 << ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
+        NET_DEV_ADVERTISE_10000BASET_FULL     =  1 << ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
+        NET_DEV_ADVERTISE_2500BASEX_FULL      =  1 << ETHTOOL_LINK_MODE_2500baseX_Full_BIT,
+        NET_DEV_ADVERTISE_1000BASEKX_FULL     =  1 << ETHTOOL_LINK_MODE_1000baseKX_Full_BIT,
+        NET_DEV_ADVERTISE_10000BASEKX4_FULL   =  1 << ETHTOOL_LINK_MODE_10000baseKX4_Full_BIT,
+        NET_DEV_ADVERTISE_10000BASEKR_FULL    =  1 << ETHTOOL_LINK_MODE_10000baseKR_Full_BIT,
+        NET_DEV_ADVERTISE_10000BASER_FEC      =  1 << ETHTOOL_LINK_MODE_10000baseR_FEC_BIT,
+        NET_DEV_ADVERTISE_20000BASEMLD2_Full  =  1 << ETHTOOL_LINK_MODE_20000baseMLD2_Full_BIT,
+        NET_DEV_ADVERTISE_20000BASEKR2_Full   =  1 << ETHTOOL_LINK_MODE_20000baseKR2_Full_BIT,
+        _NET_DEV_ADVERTISE_MAX,
+        _NET_DEV_ADVERTISE_INVALID = -1,
+} NetDevAdvertise;
+
 #define ETHTOOL_LINK_MODE_MASK_MAX_KERNEL_NU32    (SCHAR_MAX)
+#define ETHTOOL_LINK_MODE_MASK_MAX_KERNEL_NBYTES  (4 * ETHTOOL_LINK_MODE_MASK_MAX_KERNEL_NU32)
 
 /* layout of the struct passed from/to userland */
 struct ethtool_link_usettings {
@@ -81,9 +101,9 @@ typedef struct netdev_channels {
 int ethtool_connect(int *ret);
 
 int ethtool_get_driver(int *fd, const char *ifname, char **ret);
-int ethtool_set_speed(int *fd, const char *ifname, unsigned int speed, Duplex duplex);
+int ethtool_set_speed(int *fd, const char *ifname, unsigned speed, Duplex duplex);
 int ethtool_set_wol(int *fd, const char *ifname, WakeOnLan wol);
-int ethtool_set_features(int *fd, const char *ifname, NetDevFeature *features);
+int ethtool_set_features(int *fd, const char *ifname, int *features);
 int ethtool_set_glinksettings(int *fd, const char *ifname, struct link_config *link);
 int ethtool_set_channels(int *fd, const char *ifname, netdev_channels *channels);
 
@@ -96,7 +116,11 @@ WakeOnLan wol_from_string(const char *wol) _pure_;
 const char *port_to_string(NetDevPort port) _const_;
 NetDevPort port_from_string(const char *port) _pure_;
 
+const char *advertise_to_string(NetDevAdvertise advertise) _const_;
+NetDevAdvertise advertise_from_string(const char *advertise) _pure_;
+
 int config_parse_duplex(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_wol(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_port(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_channel(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_advertise(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);

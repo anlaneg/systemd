@@ -16,6 +16,7 @@
 #include "proc-cmdline.h"
 #include "string-util.h"
 #include "strv.h"
+#include "terminal-util.h"
 #include "util.h"
 
 static char **arg_proc_cmdline_modules = NULL;
@@ -71,41 +72,53 @@ static int apply_file(struct kmod_ctx *ctx, const char *path, bool ignore_enoent
                 if (ignore_enoent && r == -ENOENT)
                         return 0;
 
-                return log_error_errno(r, "Failed to open %s, ignoring: %m", path);
+                return log_error_errno(r, "Failed to open %s: %m", path);
         }
 
         log_debug("apply: %s", path);
         for (;;) {
-                char line[LINE_MAX], *l;
+                _cleanup_free_ char *line = NULL;
+                char *l;
                 int k;
 
-                if (!fgets(line, sizeof(line), f)) {
-                        if (feof(f))
-                                break;
-
-                        return log_error_errno(errno, "Failed to read file '%s', ignoring: %m", path);
-                }
+                k = read_line(f, LONG_LINE_MAX, &line);
+                if (k < 0)
+                        return log_error_errno(k, "Failed to read file '%s': %m", path);
+                if (k == 0)
+                        break;
 
                 l = strstrip(line);
-                if (!*l)
+                if (isempty(l))
                         continue;
-                if (strchr(COMMENTS "\n", *l))
+                if (strchr(COMMENTS, *l))
                         continue;
 
                 k = module_load_and_warn(ctx, l, true);
-                if (k < 0 && r == 0)
+                if (k < 0 && r >= 0)
                         r = k;
         }
 
         return r;
 }
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-modules-load.service", "8", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] [CONFIGURATION FILE...]\n\n"
                "Loads statically configured kernel modules.\n\n"
                "  -h --help             Show this help\n"
-               "     --version          Show package version\n",
-               program_invocation_short_name);
+               "     --version          Show package version\n"
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -130,8 +143,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();

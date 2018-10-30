@@ -59,7 +59,7 @@ int chown_cgroup(pid_t pid, CGroupUnified unified_requested, uid_t uid_shift) {
         if (r < 0)
                 return log_error_errno(r, "Failed to chown() cgroup %s: %m", fs);
 
-        if (unified_requested == CGROUP_UNIFIED_SYSTEMD) {
+        if (unified_requested == CGROUP_UNIFIED_SYSTEMD || (unified_requested == CGROUP_UNIFIED_NONE && cg_unified_controller(SYSTEMD_CGROUP_CONTROLLER) > 0)) {
                 _cleanup_free_ char *lfs = NULL;
                 /* Always propagate access rights from unified to legacy controller */
 
@@ -373,7 +373,7 @@ static int mount_legacy_cgns_supported(
                         if (!target)
                                 return log_oom();
 
-                        r = symlink_idempotent(controller, target);
+                        r = symlink_idempotent(controller, target, false);
                         if (r == -EINVAL)
                                 return log_error_errno(r, "Invalid existing symlink for combined hierarchy: %m");
                         if (r < 0)
@@ -482,7 +482,7 @@ static int mount_legacy_cgns_unsupported(
                         if (r < 0)
                                 return r;
 
-                        r = symlink_idempotent(combined, target);
+                        r = symlink_idempotent(combined, target, false);
                         if (r == -EINVAL)
                                 return log_error_errno(r, "Invalid existing symlink for combined hierarchy: %m");
                         if (r < 0)

@@ -20,9 +20,11 @@
 #include "mkdir.h"
 #include "parse-util.h"
 #include "process-util.h"
+#include "rlimit-util.h"
 #include "sigbus.h"
 #include "signal-util.h"
 #include "string-util.h"
+#include "terminal-util.h"
 #include "util.h"
 
 #define PRIV_KEY_FILE CERTIFICATE_ROOT "/private/journal-upload.pem"
@@ -279,30 +281,30 @@ int start_upload(Uploader *u,
 
 static size_t fd_input_callback(void *buf, size_t size, size_t nmemb, void *userp) {
         Uploader *u = userp;
-
-        ssize_t r;
+        ssize_t n;
 
         assert(u);
-        assert(nmemb <= SSIZE_MAX / size);
+        assert(nmemb < SSIZE_MAX / size);
 
         if (u->input < 0)
                 return 0;
 
-        r = read(u->input, buf, size * nmemb);
-        log_debug("%s: allowed %zu, read %zd", __func__, size*nmemb, r);
+        assert(!size_multiply_overflow(size, nmemb));
 
-        if (r > 0)
-                return r;
+        n = read(u->input, buf, size * nmemb);
+        log_debug("%s: allowed %zu, read %zd", __func__, size*nmemb, n);
+        if (n > 0)
+                return n;
 
         u->uploading = false;
-        if (r == 0) {
-                log_debug("Reached EOF");
-                close_fd_input(u);
-                return 0;
-        } else {
+        if (n < 0) {
                 log_error_errno(errno, "Aborting transfer after read error on input: %m.");
                 return CURL_READFUNC_ABORT;
         }
+
+        log_debug("Reached EOF");
+        close_fd_input(u);
+        return 0;
 }
 
 static void close_fd_input(Uploader *u) {
@@ -526,7 +528,14 @@ static int parse_config(void) {
                                         CONFIG_PARSE_WARN, NULL);
 }
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-journal-upload.service", "8", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s -u URL {FILE|-}...\n\n"
                "Upload journal events to a remote server.\n\n"
                "  -h --help                 Show this help\n"
@@ -550,7 +559,12 @@ static void help(void) {
                "     --follow[=BOOL]        Do [not] wait for input\n"
                "     --save-state[=FILE]    Save uploaded cursors (default \n"
                "                            " STATE_FILE ")\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -598,8 +612,7 @@ static int parse_argv(int argc, char *argv[]) {
         while ((c = getopt_long(argc, argv, "hu:mM:D:", options, NULL)) >= 0)
                 switch(c) {
                 case 'h':
-                        help();
-                        return 0 /* done */;
+                        return help();
 
                 case ARG_VERSION:
                         return version();
@@ -767,6 +780,9 @@ int main(int argc, char **argv) {
 
         log_show_color(true);
         log_parse_environment();
+
+        /* The journal merging logic potentially needs a lot of fds. */
+        (void) rlimit_nofile_bump(HIGH_RLIMIT_NOFILE);
 
         r = parse_config();
         if (r < 0)

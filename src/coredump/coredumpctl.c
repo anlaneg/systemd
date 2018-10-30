@@ -15,6 +15,7 @@
 #include "bus-error.h"
 #include "bus-util.h"
 #include "compress.h"
+#include "def.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
@@ -26,6 +27,7 @@
 #include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
+#include "rlimit-util.h"
 #include "sigbus.h"
 #include "signal-util.h"
 #include "string-util.h"
@@ -135,6 +137,13 @@ static int acquire_journal(sd_journal **ret, char **matches) {
 }
 
 static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("coredumpctl", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...]\n\n"
                "List or retrieve coredumps from the journal.\n\n"
                "Flags:\n"
@@ -156,7 +165,10 @@ static int help(void) {
                "  info [MATCHES...]  Show detailed information about one or more coredumps\n"
                "  dump [MATCHES...]  Print first matching coredump to stdout\n"
                "  debug [MATCHES...] Start a debugger for the first matching coredump\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
 
         return 0;
 }
@@ -225,13 +237,13 @@ static int parse_argv(int argc, char *argv[]) {
                 case 'S':
                         r = parse_timestamp(optarg, &arg_since);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse timestamp: %s", optarg);
+                                return log_error_errno(r, "Failed to parse timestamp '%s': %m", optarg);
                         break;
 
                 case 'U':
                         r = parse_timestamp(optarg, &arg_until);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse timestamp: %s", optarg);
+                                return log_error_errno(r, "Failed to parse timestamp '%s': %m", optarg);
                         break;
 
                 case 'F':
@@ -1056,6 +1068,9 @@ int main(int argc, char *argv[]) {
         setlocale(LC_ALL, "");
         log_parse_environment();
         log_open();
+
+        /* The journal merging logic potentially needs a lot of fds. */
+        (void) rlimit_nofile_bump(HIGH_RLIMIT_NOFILE);
 
         r = parse_argv(argc, argv);
         if (r <= 0)

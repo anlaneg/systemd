@@ -277,6 +277,9 @@ int device_get_devnode_mode(sd_device *device, mode_t *mode) {
         if (r < 0)
                 return r;
 
+        if (device->devmode == (mode_t) -1)
+                return -ENOENT;
+
         *mode = device->devmode;
 
         return 0;
@@ -291,6 +294,9 @@ int device_get_devnode_uid(sd_device *device, uid_t *uid) {
         r = device_read_db(device);
         if (r < 0)
                 return r;
+
+        if (device->devuid == (uid_t) -1)
+                return -ENOENT;
 
         *uid = device->devuid;
 
@@ -326,6 +332,9 @@ int device_get_devnode_gid(sd_device *device, gid_t *gid) {
         r = device_read_db(device);
         if (r < 0)
                 return r;
+
+        if (device->devgid == (gid_t) -1)
+                return -ENOENT;
 
         *gid = device->devgid;
 
@@ -723,6 +732,9 @@ int device_get_watch_handle(sd_device *device, int *handle) {
         if (r < 0)
                 return r;
 
+        if (device->watch_handle < 0)
+                return -ENOENT;
+
         *handle = device->watch_handle;
 
         return 0;
@@ -841,6 +853,22 @@ int device_new_from_synthetic_event(sd_device **new_device, const char *syspath,
         *new_device = TAKE_PTR(ret);
 
         return 0;
+}
+
+int device_new_from_stat_rdev(sd_device **ret, const struct stat *st) {
+        char type;
+
+        assert(ret);
+        assert(st);
+
+        if (S_ISBLK(st->st_mode))
+                type = 'b';
+        else if (S_ISCHR(st->st_mode))
+                type = 'c';
+        else
+                return -ENOTTY;
+
+        return sd_device_new_from_devnum(ret, type, st->st_rdev);
 }
 
 int device_copy_properties(sd_device *device_dst, sd_device *device_src) {

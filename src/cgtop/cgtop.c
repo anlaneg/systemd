@@ -343,10 +343,14 @@ static int process(
                 }
 
                 for (;;) {
-                        char line[LINE_MAX], *l;
+                        _cleanup_free_ char *line = NULL;
                         uint64_t k, *q;
+                        char *l;
 
-                        if (!fgets(line, sizeof(line), f))
+                        r = read_line(f, LONG_LINE_MAX, &line);
+                        if (r < 0)
+                                return r;
+                        if (r == 0)
                                 break;
 
                         /* Trim and skip the device */
@@ -524,8 +528,9 @@ static int refresh(const char *root, Hashmap *a, Hashmap *b, unsigned iteration)
         return 0;
 }
 
-static int group_compare(const void*a, const void *b) {
-        const Group *x = *(Group**)a, *y = *(Group**)b;
+static int group_compare(Group * const *a, Group * const *b) {
+        const Group *x = *a, *y = *b;
+        int r;
 
         if (arg_order != ORDER_TASKS || arg_recursive) {
                 /* Let's make sure that the parent is always before
@@ -547,29 +552,26 @@ static int group_compare(const void*a, const void *b) {
         case ORDER_CPU:
                 if (arg_cpu_type == CPU_PERCENT) {
                         if (x->cpu_valid && y->cpu_valid) {
-                                if (x->cpu_fraction > y->cpu_fraction)
-                                        return -1;
-                                else if (x->cpu_fraction < y->cpu_fraction)
-                                        return 1;
+                                r = CMP(y->cpu_fraction, x->cpu_fraction);
+                                if (r != 0)
+                                        return r;
                         } else if (x->cpu_valid)
                                 return -1;
                         else if (y->cpu_valid)
                                 return 1;
                 } else {
-                        if (x->cpu_usage > y->cpu_usage)
-                                return -1;
-                        else if (x->cpu_usage < y->cpu_usage)
-                                return 1;
+                        r = CMP(y->cpu_usage, x->cpu_usage);
+                        if (r != 0)
+                                return r;
                 }
 
                 break;
 
         case ORDER_TASKS:
                 if (x->n_tasks_valid && y->n_tasks_valid) {
-                        if (x->n_tasks > y->n_tasks)
-                                return -1;
-                        else if (x->n_tasks < y->n_tasks)
-                                return 1;
+                        r = CMP(y->n_tasks, x->n_tasks);
+                        if (r != 0)
+                                return r;
                 } else if (x->n_tasks_valid)
                         return -1;
                 else if (y->n_tasks_valid)
@@ -579,10 +581,9 @@ static int group_compare(const void*a, const void *b) {
 
         case ORDER_MEMORY:
                 if (x->memory_valid && y->memory_valid) {
-                        if (x->memory > y->memory)
-                                return -1;
-                        else if (x->memory < y->memory)
-                                return 1;
+                        r = CMP(y->memory, x->memory);
+                        if (r != 0)
+                                return r;
                 } else if (x->memory_valid)
                         return -1;
                 else if (y->memory_valid)
@@ -592,10 +593,9 @@ static int group_compare(const void*a, const void *b) {
 
         case ORDER_IO:
                 if (x->io_valid && y->io_valid) {
-                        if (x->io_input_bps + x->io_output_bps > y->io_input_bps + y->io_output_bps)
-                                return -1;
-                        else if (x->io_input_bps + x->io_output_bps < y->io_input_bps + y->io_output_bps)
-                                return 1;
+                        r = CMP(y->io_input_bps + y->io_output_bps, x->io_input_bps + x->io_output_bps);
+                        if (r != 0)
+                                return r;
                 } else if (x->io_valid)
                         return -1;
                 else if (y->io_valid)
@@ -624,7 +624,7 @@ static void display(Hashmap *a) {
                 if (g->n_tasks_valid || g->cpu_valid || g->memory_valid || g->io_valid)
                         array[n++] = g;
 
-        qsort_safe(array, n, sizeof(Group*), group_compare);
+        typesafe_qsort(array, n, group_compare);
 
         /* Find the longest names in one run */
         for (j = 0; j < n; j++) {
@@ -709,7 +709,14 @@ static void display(Hashmap *a) {
         }
 }
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-cgtop", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] [CGROUP]\n\n"
                "Show top control groups by their resource usage.\n\n"
                "  -h --help           Show this help\n"
@@ -731,7 +738,13 @@ static void help(void) {
                "  -b --batch          Run in batch mode, accepting no input\n"
                "     --depth=DEPTH    Maximum traversal depth (default: %u)\n"
                "  -M --machine=       Show container\n"
-               , program_invocation_short_name, arg_depth);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , arg_depth
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -769,8 +782,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();
@@ -793,14 +805,16 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_DEPTH:
                         r = safe_atou(optarg, &arg_depth);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse depth parameter: %s", optarg);
+                                return log_error_errno(r, "Failed to parse depth parameter '%s': %m", optarg);
 
                         break;
 
                 case 'd':
                         r = parse_sec(optarg, &arg_delay);
-                        if (r < 0 || arg_delay <= 0) {
-                                log_error("Failed to parse delay parameter: %s", optarg);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse delay parameter '%s': %m", optarg);
+                        if (arg_delay <= 0) {
+                                log_error("Invalid delay parameter '%s'", optarg);
                                 return -EINVAL;
                         }
 
@@ -809,7 +823,7 @@ static int parse_argv(int argc, char *argv[]) {
                 case 'n':
                         r = safe_atou(optarg, &arg_iterations);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse iterations parameter: %s", optarg);
+                                return log_error_errno(r, "Failed to parse iterations parameter '%s': %m", optarg);
 
                         break;
 
@@ -873,7 +887,7 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_RECURSIVE:
                         r = parse_boolean(optarg);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse --recursive= argument: %s", optarg);
+                                return log_error_errno(r, "Failed to parse --recursive= argument '%s': %m", optarg);
 
                         arg_recursive = r;
                         arg_recursive_unset = r == 0;

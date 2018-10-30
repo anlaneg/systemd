@@ -17,7 +17,7 @@
 
 static int dhcp4_route_handler(sd_netlink *rtnl, sd_netlink_message *m,
                                void *userdata) {
-        _cleanup_(link_unrefp) Link *link = userdata;
+        Link *link = userdata;
         int r;
 
         assert(link);
@@ -302,7 +302,7 @@ static int dhcp_lease_lost(Link *link) {
 
 static int dhcp4_address_handler(sd_netlink *rtnl, sd_netlink_message *m,
                                  void *userdata) {
-        _cleanup_(link_unrefp) Link *link = userdata;
+        Link *link = userdata;
         int r;
 
         assert(link);
@@ -503,10 +503,8 @@ static int dhcp_lease_acquired(sd_dhcp_client *client, Link *link) {
 
         if (!link->network->dhcp_critical) {
                 r = sd_dhcp_lease_get_lifetime(link->dhcp_lease, &lifetime);
-                if (r < 0) {
-                        log_link_warning_errno(link, r, "DHCP error: no lifetime: %m");
-                        return r;
-                }
+                if (r < 0)
+                        return log_link_warning_errno(link, r, "DHCP error: no lifetime: %m");
         }
 
         r = dhcp4_update_address(link, &address, &netmask, lifetime);
@@ -662,6 +660,63 @@ int dhcp4_set_promote_secondaries(Link *link) {
         return 0;
 }
 
+int dhcp4_set_client_identifier(Link *link) {
+        int r;
+
+        assert(link);
+        assert(link->network);
+        assert(link->dhcp_client);
+
+        switch (link->network->dhcp_client_identifier) {
+        case DHCP_CLIENT_ID_DUID: {
+                /* If configured, apply user specified DUID and IAID */
+                const DUID *duid = link_get_duid(link);
+
+                if (duid->type == DUID_TYPE_LLT && duid->raw_data_len == 0)
+                        r = sd_dhcp_client_set_iaid_duid_llt(link->dhcp_client,
+                                                             link->network->iaid,
+                                                             duid->llt_time);
+                else
+                        r = sd_dhcp_client_set_iaid_duid(link->dhcp_client,
+                                                         link->network->iaid,
+                                                         duid->type,
+                                                         duid->raw_data_len > 0 ? duid->raw_data : NULL,
+                                                         duid->raw_data_len);
+                if (r < 0)
+                        return log_link_error_errno(link, r, "DHCP4 CLIENT: Failed to set IAID+DUID: %m");
+                break;
+        }
+        case DHCP_CLIENT_ID_DUID_ONLY: {
+                /* If configured, apply user specified DUID */
+                const DUID *duid = link_get_duid(link);
+
+                if (duid->type == DUID_TYPE_LLT && duid->raw_data_len == 0)
+                        r = sd_dhcp_client_set_duid_llt(link->dhcp_client,
+                                                             duid->llt_time);
+                else
+                        r = sd_dhcp_client_set_duid(link->dhcp_client,
+                                                    duid->type,
+                                                    duid->raw_data_len > 0 ? duid->raw_data : NULL,
+                                                    duid->raw_data_len);
+                if (r < 0)
+                        return log_link_error_errno(link, r, "DHCP4 CLIENT: Failed to set DUID: %m");
+                break;
+        }
+        case DHCP_CLIENT_ID_MAC:
+                r = sd_dhcp_client_set_client_id(link->dhcp_client,
+                                                 ARPHRD_ETHER,
+                                                 (const uint8_t *) &link->mac,
+                                                 sizeof(link->mac));
+                if (r < 0)
+                        return log_link_error_errno(link, r, "DHCP4 CLIENT: Failed to set client ID: %m");
+                break;
+        default:
+                assert_not_reached("Unknown client identifier type.");
+        }
+
+        return 0;
+}
+
 int dhcp4_configure(Link *link) {
         int r;
 
@@ -765,43 +820,5 @@ int dhcp4_configure(Link *link) {
                         return log_link_error_errno(link, r, "DHCP4 CLIENT: Failed to set listen port: %m");
         }
 
-        switch (link->network->dhcp_client_identifier) {
-        case DHCP_CLIENT_ID_DUID: {
-                /* If configured, apply user specified DUID and/or IAID */
-                const DUID *duid = link_duid(link);
-
-                r = sd_dhcp_client_set_iaid_duid(link->dhcp_client,
-                                                 link->network->iaid,
-                                                 duid->type,
-                                                 duid->raw_data_len > 0 ? duid->raw_data : NULL,
-                                                 duid->raw_data_len);
-                if (r < 0)
-                        return log_link_error_errno(link, r, "DHCP4 CLIENT: Failed to set DUID: %m");
-                break;
-        }
-        case DHCP_CLIENT_ID_DUID_ONLY: {
-                /* If configured, apply user specified DUID */
-                const DUID *duid = link_duid(link);
-
-                r = sd_dhcp_client_set_duid(link->dhcp_client,
-                                            duid->type,
-                                            duid->raw_data_len > 0 ? duid->raw_data : NULL,
-                                            duid->raw_data_len);
-                if (r < 0)
-                        return log_link_error_errno(link, r, "DHCP4 CLIENT: Failed to set DUID: %m");
-                break;
-        }
-        case DHCP_CLIENT_ID_MAC:
-                r = sd_dhcp_client_set_client_id(link->dhcp_client,
-                                                 ARPHRD_ETHER,
-                                                 (const uint8_t *) &link->mac,
-                                                 sizeof(link->mac));
-                if (r < 0)
-                        return log_link_error_errno(link, r, "DHCP4 CLIENT: Failed to set client ID: %m");
-                break;
-        default:
-                assert_not_reached("Unknown client identifier type.");
-        }
-
-        return 0;
+        return dhcp4_set_client_identifier(link);
 }

@@ -2,7 +2,7 @@
 #pragma once
 
 #include "sd-bus.h"
-#include "udev.h"
+#include "sd-device.h"
 
 #include "condition.h"
 #include "conf-parser.h"
@@ -70,6 +70,7 @@ typedef struct DUID {
 
         uint8_t raw_data_len;
         uint8_t raw_data[MAX_DUID_LEN];
+        usec_t llt_time;
 } DUID;
 
 typedef enum RADVPrefixDelegation {
@@ -170,6 +171,9 @@ struct Network {
         struct in6_addr *router_dns;
         unsigned n_router_dns;
         char **router_search_domains;
+        bool dhcp6_force_pd_other_information; /* Start DHCPv6 PD also when 'O'
+                                                  RA flag is set, see RFC 7084,
+                                                  WPD-4 */
 
         /* Bridge Support */
         int use_bpdu;
@@ -268,7 +272,7 @@ DEFINE_TRIVIAL_CLEANUP_FUNC(Network*, network_free);
 int network_load(Manager *manager);
 
 int network_get_by_name(Manager *manager, const char *name, Network **ret);
-int network_get(Manager *manager, struct udev_device *device, const char *ifname, const struct ether_addr *mac, Network **ret);
+int network_get(Manager *manager, sd_device *device, const char *ifname, const struct ether_addr *mac, Network **ret);
 int network_apply(Network *network, Link *link);
 void network_apply_anonymize_if_set(Network *network);
 

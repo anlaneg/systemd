@@ -227,8 +227,9 @@ static int set_simple_string(sd_bus *bus, const char *method, const char *value)
                         &error, NULL,
                         "sb", value, arg_ask_password);
         if (r < 0)
-                log_error("Could not set property: %s", bus_error_message(&error, -r));
-        return r;
+                return log_error_errno(r, "Could not set property: %s", bus_error_message(&error, -r));
+
+        return 0;
 }
 
 static int set_hostname(int argc, char **argv, void *userdata) {
@@ -300,6 +301,13 @@ static int set_location(int argc, char **argv, void *userdata) {
 }
 
 static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("hostnamectl", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] COMMAND ...\n\n"
                "Query or change system hostname.\n\n"
                "  -h --help              Show this help\n"
@@ -317,7 +325,10 @@ static int help(void) {
                "  set-chassis NAME       Set chassis type for host\n"
                "  set-deployment NAME    Set deployment environment for host\n"
                "  set-location NAME      Set location for host\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
 
         return 0;
 }

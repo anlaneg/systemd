@@ -18,6 +18,7 @@
 
 #include "sd-bus.h"
 #include "sd-daemon.h"
+#include "sd-event.h"
 #include "sd-login.h"
 
 #include "alloc-util.h"
@@ -315,25 +316,24 @@ static bool install_client_side(void) {
         return false;
 }
 
-static int compare_unit_info(const void *a, const void *b) {
-        const UnitInfo *u = a, *v = b;
+static int compare_unit_info(const UnitInfo *a, const UnitInfo *b) {
         const char *d1, *d2;
         int r;
 
         /* First, order by machine */
-        if (!u->machine && v->machine)
+        if (!a->machine && b->machine)
                 return -1;
-        if (u->machine && !v->machine)
+        if (a->machine && !b->machine)
                 return 1;
-        if (u->machine && v->machine) {
-                r = strcasecmp(u->machine, v->machine);
+        if (a->machine && b->machine) {
+                r = strcasecmp(a->machine, b->machine);
                 if (r != 0)
                         return r;
         }
 
         /* Second, order by unit type */
-        d1 = strrchr(u->id, '.');
-        d2 = strrchr(v->id, '.');
+        d1 = strrchr(a->id, '.');
+        d2 = strrchr(b->id, '.');
         if (d1 && d2) {
                 r = strcasecmp(d1, d2);
                 if (r != 0)
@@ -341,7 +341,7 @@ static int compare_unit_info(const void *a, const void *b) {
         }
 
         /* Third, order by name */
-        return strcasecmp(u->id, v->id);
+        return strcasecmp(a->id, b->id);
 }
 
 static const char* unit_type_suffix(const char *name) {
@@ -755,7 +755,7 @@ static int list_units(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
-        qsort_safe(unit_infos, r, sizeof(UnitInfo), compare_unit_info);
+        typesafe_qsort(unit_infos, r, compare_unit_info);
         return output_units_list(unit_infos, r);
 }
 
@@ -850,7 +850,7 @@ struct socket_info {
 };
 
 static int socket_info_compare(const struct socket_info *a, const struct socket_info *b) {
-        int o;
+        int r;
 
         assert(a);
         assert(b);
@@ -860,16 +860,16 @@ static int socket_info_compare(const struct socket_info *a, const struct socket_
         if (a->machine && !b->machine)
                 return 1;
         if (a->machine && b->machine) {
-                o = strcasecmp(a->machine, b->machine);
-                if (o != 0)
-                        return o;
+                r = strcasecmp(a->machine, b->machine);
+                if (r != 0)
+                        return r;
         }
 
-        o = strcmp(a->path, b->path);
-        if (o == 0)
-                o = strcmp(a->type, b->type);
+        r = strcmp(a->path, b->path);
+        if (r == 0)
+                r = strcmp(a->type, b->type);
 
-        return o;
+        return r;
 }
 
 static int output_sockets_list(struct socket_info *socket_infos, unsigned cs) {
@@ -1005,8 +1005,7 @@ static int list_sockets(int argc, char *argv[], void *userdata) {
                 listening = triggered = NULL; /* avoid cleanup */
         }
 
-        qsort_safe(socket_infos, cs, sizeof(struct socket_info),
-                   (__compar_fn_t) socket_info_compare);
+        typesafe_qsort(socket_infos, cs, socket_info_compare);
 
         output_sockets_list(socket_infos, cs);
 
@@ -1099,7 +1098,7 @@ struct timer_info {
 };
 
 static int timer_info_compare(const struct timer_info *a, const struct timer_info *b) {
-        int o;
+        int r;
 
         assert(a);
         assert(b);
@@ -1109,15 +1108,14 @@ static int timer_info_compare(const struct timer_info *a, const struct timer_inf
         if (a->machine && !b->machine)
                 return 1;
         if (a->machine && b->machine) {
-                o = strcasecmp(a->machine, b->machine);
-                if (o != 0)
-                        return o;
+                r = strcasecmp(a->machine, b->machine);
+                if (r != 0)
+                        return r;
         }
 
-        if (a->next_elapse < b->next_elapse)
-                return -1;
-        if (a->next_elapse > b->next_elapse)
-                return 1;
+        r = CMP(a->next_elapse, b->next_elapse);
+        if (r != 0)
+                return r;
 
         return strcmp(a->id, b->id);
 }
@@ -1310,8 +1308,7 @@ static int list_timers(int argc, char *argv[], void *userdata) {
                 };
         }
 
-        qsort_safe(timer_infos, c, sizeof(struct timer_info),
-                   (__compar_fn_t) timer_info_compare);
+        typesafe_qsort(timer_infos, c, timer_info_compare);
 
         output_timers_list(timer_infos, c);
 
@@ -1322,12 +1319,11 @@ static int list_timers(int argc, char *argv[], void *userdata) {
         return r;
 }
 
-static int compare_unit_file_list(const void *a, const void *b) {
+static int compare_unit_file_list(const UnitFileList *a, const UnitFileList *b) {
         const char *d1, *d2;
-        const UnitFileList *u = a, *v = b;
 
-        d1 = strrchr(u->path, '.');
-        d2 = strrchr(v->path, '.');
+        d1 = strrchr(a->path, '.');
+        d2 = strrchr(b->path, '.');
 
         if (d1 && d2) {
                 int r;
@@ -1337,7 +1333,7 @@ static int compare_unit_file_list(const void *a, const void *b) {
                         return r;
         }
 
-        return strcasecmp(basename(u->path), basename(v->path));
+        return strcasecmp(basename(a->path), basename(b->path));
 }
 
 static bool output_show_unit_file(const UnitFileList *u, char **states, char **patterns) {
@@ -1557,7 +1553,7 @@ static int list_unit_files(int argc, char *argv[], void *userdata) {
 
         (void) pager_open(arg_no_pager, false);
 
-        qsort_safe(units, c, sizeof(UnitFileList), compare_unit_file_list);
+        typesafe_qsort(units, c, compare_unit_file_list);
         output_unit_file_list(units, c);
 
         if (install_client_side())
@@ -1567,7 +1563,7 @@ static int list_unit_files(int argc, char *argv[], void *userdata) {
         return 0;
 }
 
-static int list_dependencies_print(const char *name, int level, unsigned int branches, bool last) {
+static int list_dependencies_print(const char *name, int level, unsigned branches, bool last) {
         _cleanup_free_ char *n = NULL;
         size_t max_len = MAX(columns(),20u);
         size_t len = 0;
@@ -1679,9 +1675,7 @@ static int list_dependencies_get_dependencies(sd_bus *bus, const char *name, cha
         return 0;
 }
 
-static int list_dependencies_compare(const void *_a, const void *_b) {
-        const char **a = (const char**) _a, **b = (const char**) _b;
-
+static int list_dependencies_compare(char * const *a, char * const *b) {
         if (unit_name_to_type(*a) == UNIT_TARGET && unit_name_to_type(*b) != UNIT_TARGET)
                 return 1;
         if (unit_name_to_type(*a) != UNIT_TARGET && unit_name_to_type(*b) == UNIT_TARGET)
@@ -1695,7 +1689,7 @@ static int list_dependencies_one(
                 const char *name,
                 int level,
                 char ***units,
-                unsigned int branches) {
+                unsigned branches) {
 
         _cleanup_strv_free_ char **deps = NULL;
         char **c;
@@ -1713,7 +1707,7 @@ static int list_dependencies_one(
         if (r < 0)
                 return r;
 
-        qsort_safe(deps, strv_length(deps), sizeof (char*), list_dependencies_compare);
+        typesafe_qsort(deps, strv_length(deps), list_dependencies_compare);
 
         STRV_FOREACH(c, deps) {
                 if (strv_contains(*units, *c)) {
@@ -1838,13 +1832,14 @@ static void free_machines_list(struct machine_info *machine_infos, int n) {
         free(machine_infos);
 }
 
-static int compare_machine_info(const void *a, const void *b) {
-        const struct machine_info *u = a, *v = b;
+static int compare_machine_info(const struct machine_info *a, const struct machine_info *b) {
+        int r;
 
-        if (u->is_host != v->is_host)
-                return u->is_host > v->is_host ? -1 : 1;
+        r = CMP(b->is_host, a->is_host);
+        if (r != 0)
+                return r;
 
-        return strcasecmp(u->name, v->name);
+        return strcasecmp(a->name, b->name);
 }
 
 static int get_machine_properties(sd_bus *bus, struct machine_info *mi) {
@@ -2032,7 +2027,7 @@ static int list_machines(int argc, char *argv[], void *userdata) {
 
         (void) pager_open(arg_no_pager, false);
 
-        qsort_safe(machine_infos, r, sizeof(struct machine_info), compare_machine_info);
+        typesafe_qsort(machine_infos, r, compare_machine_info);
         output_machines_list(machine_infos, r);
         free_machines_list(machine_infos, r);
 
@@ -3023,12 +3018,12 @@ static enum action verb_to_action(const char *verb) {
 
 static int start_unit(int argc, char *argv[], void *userdata) {
         _cleanup_(bus_wait_for_jobs_freep) BusWaitForJobs *w = NULL;
+        _cleanup_(wait_context_free) WaitContext wait_context = {};
         const char *method, *mode, *one_name, *suffix = NULL;
         _cleanup_strv_free_ char **names = NULL;
+        int r, ret = EXIT_SUCCESS;
         sd_bus *bus;
-        _cleanup_(wait_context_free) WaitContext wait_context = {};
         char **name;
-        int r = 0;
 
         if (arg_wait && !STR_IN_SET(argv[0], "start", "restart")) {
                 log_error("--wait may only be used with the 'start' or 'restart' commands.");
@@ -3075,9 +3070,11 @@ static int start_unit(int argc, char *argv[], void *userdata) {
                 one_name = action_table[arg_action].target;
         }
 
-        if (one_name)
+        if (one_name) {
                 names = strv_new(one_name, NULL);
-        else {
+                if (!names)
+                        return log_oom();
+        } else {
                 r = expand_names(bus, strv_skip(argv, 1), suffix, &names);
                 if (r < 0)
                         return log_error_errno(r, "Failed to expand names: %m");
@@ -3115,16 +3112,15 @@ static int start_unit(int argc, char *argv[], void *userdata) {
 
         STRV_FOREACH(name, names) {
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-                int q;
 
-                q = start_unit_one(bus, method, *name, mode, &error, w, arg_wait ? &wait_context : NULL);
-                if (r >= 0 && q < 0)
-                        r = translate_bus_error_to_exit_status(q, &error);
+                r = start_unit_one(bus, method, *name, mode, &error, w, arg_wait ? &wait_context : NULL);
+                if (ret == EXIT_SUCCESS && r < 0)
+                        ret = translate_bus_error_to_exit_status(r, &error);
         }
 
         if (!arg_no_block) {
-                int q, arg_count = 0;
                 const char* extra_args[4] = {};
+                int arg_count = 0;
 
                 if (arg_scope != UNIT_FILE_SYSTEM)
                         extra_args[arg_count++] = "--user";
@@ -3138,9 +3134,9 @@ static int start_unit(int argc, char *argv[], void *userdata) {
                         extra_args[arg_count++] = arg_host;
                 }
 
-                q = bus_wait_for_jobs(w, arg_quiet, extra_args);
-                if (q < 0)
-                        return q;
+                r = bus_wait_for_jobs(w, arg_quiet, extra_args);
+                if (r < 0)
+                        return r;
 
                 /* When stopping units, warn if they can still be triggered by
                  * another active unit (socket, path, timer) */
@@ -3149,16 +3145,15 @@ static int start_unit(int argc, char *argv[], void *userdata) {
                                 (void) check_triggering_units(bus, *name);
         }
 
-        if (r >= 0 && arg_wait && !set_isempty(wait_context.unit_paths)) {
-                int q;
-                q = sd_event_loop(wait_context.event);
-                if (q < 0)
-                        return log_error_errno(q, "Failed to run event loop: %m");
+        if (ret == EXIT_SUCCESS && arg_wait && !set_isempty(wait_context.unit_paths)) {
+                r = sd_event_loop(wait_context.event);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to run event loop: %m");
                 if (wait_context.any_failed)
-                        r = EXIT_FAILURE;
+                        ret = EXIT_FAILURE;
         }
 
-        return r;
+        return ret;
 }
 
 #if ENABLE_LOGIND
@@ -3460,21 +3455,12 @@ static int load_kexec_kernel(void) {
         if (access(KEXEC, X_OK) < 0)
                 return log_error_errno(errno, KEXEC" is not available: %m");
 
-        r = find_esp_and_warn(arg_esp_path, false, &where, NULL, NULL, NULL, NULL);
-        if (r == -ENOKEY) /* find_esp_and_warn() doesn't warn about this case */
+        r = find_default_boot_entry(arg_esp_path, &where, &config, &e);
+        if (r == -ENOKEY) /* find_default_boot_entry() doesn't warn about this case */
                 return log_error_errno(r, "Cannot find the ESP partition mount point.");
-        if (r < 0) /* But it logs about all these cases, hence don't log here again */
-                return r;
-
-        r = boot_entries_load_config(where, &config);
         if (r < 0)
-                return log_error_errno(r, "Failed to load bootspec config from \"%s/loader\": %m", where);
-
-        if (config.default_entry < 0) {
-                log_error("No entry suitable as default, refusing to guess.");
-                return -ENOENT;
-        }
-        e = &config.entries[config.default_entry];
+                /* But it logs about all these cases, hence don't log here again */
+                return r;
 
         if (strv_length(e->initrd) > 1) {
                 log_error("Boot entry specifies multiple initrds, which is not supported currently.");
@@ -4585,15 +4571,7 @@ static int map_exec(sd_bus *bus, const char *member, sd_bus_message *m, sd_bus_e
         return 0;
 }
 
-#define print_prop(name, fmt, ...)                                      \
-        do {                                                            \
-                if (arg_value)                                          \
-                        printf(fmt "\n", __VA_ARGS__);                  \
-                else                                                    \
-                        printf("%s=" fmt "\n", name, __VA_ARGS__);      \
-        } while (0)
-
-static int print_property(const char *name, sd_bus_message *m, bool value, bool all) {
+static int print_property(const char *name, const char *expected_value, sd_bus_message *m, bool value, bool all) {
         char bus_type;
         const char *contents;
         int r;
@@ -4620,9 +4598,9 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                                 return bus_log_parse_error(r);
 
                         if (u > 0)
-                                print_prop(name, "%"PRIu32, u);
+                                bus_print_property_value(name, expected_value, value, "%"PRIu32, u);
                         else if (all)
-                                print_prop(name, "%s", "");
+                                bus_print_property_value(name, expected_value, value, "%s", "");
 
                         return 1;
 
@@ -4634,7 +4612,7 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                                 return bus_log_parse_error(r);
 
                         if (all || !isempty(s))
-                                print_prop(name, "%s", s);
+                                bus_print_property_value(name, expected_value, value, "%s", s);
 
                         return 1;
 
@@ -4646,7 +4624,7 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                                 return bus_log_parse_error(r);
 
                         if (all || !isempty(a) || !isempty(b))
-                                print_prop(name, "%s \"%s\"", strempty(a), strempty(b));
+                                bus_print_property_value(name, expected_value, value, "%s \"%s\"", strempty(a), strempty(b));
 
                         return 1;
                 } else if (streq_ptr(name, "SystemCallFilter")) {
@@ -4708,7 +4686,7 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                                 return bus_log_parse_error(r);
 
                         while ((r = sd_bus_message_read(m, "(sb)", &path, &ignore)) > 0)
-                                print_prop(name, "%s (ignore_errors=%s)", path, yes_no(ignore));
+                                bus_print_property_value(name, expected_value, value, "%s (ignore_errors=%s)", path, yes_no(ignore));
 
                         if (r < 0)
                                 return bus_log_parse_error(r);
@@ -4727,7 +4705,7 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                                 return bus_log_parse_error(r);
 
                         while ((r = sd_bus_message_read(m, "(ss)", &type, &path)) > 0)
-                                print_prop(name, "%s (%s)", path, type);
+                                bus_print_property_value(name, expected_value, value, "%s (%s)", path, type);
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
@@ -4745,7 +4723,7 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                                 return bus_log_parse_error(r);
 
                         while ((r = sd_bus_message_read(m, "(ss)", &type, &path)) > 0)
-                                print_prop(name, "%s (%s)", path, type);
+                                bus_print_property_value(name, expected_value, value, "%s (%s)", path, type);
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
@@ -4766,9 +4744,9 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                         while ((r = sd_bus_message_read(m, "(stt)", &base, &v, &next_elapse)) > 0) {
                                 char timespan1[FORMAT_TIMESPAN_MAX], timespan2[FORMAT_TIMESPAN_MAX];
 
-                                print_prop(name, "{ %s=%s ; next_elapse=%s }", base,
-                                           format_timespan(timespan1, sizeof(timespan1), v, 0),
-                                           format_timespan(timespan2, sizeof(timespan2), next_elapse, 0));
+                                bus_print_property_value(name, expected_value, value, "{ %s=%s ; next_elapse=%s }", base,
+                                                         format_timespan(timespan1, sizeof(timespan1), v, 0),
+                                                         format_timespan(timespan2, sizeof(timespan2), next_elapse, 0));
                         }
                         if (r < 0)
                                 return bus_log_parse_error(r);
@@ -4790,8 +4768,8 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                         while ((r = sd_bus_message_read(m, "(sst)", &base, &spec, &next_elapse)) > 0) {
                                 char timestamp[FORMAT_TIMESTAMP_MAX];
 
-                                print_prop(name, "{ %s=%s ; next_elapse=%s }", base, spec,
-                                           format_timestamp(timestamp, sizeof(timestamp), next_elapse));
+                                bus_print_property_value(name, expected_value, value, "{ %s=%s ; next_elapse=%s }", base, spec,
+                                                         format_timestamp(timestamp, sizeof(timestamp), next_elapse));
                         }
                         if (r < 0)
                                 return bus_log_parse_error(r);
@@ -4815,18 +4793,18 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
 
                                 tt = strv_join(info.argv, " ");
 
-                                print_prop(name,
-                                           "{ path=%s ; argv[]=%s ; ignore_errors=%s ; start_time=[%s] ; stop_time=[%s] ; pid="PID_FMT" ; code=%s ; status=%i%s%s }",
-                                           strna(info.path),
-                                           strna(tt),
-                                           yes_no(info.ignore),
-                                           strna(format_timestamp(timestamp1, sizeof(timestamp1), info.start_timestamp)),
-                                           strna(format_timestamp(timestamp2, sizeof(timestamp2), info.exit_timestamp)),
-                                           info.pid,
-                                           sigchld_code_to_string(info.code),
-                                           info.status,
-                                           info.code == CLD_EXITED ? "" : "/",
-                                           strempty(info.code == CLD_EXITED ? NULL : signal_to_string(info.status)));
+                                 bus_print_property_value(name, expected_value, value,
+                                                          "{ path=%s ; argv[]=%s ; ignore_errors=%s ; start_time=[%s] ; stop_time=[%s] ; pid="PID_FMT" ; code=%s ; status=%i%s%s }",
+                                                          strna(info.path),
+                                                          strna(tt),
+                                                          yes_no(info.ignore),
+                                                          strna(format_timestamp(timestamp1, sizeof(timestamp1), info.start_timestamp)),
+                                                          strna(format_timestamp(timestamp2, sizeof(timestamp2), info.exit_timestamp)),
+                                                          info.pid,
+                                                          sigchld_code_to_string(info.code),
+                                                          info.status,
+                                                          info.code == CLD_EXITED ? "" : "/",
+                                                          strempty(info.code == CLD_EXITED ? NULL : signal_to_string(info.status)));
 
                                 free(info.path);
                                 strv_free(info.argv);
@@ -4847,7 +4825,7 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                                 return bus_log_parse_error(r);
 
                         while ((r = sd_bus_message_read(m, "(ss)", &path, &rwm)) > 0)
-                                print_prop(name, "%s %s", strna(path), strna(rwm));
+                                bus_print_property_value(name, expected_value, value, "%s %s", strna(path), strna(rwm));
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
@@ -4867,7 +4845,7 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                                 return bus_log_parse_error(r);
 
                         while ((r = sd_bus_message_read(m, "(st)", &path, &weight)) > 0)
-                                print_prop(name, "%s %"PRIu64, strna(path), weight);
+                                bus_print_property_value(name, expected_value, value, "%s %"PRIu64, strna(path), weight);
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
@@ -4888,7 +4866,29 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                                 return bus_log_parse_error(r);
 
                         while ((r = sd_bus_message_read(m, "(st)", &path, &bandwidth)) > 0)
-                                print_prop(name, "%s %"PRIu64, strna(path), bandwidth);
+                                bus_print_property_value(name, expected_value, value, "%s %"PRIu64, strna(path), bandwidth);
+                        if (r < 0)
+                                return bus_log_parse_error(r);
+
+                        r = sd_bus_message_exit_container(m);
+                        if (r < 0)
+                                return bus_log_parse_error(r);
+
+                        return 1;
+
+                }  else if (contents[0] == SD_BUS_TYPE_STRUCT_BEGIN &&
+                            streq(name, "IODeviceLatencyTargetUSec")) {
+                        char ts[FORMAT_TIMESPAN_MAX];
+                        const char *path;
+                        uint64_t target;
+
+                        r = sd_bus_message_enter_container(m, SD_BUS_TYPE_ARRAY, "(st)");
+                        if (r < 0)
+                                return bus_log_parse_error(r);
+
+                        while ((r = sd_bus_message_read(m, "(st)", &path, &target)) > 0)
+                                bus_print_property_value(name, expected_value, value, "%s %s", strna(path),
+                                                         format_timespan(ts, sizeof(ts), target, 1));
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
@@ -4912,7 +4912,7 @@ static int print_property(const char *name, sd_bus_message *m, bool value, bool 
                         if (n < 0)
                                 return log_oom();
 
-                        print_prop(name, "%s", h);
+                        bus_print_property_value(name, expected_value, value, "%s", h);
 
                         return 1;
                 }
@@ -5154,7 +5154,7 @@ static int show_all(
 
         c = (unsigned) r;
 
-        qsort_safe(unit_infos, c, sizeof(UnitInfo), compare_unit_info);
+        typesafe_qsort(unit_infos, c, compare_unit_info);
 
         for (u = unit_infos; u < unit_infos + c; u++) {
                 _cleanup_free_ char *p = NULL;
@@ -5263,12 +5263,6 @@ static int show(int argc, char *argv[], void *userdata) {
                 return r;
 
         (void) pager_open(arg_no_pager, false);
-
-        if (show_mode == SYSTEMCTL_SHOW_STATUS)
-                /* Increase max number of open files to 16K if we can, we
-                 * might needs this when browsing journal files, which might
-                 * be split up into many files. */
-                setrlimit_closest(RLIMIT_NOFILE, &RLIMIT_MAKE_CONST(16384));
 
         /* If no argument is specified inspect the manager itself */
         if (show_mode == SYSTEMCTL_SHOW_PROPERTIES && argc <= 1)
@@ -6629,8 +6623,29 @@ static int unit_is_enabled(int argc, char *argv[], void *userdata) {
         return enabled ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+static int match_startup_finished(sd_bus_message *m, void *userdata, sd_bus_error *error) {
+        char **state = userdata;
+        int r;
+
+        assert(state);
+
+        r = sd_bus_get_property_string(
+                        sd_bus_message_get_bus(m),
+                        "org.freedesktop.systemd1",
+                        "/org/freedesktop/systemd1",
+                        "org.freedesktop.systemd1.Manager",
+                        "SystemState",
+                        NULL,
+                        state);
+
+        sd_event_exit(sd_bus_get_event(sd_bus_message_get_bus(m)), r);
+        return 0;
+}
+
 static int is_system_running(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+        _cleanup_(sd_bus_slot_unrefp) sd_bus_slot *slot_startup_finished = NULL;
+        _cleanup_(sd_event_unrefp) sd_event* event = NULL;
         _cleanup_free_ char *state = NULL;
         sd_bus *bus;
         int r;
@@ -6645,6 +6660,25 @@ static int is_system_running(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
+        if (arg_wait) {
+                r = sd_event_default(&event);
+                if (r >= 0)
+                        r = sd_bus_attach_event(bus, event, 0);
+                if (r >= 0)
+                        r = sd_bus_match_signal_async(
+                                        bus,
+                                        &slot_startup_finished,
+                                        "org.freedesktop.systemd1",
+                                        "/org/freedesktop/systemd1",
+                                        "org.freedesktop.systemd1.Manager",
+                                        "StartupFinished",
+                                        match_startup_finished, NULL, &state);
+                if (r < 0) {
+                        log_warning_errno(r, "Failed to request match for StartupFinished: %m");
+                        arg_wait = false;
+                }
+        }
+
         r = sd_bus_get_property_string(
                         bus,
                         "org.freedesktop.systemd1",
@@ -6654,11 +6688,21 @@ static int is_system_running(int argc, char *argv[], void *userdata) {
                         &error,
                         &state);
         if (r < 0) {
-                log_debug_errno(r, "Failed to query system state: %s", bus_error_message(&error, r));
+                log_warning_errno(r, "Failed to query system state: %s", bus_error_message(&error, r));
 
                 if (!arg_quiet)
                         puts("unknown");
                 return EXIT_FAILURE;
+        }
+
+        if (arg_wait && STR_IN_SET(state, "initializing", "starting")) {
+                r = sd_event_loop(event);
+                if (r < 0) {
+                        log_warning_errno(r, "Failed to get property from event loop: %m");
+                        if (!arg_quiet)
+                                puts("unknown");
+                        return EXIT_FAILURE;
+                }
         }
 
         if (!arg_quiet)
@@ -7047,8 +7091,15 @@ end:
         return r;
 }
 
-static void systemctl_help(void) {
+static int systemctl_help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
         (void) pager_open(arg_no_pager, false);
+
+        r = terminal_urlify_man("systemctl", "1", &link);
+        if (r < 0)
+                return log_oom();
 
         printf("%s [OPTIONS...] {COMMAND} ...\n\n"
                "Query or send control commands to the systemd manager.\n\n"
@@ -7082,6 +7133,7 @@ static void systemctl_help(void) {
                "     --dry-run        Only print what would be done\n"
                "  -q --quiet          Suppress output\n"
                "     --wait           For (re)start, wait until service stopped again\n"
+               "                      For is-system-running, wait until startup is completed\n"
                "     --no-block       Do not wait until operation finished\n"
                "     --no-wall        Don't send wall message before halt/power-off/reboot\n"
                "     --no-reload      Don't reload daemon after en-/dis-abling unit files\n"
@@ -7185,11 +7237,23 @@ static void systemctl_help(void) {
                "  hibernate                           Hibernate the system\n"
                "  hybrid-sleep                        Hibernate and suspend the system\n"
                "  suspend-then-hibernate              Suspend the system, wake after a period of\n"
-               "                                      time and put it into hibernate\n",
-               program_invocation_short_name);
+               "                                      time and put it into hibernate\n"
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
-static void halt_help(void) {
+static int halt_help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("halt", "8", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...]%s\n\n"
                "%s the system.\n\n"
                "     --help      Show this help\n"
@@ -7199,15 +7263,27 @@ static void halt_help(void) {
                "  -f --force     Force immediate halt/power-off/reboot\n"
                "  -w --wtmp-only Don't halt/power-off/reboot, just write wtmp record\n"
                "  -d --no-wtmp   Don't write wtmp record\n"
-               "     --no-wall   Don't send wall message before halt/power-off/reboot\n",
-               program_invocation_short_name,
-               arg_action == ACTION_REBOOT   ? " [ARG]" : "",
-               arg_action == ACTION_REBOOT   ? "Reboot" :
-               arg_action == ACTION_POWEROFF ? "Power off" :
-                                               "Halt");
+               "     --no-wall   Don't send wall message before halt/power-off/reboot\n"
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , arg_action == ACTION_REBOOT   ? " [ARG]" : "",
+                 arg_action == ACTION_REBOOT   ? "Reboot" :
+                 arg_action == ACTION_POWEROFF ? "Power off" :
+                                                 "Halt"
+               , link
+        );
+
+        return 0;
 }
 
-static void shutdown_help(void) {
+static int shutdown_help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("shutdown", "8", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] [TIME] [WALL...]\n\n"
                "Shut down the system.\n\n"
                "     --help      Show this help\n"
@@ -7217,11 +7293,23 @@ static void shutdown_help(void) {
                "  -h             Equivalent to --poweroff, overridden by --halt\n"
                "  -k             Don't halt/power-off/reboot, just send warnings\n"
                "     --no-wall   Don't send wall message before halt/power-off/reboot\n"
-               "  -c             Cancel a pending shutdown\n",
-               program_invocation_short_name);
+               "  -c             Cancel a pending shutdown\n"
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
-static void telinit_help(void) {
+static int telinit_help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("telinit", "8", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] {COMMAND}\n\n"
                "Send control commands to the init daemon.\n\n"
                "     --help      Show this help\n"
@@ -7232,15 +7320,32 @@ static void telinit_help(void) {
                "  2, 3, 4, 5     Start runlevelX.target unit\n"
                "  1, s, S        Enter rescue mode\n"
                "  q, Q           Reload init daemon configuration\n"
-               "  u, U           Reexecute init daemon\n",
-               program_invocation_short_name);
+               "  u, U           Reexecute init daemon\n"
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
-static void runlevel_help(void) {
+static int runlevel_help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("runlevel", "8", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...]\n\n"
                "Prints the previous and current runlevel of the init system.\n\n"
-               "     --help      Show this help\n",
-               program_invocation_short_name);
+               "     --help      Show this help\n"
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static void help_types(void) {
@@ -7402,8 +7507,7 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        systemctl_help();
-                        return 0;
+                        return systemctl_help();
 
                 case ARG_VERSION:
                         return version();
@@ -7777,8 +7881,7 @@ static int halt_parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case ARG_HELP:
-                        halt_help();
-                        return 0;
+                        return halt_help();
 
                 case ARG_HALT:
                         arg_action = ACTION_HALT;
@@ -7913,8 +8016,7 @@ static int shutdown_parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case ARG_HELP:
-                        shutdown_help();
-                        return 0;
+                        return shutdown_help();
 
                 case 'H':
                         arg_action = ACTION_HALT;
@@ -8034,8 +8136,7 @@ static int telinit_parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case ARG_HELP:
-                        telinit_help();
-                        return 0;
+                        return telinit_help();
 
                 case ARG_NO_WALL:
                         arg_no_wall = true;
@@ -8098,8 +8199,7 @@ static int runlevel_parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case ARG_HELP:
-                        runlevel_help();
-                        return 0;
+                        return runlevel_help();
 
                 case '?':
                         return -EINVAL;
@@ -8343,7 +8443,7 @@ static int start_with_fallback(void) {
 
 static int halt_now(enum action a) {
         /* The kernel will automatically flush ATA disks and suchlike on reboot(), but the file systems need to be
-         * synce'd explicitly in advance. */
+         * synced explicitly in advance. */
         if (!arg_no_sync && !arg_dry_run)
                 (void) sync();
 
@@ -8447,8 +8547,10 @@ static int halt_main(void) {
         if (r < 0)
                 return r;
 
-        if (arg_when > 0)
-                return logind_schedule_shutdown();
+        /* Delayed shutdown requested, and was successful */
+        if (arg_when > 0 && logind_schedule_shutdown() == 0)
+                return 0;
+        /* no delay, or logind failed or is not at all available */
 
         if (geteuid() != 0) {
                 if (arg_dry_run || arg_force > 0) {
@@ -8553,6 +8655,10 @@ int main(int argc, char*argv[]) {
         setlocale(LC_ALL, "");
         log_parse_environment();
         log_open();
+
+        /* The journal merging logic potentially needs a lot of fds. */
+        (void) rlimit_nofile_bump(HIGH_RLIMIT_NOFILE);
+
         sigbus_install();
 
         /* Explicitly not on_tty() to avoid setting cached value.

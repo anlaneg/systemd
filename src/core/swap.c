@@ -5,10 +5,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "libudev.h"
+#include "sd-device.h"
 
 #include "alloc-util.h"
 #include "dbus-swap.h"
+#include "device-private.h"
+#include "device-util.h"
 #include "device.h"
 #include "escape.h"
 #include "exit-status.h"
@@ -18,11 +20,11 @@
 #include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
+#include "serialize.h"
 #include "special.h"
 #include "string-table.h"
 #include "string-util.h"
 #include "swap.h"
-#include "udev-util.h"
 #include "unit-name.h"
 #include "unit.h"
 #include "virt.h"
@@ -196,7 +198,7 @@ static int swap_add_device_dependencies(Swap *s) {
                 /* File based swap devices need to be ordered after
                  * systemd-remount-fs.service, since they might need a
                  * writable file system. */
-                return unit_add_dependency_by_name(UNIT(s), UNIT_AFTER, SPECIAL_REMOUNT_FS_SERVICE, NULL, true, UNIT_DEPENDENCY_FILE);
+                return unit_add_dependency_by_name(UNIT(s), UNIT_AFTER, SPECIAL_REMOUNT_FS_SERVICE, true, UNIT_DEPENDENCY_FILE);
 }
 
 static int swap_add_default_dependencies(Swap *s) {
@@ -215,11 +217,11 @@ static int swap_add_default_dependencies(Swap *s) {
 
         /* swap units generated for the swap dev links are missing the
          * ordering dep against the swap target. */
-        r = unit_add_dependency_by_name(UNIT(s), UNIT_BEFORE, SPECIAL_SWAP_TARGET, NULL, true, UNIT_DEPENDENCY_DEFAULT);
+        r = unit_add_dependency_by_name(UNIT(s), UNIT_BEFORE, SPECIAL_SWAP_TARGET, true, UNIT_DEPENDENCY_DEFAULT);
         if (r < 0)
                 return r;
 
-        return unit_add_two_dependencies_by_name(UNIT(s), UNIT_BEFORE, UNIT_CONFLICTS, SPECIAL_UMOUNT_TARGET, NULL, true, UNIT_DEPENDENCY_DEFAULT);
+        return unit_add_two_dependencies_by_name(UNIT(s), UNIT_BEFORE, UNIT_CONFLICTS, SPECIAL_UMOUNT_TARGET, true, UNIT_DEPENDENCY_DEFAULT);
 }
 
 static int swap_verify(Swap *s) {
@@ -247,7 +249,7 @@ static int swap_verify(Swap *s) {
 }
 
 static int swap_load_devnode(Swap *s) {
-        _cleanup_(udev_device_unrefp) struct udev_device *d = NULL;
+        _cleanup_(sd_device_unrefp) sd_device *d = NULL;
         struct stat st;
         const char *p;
         int r;
@@ -257,15 +259,14 @@ static int swap_load_devnode(Swap *s) {
         if (stat(s->what, &st) < 0 || !S_ISBLK(st.st_mode))
                 return 0;
 
-        r = udev_device_new_from_stat_rdev(UNIT(s)->manager->udev, &st, &d);
+        r = device_new_from_stat_rdev(&d, &st);
         if (r < 0) {
                 log_unit_full(UNIT(s), r == -ENOENT ? LOG_DEBUG : LOG_WARNING, r,
-                              "Failed to allocate udev device for swap %s: %m", s->what);
+                              "Failed to allocate device for swap %s: %m", s->what);
                 return 0;
         }
 
-        p = udev_device_get_devnode(d);
-        if (!p)
+        if (sd_device_get_devname(d, &p) < 0)
                 return 0;
 
         return swap_set_devnode(s, p);
@@ -425,10 +426,9 @@ fail:
 }
 
 static int swap_process_new(Manager *m, const char *device, int prio, bool set_flags) {
-        _cleanup_(udev_device_unrefp) struct udev_device *d = NULL;
-        struct udev_list_entry *item = NULL, *first = NULL;
-        const char *dn;
-        struct stat st;
+        _cleanup_(sd_device_unrefp) sd_device *d = NULL;
+        const char *dn, *devlink;
+        struct stat st, st_link;
         int r;
 
         assert(m);
@@ -442,38 +442,33 @@ static int swap_process_new(Manager *m, const char *device, int prio, bool set_f
         if (stat(device, &st) < 0 || !S_ISBLK(st.st_mode))
                 return 0;
 
-        r = udev_device_new_from_stat_rdev(m->udev, &st, &d);
+        r = device_new_from_stat_rdev(&d, &st);
         if (r < 0) {
                 log_full_errno(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, r,
-                               "Failed to allocate udev device for swap %s: %m", device);
+                               "Failed to allocate device for swap %s: %m", device);
                 return 0;
         }
 
         /* Add the main device node */
-        dn = udev_device_get_devnode(d);
-        if (dn && !streq(dn, device))
+        if (sd_device_get_devname(d, &dn) >= 0 && !streq(dn, device))
                 swap_setup_unit(m, dn, device, prio, set_flags);
 
         /* Add additional units for all symlinks */
-        first = udev_device_get_devlinks_list_entry(d);
-        udev_list_entry_foreach(item, first) {
-                const char *p;
+        FOREACH_DEVICE_DEVLINK(d, devlink) {
 
                 /* Don't bother with the /dev/block links */
-                p = udev_list_entry_get_name(item);
-
-                if (streq(p, device))
+                if (streq(devlink, device))
                         continue;
 
-                if (path_startswith(p, "/dev/block/"))
+                if (path_startswith(devlink, "/dev/block/"))
                         continue;
 
-                if (stat(p, &st) >= 0)
-                        if (!S_ISBLK(st.st_mode) ||
-                            st.st_rdev != udev_device_get_devnum(d))
-                                continue;
+                if (stat(devlink, &st_link) >= 0 &&
+                    (!S_ISBLK(st_link.st_mode) ||
+                     st_link.st_rdev != st.st_rdev))
+                        continue;
 
-                swap_setup_unit(m, p, device, prio, set_flags);
+                swap_setup_unit(m, devlink, device, prio, set_flags);
         }
 
         return r;
@@ -900,14 +895,14 @@ static int swap_serialize(Unit *u, FILE *f, FDSet *fds) {
         assert(f);
         assert(fds);
 
-        unit_serialize_item(u, f, "state", swap_state_to_string(s->state));
-        unit_serialize_item(u, f, "result", swap_result_to_string(s->result));
+        (void) serialize_item(f, "state", swap_state_to_string(s->state));
+        (void) serialize_item(f, "result", swap_result_to_string(s->result));
 
         if (s->control_pid > 0)
-                unit_serialize_item_format(u, f, "control-pid", PID_FMT, s->control_pid);
+                (void) serialize_item_format(f, "control-pid", PID_FMT, s->control_pid);
 
         if (s->control_command_id >= 0)
-                unit_serialize_item(u, f, "control-command", swap_exec_command_to_string(s->control_command_id));
+                (void) serialize_item(f, "control-command", swap_exec_command_to_string(s->control_command_id));
 
         return 0;
 }
@@ -1322,18 +1317,17 @@ fail:
         swap_shutdown(m);
 }
 
-int swap_process_device_new(Manager *m, struct udev_device *dev) {
-        struct udev_list_entry *item = NULL, *first = NULL;
+int swap_process_device_new(Manager *m, sd_device *dev) {
         _cleanup_free_ char *e = NULL;
-        const char *dn;
+        const char *dn, *devlink;
         Unit *u;
         int r = 0;
 
         assert(m);
         assert(dev);
 
-        dn = udev_device_get_devnode(dev);
-        if (!dn)
+        r = sd_device_get_devname(dev, &dn);
+        if (r < 0)
                 return 0;
 
         r = unit_name_from_path(dn, ".swap", &e);
@@ -1344,12 +1338,11 @@ int swap_process_device_new(Manager *m, struct udev_device *dev) {
         if (u)
                 r = swap_set_devnode(SWAP(u), dn);
 
-        first = udev_device_get_devlinks_list_entry(dev);
-        udev_list_entry_foreach(item, first) {
+        FOREACH_DEVICE_DEVLINK(dev, devlink) {
                 _cleanup_free_ char *n = NULL;
                 int q;
 
-                q = unit_name_from_path(udev_list_entry_get_name(item), ".swap", &n);
+                q = unit_name_from_path(devlink, ".swap", &n);
                 if (q < 0)
                         return q;
 
@@ -1364,13 +1357,13 @@ int swap_process_device_new(Manager *m, struct udev_device *dev) {
         return r;
 }
 
-int swap_process_device_remove(Manager *m, struct udev_device *dev) {
+int swap_process_device_remove(Manager *m, sd_device *dev) {
         const char *dn;
         int r = 0;
         Swap *s;
 
-        dn = udev_device_get_devnode(dev);
-        if (!dn)
+        r = sd_device_get_devname(dev, &dn);
+        if (r < 0)
                 return 0;
 
         while ((s = hashmap_get(m->swaps_by_devnode, dn))) {

@@ -6,14 +6,18 @@
 
 #include "alloc-util.h"
 #include "async.h"
+#include "exit-status.h"
 #include "fd-util.h"
+#include "fileio.h"
 #include "in-addr-util.h"
+#include "io-util.h"
 #include "log.h"
 #include "macro.h"
 #include "process-util.h"
 #include "socket-util.h"
 #include "string-util.h"
 #include "util.h"
+#include "tests.h"
 
 static void test_ifname_valid(void) {
         assert(ifname_valid("foo"));
@@ -401,7 +405,7 @@ static void test_sockaddr_un_len(void) {
                 .sun_path = "\0foobar",
         };
 
-        assert_se(SOCKADDR_UN_LEN(fs) == offsetof(struct sockaddr_un, sun_path) + strlen(fs.sun_path));
+        assert_se(SOCKADDR_UN_LEN(fs) == offsetof(struct sockaddr_un, sun_path) + strlen(fs.sun_path) + 1);
         assert_se(SOCKADDR_UN_LEN(abstract) == offsetof(struct sockaddr_un, sun_path) + 1 + strlen(abstract.sun_path + 1));
 }
 
@@ -431,7 +435,6 @@ static void test_getpeercred_getpeergroups(void) {
         if (r == 0) {
                 static const gid_t gids[] = { 3, 4, 5, 6, 7 };
                 gid_t *test_gids;
-                _cleanup_free_ gid_t *peer_groups = NULL;
                 size_t n_test_gids;
                 uid_t test_uid;
                 gid_t test_gid;
@@ -472,21 +475,231 @@ static void test_getpeercred_getpeergroups(void) {
                 assert_se(ucred.gid == test_gid);
                 assert_se(ucred.pid == getpid_cached());
 
-                r = getpeergroups(pair[0], &peer_groups);
-                assert_se(r >= 0 || IN_SET(r, -EOPNOTSUPP, -ENOPROTOOPT));
+                {
+                        _cleanup_free_ gid_t *peer_groups = NULL;
 
-                if (r >= 0) {
-                        assert_se((size_t) r == n_test_gids);
-                        assert_se(memcmp(peer_groups, test_gids, sizeof(gid_t) * n_test_gids) == 0);
+                        r = getpeergroups(pair[0], &peer_groups);
+                        assert_se(r >= 0 || IN_SET(r, -EOPNOTSUPP, -ENOPROTOOPT));
+
+                        if (r >= 0) {
+                                assert_se((size_t) r == n_test_gids);
+                                assert_se(memcmp(peer_groups, test_gids, sizeof(gid_t) * n_test_gids) == 0);
+                        }
                 }
 
                 safe_close_pair(pair);
+                _exit(EXIT_SUCCESS);
         }
+}
+
+static void test_passfd_read(void) {
+        static const char file_contents[] = "test contents for passfd";
+        _cleanup_close_pair_ int pair[2] = { -1, -1 };
+        int r;
+
+        assert_se(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) >= 0);
+
+        r = safe_fork("(passfd_read)", FORK_DEATHSIG|FORK_LOG|FORK_WAIT, NULL);
+        assert_se(r >= 0);
+
+        if (r == 0) {
+                /* Child */
+                char tmpfile[] = "/tmp/test-socket-util-passfd-read-XXXXXX";
+                _cleanup_close_ int tmpfd = -1;
+
+                pair[0] = safe_close(pair[0]);
+
+                tmpfd = mkostemp_safe(tmpfile);
+                assert_se(tmpfd >= 0);
+                assert_se(write(tmpfd, file_contents, strlen(file_contents)) == (ssize_t) strlen(file_contents));
+                tmpfd = safe_close(tmpfd);
+
+                tmpfd = open(tmpfile, O_RDONLY);
+                assert_se(tmpfd >= 0);
+                assert_se(unlink(tmpfile) == 0);
+
+                assert_se(send_one_fd(pair[1], tmpfd, MSG_DONTWAIT) == 0);
+                _exit(EXIT_SUCCESS);
+        }
+
+        /* Parent */
+        char buf[64];
+        struct iovec iov = IOVEC_INIT(buf, sizeof(buf)-1);
+        _cleanup_close_ int fd = -1;
+
+        pair[1] = safe_close(pair[1]);
+
+        assert_se(receive_one_fd_iov(pair[0], &iov, 1, MSG_DONTWAIT, &fd) == 0);
+
+        assert_se(fd >= 0);
+        r = read(fd, buf, sizeof(buf)-1);
+        assert_se(r >= 0);
+        buf[r] = 0;
+        assert_se(streq(buf, file_contents));
+}
+
+static void test_passfd_contents_read(void) {
+        _cleanup_close_pair_ int pair[2] = { -1, -1 };
+        static const char file_contents[] = "test contents in the file";
+        static const char wire_contents[] = "test contents on the wire";
+        int r;
+
+        assert_se(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) >= 0);
+
+        r = safe_fork("(passfd_contents_read)", FORK_DEATHSIG|FORK_LOG|FORK_WAIT, NULL);
+        assert_se(r >= 0);
+
+        if (r == 0) {
+                /* Child */
+                struct iovec iov = IOVEC_INIT_STRING(wire_contents);
+                char tmpfile[] = "/tmp/test-socket-util-passfd-contents-read-XXXXXX";
+                _cleanup_close_ int tmpfd = -1;
+
+                pair[0] = safe_close(pair[0]);
+
+                tmpfd = mkostemp_safe(tmpfile);
+                assert_se(tmpfd >= 0);
+                assert_se(write(tmpfd, file_contents, strlen(file_contents)) == (ssize_t) strlen(file_contents));
+                tmpfd = safe_close(tmpfd);
+
+                tmpfd = open(tmpfile, O_RDONLY);
+                assert_se(tmpfd >= 0);
+                assert_se(unlink(tmpfile) == 0);
+
+                assert_se(send_one_fd_iov(pair[1], tmpfd, &iov, 1, MSG_DONTWAIT) > 0);
+                _exit(EXIT_SUCCESS);
+        }
+
+        /* Parent */
+        char buf[64];
+        struct iovec iov = IOVEC_INIT(buf, sizeof(buf)-1);
+        _cleanup_close_ int fd = -1;
+        ssize_t k;
+
+        pair[1] = safe_close(pair[1]);
+
+        k = receive_one_fd_iov(pair[0], &iov, 1, MSG_DONTWAIT, &fd);
+        assert_se(k > 0);
+        buf[k] = 0;
+        assert_se(streq(buf, wire_contents));
+
+        assert_se(fd >= 0);
+        r = read(fd, buf, sizeof(buf)-1);
+        assert_se(r >= 0);
+        buf[r] = 0;
+        assert_se(streq(buf, file_contents));
+}
+
+static void test_receive_nopassfd(void) {
+        _cleanup_close_pair_ int pair[2] = { -1, -1 };
+        static const char wire_contents[] = "no fd passed here";
+        int r;
+
+        assert_se(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) >= 0);
+
+        r = safe_fork("(receive_nopassfd)", FORK_DEATHSIG|FORK_LOG|FORK_WAIT, NULL);
+        assert_se(r >= 0);
+
+        if (r == 0) {
+                /* Child */
+                struct iovec iov = IOVEC_INIT_STRING(wire_contents);
+
+                pair[0] = safe_close(pair[0]);
+
+                assert_se(send_one_fd_iov(pair[1], -1, &iov, 1, MSG_DONTWAIT) > 0);
+                _exit(EXIT_SUCCESS);
+        }
+
+        /* Parent */
+        char buf[64];
+        struct iovec iov = IOVEC_INIT(buf, sizeof(buf)-1);
+        int fd = -999;
+        ssize_t k;
+
+        pair[1] = safe_close(pair[1]);
+
+        k = receive_one_fd_iov(pair[0], &iov, 1, MSG_DONTWAIT, &fd);
+        assert_se(k > 0);
+        buf[k] = 0;
+        assert_se(streq(buf, wire_contents));
+
+        /* no fd passed here, confirm it was reset */
+        assert_se(fd == -1);
+}
+
+static void test_send_nodata_nofd(void) {
+        _cleanup_close_pair_ int pair[2] = { -1, -1 };
+        int r;
+
+        assert_se(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) >= 0);
+
+        r = safe_fork("(send_nodata_nofd)", FORK_DEATHSIG|FORK_LOG|FORK_WAIT, NULL);
+        assert_se(r >= 0);
+
+        if (r == 0) {
+                /* Child */
+                pair[0] = safe_close(pair[0]);
+
+                assert_se(send_one_fd_iov(pair[1], -1, NULL, 0, MSG_DONTWAIT) == -EINVAL);
+                _exit(EXIT_SUCCESS);
+        }
+
+        /* Parent */
+        char buf[64];
+        struct iovec iov = IOVEC_INIT(buf, sizeof(buf)-1);
+        int fd = -999;
+        ssize_t k;
+
+        pair[1] = safe_close(pair[1]);
+
+        k = receive_one_fd_iov(pair[0], &iov, 1, MSG_DONTWAIT, &fd);
+        /* recvmsg() will return errno EAGAIN if nothing was sent */
+        assert_se(k == -EAGAIN);
+
+        /* receive_one_fd_iov returned error, so confirm &fd wasn't touched */
+        assert_se(fd == -999);
+}
+
+static void test_send_emptydata(void) {
+        _cleanup_close_pair_ int pair[2] = { -1, -1 };
+        int r;
+
+        assert_se(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) >= 0);
+
+        r = safe_fork("(send_emptydata)", FORK_DEATHSIG|FORK_LOG|FORK_WAIT, NULL);
+        assert_se(r >= 0);
+
+        if (r == 0) {
+                /* Child */
+                struct iovec iov = IOVEC_INIT_STRING("");  /* zero-length iov */
+                assert_se(iov.iov_len == 0);
+
+                pair[0] = safe_close(pair[0]);
+
+                /* This will succeed, since iov is set. */
+                assert_se(send_one_fd_iov(pair[1], -1, &iov, 1, MSG_DONTWAIT) == 0);
+                _exit(EXIT_SUCCESS);
+        }
+
+        /* Parent */
+        char buf[64];
+        struct iovec iov = IOVEC_INIT(buf, sizeof(buf)-1);
+        int fd = -999;
+        ssize_t k;
+
+        pair[1] = safe_close(pair[1]);
+
+        k = receive_one_fd_iov(pair[0], &iov, 1, MSG_DONTWAIT, &fd);
+        /* receive_one_fd_iov() returns -EIO if an fd is not found and no data was returned. */
+        assert_se(k == -EIO);
+
+        /* receive_one_fd_iov returned error, so confirm &fd wasn't touched */
+        assert_se(fd == -999);
 }
 
 int main(int argc, char *argv[]) {
 
-        log_set_max_level(LOG_DEBUG);
+        test_setup_logging(LOG_DEBUG);
 
         test_ifname_valid();
 
@@ -511,6 +724,12 @@ int main(int argc, char *argv[]) {
         test_in_addr_is_multicast();
 
         test_getpeercred_getpeergroups();
+
+        test_passfd_read();
+        test_passfd_contents_read();
+        test_receive_nopassfd();
+        test_send_nodata_nofd();
+        test_send_emptydata();
 
         return 0;
 }

@@ -324,7 +324,8 @@ static int connect_logger_as(
                 uid_t uid,
                 gid_t gid) {
 
-        int fd, r;
+        _cleanup_close_ int fd = -1;
+        int r;
 
         assert(context);
         assert(params);
@@ -340,14 +341,12 @@ static int connect_logger_as(
         if (r < 0)
                 return r;
 
-        if (shutdown(fd, SHUT_RD) < 0) {
-                safe_close(fd);
+        if (shutdown(fd, SHUT_RD) < 0)
                 return -errno;
-        }
 
         (void) fd_inc_sndbuf(fd, SNDBUF_SIZE);
 
-        dprintf(fd,
+        if (dprintf(fd,
                 "%s\n"
                 "%s\n"
                 "%i\n"
@@ -361,10 +360,12 @@ static int connect_logger_as(
                 !!context->syslog_level_prefix,
                 is_syslog_output(output),
                 is_kmsg_output(output),
-                is_terminal_output(output));
+                is_terminal_output(output)) < 0)
+                return -errno;
 
-        return move_fd(fd, nfd, false);
+        return move_fd(TAKE_FD(fd), nfd, false);
 }
+
 static int open_terminal_as(const char *path, int flags, int nfd) {
         int fd;
 
@@ -379,10 +380,9 @@ static int open_terminal_as(const char *path, int flags, int nfd) {
 }
 
 static int acquire_path(const char *path, int flags, mode_t mode) {
-        union sockaddr_union sa = {
-                .sa.sa_family = AF_UNIX,
-        };
-        int fd, r;
+        union sockaddr_union sa = {};
+        _cleanup_close_ int fd = -1;
+        int r, salen;
 
         assert(path);
 
@@ -391,11 +391,11 @@ static int acquire_path(const char *path, int flags, mode_t mode) {
 
         fd = open(path, flags|O_NOCTTY, mode);
         if (fd >= 0)
-                return fd;
+                return TAKE_FD(fd);
 
         if (errno != ENXIO) /* ENXIO is returned when we try to open() an AF_UNIX file system socket on Linux */
                 return -errno;
-        if (strlen(path) > sizeof(sa.un.sun_path)) /* Too long, can't be a UNIX socket */
+        if (strlen(path) >= sizeof(sa.un.sun_path)) /* Too long, can't be a UNIX socket */
                 return -ENXIO;
 
         /* So, it appears the specified path could be an AF_UNIX socket. Let's see if we can connect to it. */
@@ -404,25 +404,24 @@ static int acquire_path(const char *path, int flags, mode_t mode) {
         if (fd < 0)
                 return -errno;
 
-        strncpy(sa.un.sun_path, path, sizeof(sa.un.sun_path));
-        if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0) {
-                safe_close(fd);
+        salen = sockaddr_un_set_path(&sa.un, path);
+        if (salen < 0)
+                return salen;
+
+        if (connect(fd, &sa.sa, salen) < 0)
                 return errno == EINVAL ? -ENXIO : -errno; /* Propagate initial error if we get EINVAL, i.e. we have
                                                            * indication that his wasn't an AF_UNIX socket after all */
-        }
 
         if ((flags & O_ACCMODE) == O_RDONLY)
                 r = shutdown(fd, SHUT_WR);
         else if ((flags & O_ACCMODE) == O_WRONLY)
                 r = shutdown(fd, SHUT_RD);
         else
-                return fd;
-        if (r < 0) {
-                safe_close(fd);
+                return TAKE_FD(fd);
+        if (r < 0)
                 return -errno;
-        }
 
-        return fd;
+        return TAKE_FD(fd);
 }
 
 static int fixup_input(
@@ -921,7 +920,7 @@ static int get_fixed_user(const ExecContext *c, const char **user,
          * (i.e. are "/" or "/bin/nologin"). */
 
         name = c->user;
-        r = get_user_creds_clean(&name, uid, gid, home, shell);
+        r = get_user_creds(&name, uid, gid, home, shell, USER_CREDS_CLEAN);
         if (r < 0)
                 return r;
 
@@ -939,7 +938,7 @@ static int get_fixed_group(const ExecContext *c, const char **group, gid_t *gid)
                 return 0;
 
         name = c->group;
-        r = get_group_creds(&name, gid);
+        r = get_group_creds(&name, gid, 0);
         if (r < 0)
                 return r;
 
@@ -1011,7 +1010,7 @@ static int get_supplementary_groups(const ExecContext *c, const char *user,
                         return -E2BIG;
 
                 g = *i;
-                r = get_group_creds(&g, l_gids+k);
+                r = get_group_creds(&g, l_gids+k, 0);
                 if (r < 0)
                         return r;
 
@@ -1156,6 +1155,16 @@ static int setup_pam(
         if (pam_code != PAM_SUCCESS) {
                 handle = NULL;
                 goto fail;
+        }
+
+        if (!tty) {
+                _cleanup_free_ char *q = NULL;
+
+                /* Hmm, so no TTY was explicitly passed, but an fd passed to us directly might be a TTY. Let's figure
+                 * out if that's the case, and read the TTY off it. */
+
+                if (getttyname_malloc(STDIN_FILENO, &q) >= 0)
+                        tty = strjoina("/dev/", q);
         }
 
         if (tty) {
@@ -1422,7 +1431,7 @@ static int apply_syscall_filter(const Unit* u, const ExecContext *c, bool needs_
                         return r;
         }
 
-        return seccomp_load_syscall_filter_set_raw(default_action, c->syscall_filter, action);
+        return seccomp_load_syscall_filter_set_raw(default_action, c->syscall_filter, action, false);
 }
 
 static int apply_syscall_archs(const Unit *u, const ExecContext *c) {
@@ -1505,7 +1514,7 @@ static int apply_protect_kernel_modules(const Unit *u, const ExecContext *c) {
         if (skip_seccomp_unavailable(u, "ProtectKernelModules="))
                 return 0;
 
-        return seccomp_load_syscall_filter_set(SCMP_ACT_ALLOW, syscall_filter_sets + SYSCALL_FILTER_SET_MODULE, SCMP_ACT_ERRNO(EPERM));
+        return seccomp_load_syscall_filter_set(SCMP_ACT_ALLOW, syscall_filter_sets + SYSCALL_FILTER_SET_MODULE, SCMP_ACT_ERRNO(EPERM), false);
 }
 
 static int apply_private_devices(const Unit *u, const ExecContext *c) {
@@ -1520,7 +1529,7 @@ static int apply_private_devices(const Unit *u, const ExecContext *c) {
         if (skip_seccomp_unavailable(u, "PrivateDevices="))
                 return 0;
 
-        return seccomp_load_syscall_filter_set(SCMP_ACT_ALLOW, syscall_filter_sets + SYSCALL_FILTER_SET_RAW_IO, SCMP_ACT_ERRNO(EPERM));
+        return seccomp_load_syscall_filter_set(SCMP_ACT_ALLOW, syscall_filter_sets + SYSCALL_FILTER_SET_RAW_IO, SCMP_ACT_ERRNO(EPERM), false);
 }
 
 static int apply_restrict_namespaces(const Unit *u, const ExecContext *c) {
@@ -1592,6 +1601,8 @@ static void do_idle_pipe_dance(int idle_pipe[4]) {
         idle_pipe[3] = safe_close(idle_pipe[3]);
 }
 
+static const char *exec_directory_env_name_to_string(ExecDirectoryType t);
+
 static int build_environment(
                 const Unit *u,
                 const ExecContext *c,
@@ -1605,14 +1616,16 @@ static int build_environment(
                 char ***ret) {
 
         _cleanup_strv_free_ char **our_env = NULL;
+        ExecDirectoryType t;
         size_t n_env = 0;
         char *x;
 
         assert(u);
         assert(c);
+        assert(p);
         assert(ret);
 
-        our_env = new0(char*, 14);
+        our_env = new0(char*, 14 + _EXEC_DIRECTORY_TYPE_MAX);
         if (!our_env)
                 return -ENOMEM;
 
@@ -1717,8 +1730,37 @@ static int build_environment(
                 our_env[n_env++] = x;
         }
 
+        for (t = 0; t < _EXEC_DIRECTORY_TYPE_MAX; t++) {
+                _cleanup_free_ char *pre = NULL, *joined = NULL;
+                const char *n;
+
+                if (!p->prefix[t])
+                        continue;
+
+                if (strv_isempty(c->directories[t].paths))
+                        continue;
+
+                n = exec_directory_env_name_to_string(t);
+                if (!n)
+                        continue;
+
+                pre = strjoin(p->prefix[t], "/");
+                if (!pre)
+                        return -ENOMEM;
+
+                joined = strv_join_prefix(c->directories[t].paths, ":", pre);
+                if (!joined)
+                        return -ENOMEM;
+
+                x = strjoin(n, "=", joined);
+                if (!x)
+                        return -ENOMEM;
+
+                our_env[n_env++] = x;
+        }
+
         our_env[n_env++] = NULL;
-        assert(n_env <= 12);
+        assert(n_env <= 14 + _EXEC_DIRECTORY_TYPE_MAX);
 
         *ret = TAKE_PTR(our_env);
 
@@ -2017,7 +2059,7 @@ static int setup_exec_directory(
 
                 if (context->dynamic_user &&
                     !IN_SET(type, EXEC_DIRECTORY_RUNTIME, EXEC_DIRECTORY_CONFIGURATION)) {
-                        _cleanup_free_ char *private_root = NULL, *relative = NULL, *parent = NULL;
+                        _cleanup_free_ char *private_root = NULL;
 
                         /* So, here's one extra complication when dealing with DynamicUser=1 units. In that case we
                          * want to avoid leaving a directory around fully accessible that is owned by a dynamic user
@@ -2082,18 +2124,8 @@ static int setup_exec_directory(
                                         goto fail;
                         }
 
-                        parent = dirname_malloc(p);
-                        if (!parent) {
-                                r = -ENOMEM;
-                                goto fail;
-                        }
-
-                        r = path_make_relative(parent, pp, &relative);
-                        if (r < 0)
-                                goto fail;
-
                         /* And link it up from the original place */
-                        r = symlink_idempotent(relative, p);
+                        r = symlink_idempotent(pp, p, true);
                         if (r < 0)
                                 goto fail;
 
@@ -2386,11 +2418,24 @@ static int apply_mount_namespace(
 
         bind_mount_free_many(bind_mounts, n_bind_mounts);
 
-        /* If we couldn't set up the namespace this is probably due to a
-         * missing capability. In this case, silently proceeed. */
-        if (IN_SET(r, -EPERM, -EACCES)) {
-                log_unit_debug_errno(u, r, "Failed to set up namespace, assuming containerized execution, ignoring: %m");
-                return 0;
+        /* If we couldn't set up the namespace this is probably due to a missing capability. setup_namespace() reports
+         * that with a special, recognizable error ENOANO. In this case, silently proceeed, but only if exclusively
+         * sandboxing options were used, i.e. nothing such as RootDirectory= or BindMount= that would result in a
+         * completely different execution environment. */
+        if (r == -ENOANO) {
+                if (n_bind_mounts == 0 &&
+                    context->n_temporary_filesystems == 0 &&
+                    !root_dir && !root_image &&
+                    !context->dynamic_user) {
+                        log_unit_debug(u, "Failed to set up namespace, assuming containerized execution and ignoring.");
+                        return 0;
+                }
+
+                log_unit_debug(u, "Failed to set up namespace, and refusing to continue since the selected namespacing options alter mount environment non-trivially.\n"
+                               "Bind mounts: %zu, temporary filesystems: %zu, root directory: %s, root image: %s, dynamic user: %s",
+                               n_bind_mounts, context->n_temporary_filesystems, yes_no(root_dir), yes_no(root_image), yes_no(context->dynamic_user));
+
+                return -EOPNOTSUPP;
         }
 
         return r;
@@ -3216,7 +3261,7 @@ static int exec_child(
                 }
 
                 fds_with_exec_fd = newa(int, n_fds + 1);
-                memcpy(fds_with_exec_fd, fds, n_fds * sizeof(int));
+                memcpy_safe(fds_with_exec_fd, fds, n_fds * sizeof(int));
                 fds_with_exec_fd[n_fds] = exec_fd;
                 n_fds_with_exec_fd = n_fds + 1;
         } else {
@@ -3706,6 +3751,9 @@ void exec_context_done(ExecContext *c) {
 
         exec_context_free_log_extra_fields(c);
 
+        c->log_rate_limit_interval_usec = 0;
+        c->log_rate_limit_burst = 0;
+
         c->stdin_data = mfree(c->stdin_data);
         c->stdin_data_size = 0;
 }
@@ -4075,9 +4123,9 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
 
         for (i = 0; i < RLIM_NLIMITS; i++)
                 if (c->rlimit[i]) {
-                        fprintf(f, "Limit%s%s: " RLIM_FMT "\n",
+                        fprintf(f, "%sLimit%s: " RLIM_FMT "\n",
                                 prefix, rlimit_to_string(i), c->rlimit[i]->rlim_max);
-                        fprintf(f, "Limit%s%sSoft: " RLIM_FMT "\n",
+                        fprintf(f, "%sLimit%sSoft: " RLIM_FMT "\n",
                                 prefix, rlimit_to_string(i), c->rlimit[i]->rlim_cur);
                 }
 
@@ -4186,6 +4234,17 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
 
                 fprintf(f, "%sLogLevelMax: %s\n", prefix, strna(t));
         }
+
+        if (c->log_rate_limit_interval_usec > 0) {
+                char buf_timespan[FORMAT_TIMESPAN_MAX];
+
+                fprintf(f,
+                        "%sLogRateLimitIntervalSec: %s\n",
+                        prefix, format_timespan(buf_timespan, sizeof(buf_timespan), c->log_rate_limit_interval_usec, USEC_PER_SEC));
+        }
+
+        if (c->log_rate_limit_burst > 0)
+                fprintf(f, "%sLogRateLimitBurst: %u\n", prefix, c->log_rate_limit_burst);
 
         if (c->n_log_extra_fields > 0) {
                 size_t j;
@@ -4600,8 +4659,7 @@ int exec_command_set(ExecCommand *c, const char *path, ...) {
                 return -ENOMEM;
         }
 
-        free(c->path);
-        c->path = p;
+        free_and_replace(c->path, p);
 
         return strv_free_and_replace(c->argv, l);
 }
@@ -5033,10 +5091,8 @@ void exec_runtime_deserialize_one(Manager *m, const char *value, FDSet *fds) {
 finalize:
 
         r = exec_runtime_add(m, id, tmp_dir, var_tmp_dir, (int[]) { fd0, fd1 }, NULL);
-        if (r < 0) {
+        if (r < 0)
                 log_debug_errno(r, "Failed to add exec-runtime: %m");
-                return;
-        }
 }
 
 void exec_runtime_vacuum(Manager *m) {
@@ -5111,6 +5167,16 @@ static const char* const exec_directory_type_table[_EXEC_DIRECTORY_TYPE_MAX] = {
 };
 
 DEFINE_STRING_TABLE_LOOKUP(exec_directory_type, ExecDirectoryType);
+
+static const char* const exec_directory_env_name_table[_EXEC_DIRECTORY_TYPE_MAX] = {
+        [EXEC_DIRECTORY_RUNTIME] = "RUNTIME_DIRECTORY",
+        [EXEC_DIRECTORY_STATE] = "STATE_DIRECTORY",
+        [EXEC_DIRECTORY_CACHE] = "CACHE_DIRECTORY",
+        [EXEC_DIRECTORY_LOGS] = "LOGS_DIRECTORY",
+        [EXEC_DIRECTORY_CONFIGURATION] = "CONFIGURATION_DIRECTORY",
+};
+
+DEFINE_PRIVATE_STRING_TABLE_LOOKUP_TO_STRING(exec_directory_env_name, ExecDirectoryType);
 
 static const char* const exec_keyring_mode_table[_EXEC_KEYRING_MODE_MAX] = {
         [EXEC_KEYRING_INHERIT] = "inherit",

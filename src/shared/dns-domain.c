@@ -503,7 +503,7 @@ int dns_name_compare_func(const void *a, const void *b) {
                 r = dns_label_unescape_suffix(a, &x, la, sizeof(la));
                 q = dns_label_unescape_suffix(b, &y, lb, sizeof(lb));
                 if (r < 0 || q < 0)
-                        return r - q;
+                        return CMP(r, q);
 
                 r = ascii_strcasecmp_nn(la, r, lb, q);
                 if (r != 0)
@@ -1284,7 +1284,7 @@ int dns_name_apply_idna(const char *name, char **ret) {
 
         log_debug("idn2_lookup_u8(\"%s\") failed: %d/%s", name, r, idn2_strerror(r));
         if (r == IDN2_2HYPHEN)
-                /* The name has two hypens — forbidden by IDNA2008 in some cases */
+                /* The name has two hyphens — forbidden by IDNA2008 in some cases */
                 return 0;
         if (IN_SET(r, IDN2_TOO_BIG_DOMAIN, IDN2_TOO_BIG_LABEL))
                 return -ENOSPC;

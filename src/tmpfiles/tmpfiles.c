@@ -128,6 +128,8 @@ typedef struct Item {
 
         bool force:1;
 
+        bool allow_failure:1;
+
         bool done:1;
 } Item;
 
@@ -172,6 +174,8 @@ static const Specifier specifier_table[] = {
         { 'H', specifier_host_name,       NULL },
         { 'v', specifier_kernel_release,  NULL },
 
+        { 'g', specifier_group_name,      NULL },
+        { 'G', specifier_group_id,        NULL },
         { 'U', specifier_user_id,         NULL },
         { 'u', specifier_user_name,       NULL },
         { 'h', specifier_user_home,       NULL },
@@ -770,17 +774,12 @@ static bool hardlink_vulnerable(const struct stat *st) {
         return !S_ISDIR(st->st_mode) && st->st_nlink > 1 && dangerous_hardlinks();
 }
 
-static int fd_set_perms(Item *i, int fd, const struct stat *st) {
-        _cleanup_free_ char *path = NULL;
+static int fd_set_perms(Item *i, int fd, const char *path, const struct stat *st) {
         struct stat stbuf;
-        int r;
 
         assert(i);
         assert(fd);
-
-        r = fd_get_path(fd, &path);
-        if (r < 0)
-                return r;
+        assert(path);
 
         if (!i->mode_set && !i->uid_set && !i->gid_set)
                 goto shortcut;
@@ -897,7 +896,7 @@ static int path_set_perms(Item *i, const char *path) {
         if (fd < 0)
                 return fd;
 
-        return fd_set_perms(i, fd, NULL);
+        return fd_set_perms(i, fd, path, NULL);
 }
 
 static int parse_xattrs_from_arg(Item *i) {
@@ -938,18 +937,13 @@ static int parse_xattrs_from_arg(Item *i) {
         return 0;
 }
 
-static int fd_set_xattrs(Item *i, int fd, const struct stat *st) {
+static int fd_set_xattrs(Item *i, int fd, const char *path, const struct stat *st) {
         char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
-        _cleanup_free_ char *path = NULL;
         char **name, **value;
-        int r;
 
         assert(i);
         assert(fd);
-
-        r = fd_get_path(fd, &path);
-        if (r < 0)
-                return r;
+        assert(path);
 
         xsprintf(procfs_path, "/proc/self/fd/%i", fd);
 
@@ -972,7 +966,7 @@ static int path_set_xattrs(Item *i, const char *path) {
         if (fd < 0)
                 return fd;
 
-        return fd_set_xattrs(i, fd, NULL);
+        return fd_set_xattrs(i, fd, path, NULL);
 }
 
 static int parse_acls_from_arg(Item *item) {
@@ -1040,19 +1034,15 @@ static int path_set_acl(const char *path, const char *pretty, acl_type_t type, a
 }
 #endif
 
-static int fd_set_acls(Item *item, int fd, const struct stat *st) {
+static int fd_set_acls(Item *item, int fd, const char *path, const struct stat *st) {
         int r = 0;
 #if HAVE_ACL
         char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
-        _cleanup_free_ char *path = NULL;
         struct stat stbuf;
 
         assert(item);
         assert(fd);
-
-        r = fd_get_path(fd, &path);
-        if (r < 0)
-                return r;
+        assert(path);
 
         if (!st) {
                 if (fstat(fd, &stbuf) < 0)
@@ -1103,7 +1093,7 @@ static int path_set_acls(Item *item, const char *path) {
         if (fd < 0)
                 return fd;
 
-        r = fd_set_acls(item, fd, NULL);
+        r = fd_set_acls(item, fd, path, NULL);
 #endif
         return r;
 }
@@ -1207,19 +1197,18 @@ static int parse_attribute_from_arg(Item *item) {
         return 0;
 }
 
-static int fd_set_attribute(Item *item, int fd, const struct stat *st) {
+static int fd_set_attribute(Item *item, int fd, const char *path, const struct stat *st) {
         _cleanup_close_ int procfs_fd = -1;
-        _cleanup_free_ char *path = NULL;
         struct stat stbuf;
         unsigned f;
         int r;
 
+        assert(item);
+        assert(fd);
+        assert(path);
+
         if (!item->attribute_set || item->attribute_mask == 0)
                 return 0;
-
-        r = fd_get_path(fd, &path);
-        if (r < 0)
-                return r;
 
         if (!st) {
                 if (fstat(fd, &stbuf) < 0)
@@ -1243,13 +1232,13 @@ static int fd_set_attribute(Item *item, int fd, const struct stat *st) {
 
         procfs_fd = fd_reopen(fd, O_RDONLY|O_CLOEXEC|O_NOATIME);
         if (procfs_fd < 0)
-                return -errno;
+                return log_error_errno(procfs_fd, "Failed to re-open '%s': %m", path);
 
-        r = chattr_fd(procfs_fd, f, item->attribute_mask);
+        r = chattr_fd(procfs_fd, f, item->attribute_mask, NULL);
         if (r < 0)
                 log_full_errno(IN_SET(r, -ENOTTY, -EOPNOTSUPP) ? LOG_DEBUG : LOG_WARNING,
                                r,
-                               "Cannot set file attribute for '%s', value=0x%08x, mask=0x%08x: %m",
+                               "Cannot set file attribute for '%s', value=0x%08x, mask=0x%08x, ignoring: %m",
                                path, item->attribute_value, item->attribute_mask);
 
         return 0;
@@ -1265,7 +1254,7 @@ static int path_set_attribute(Item *item, const char *path) {
         if (fd < 0)
                 return fd;
 
-        return fd_set_attribute(item, fd, NULL);
+        return fd_set_attribute(item, fd, path, NULL);
 }
 
 static int write_one_file(Item *i, const char *path) {
@@ -1303,7 +1292,7 @@ static int write_one_file(Item *i, const char *path) {
         if (r < 0)
                 return log_error_errno(r, "Failed to write file \"%s\": %m", path);
 
-        return fd_set_perms(i, fd, NULL);
+        return fd_set_perms(i, fd, path, NULL);
 }
 
 static int create_file(Item *i, const char *path) {
@@ -1370,7 +1359,7 @@ static int create_file(Item *i, const char *path) {
                 }
         }
 
-        return fd_set_perms(i, fd, st);
+        return fd_set_perms(i, fd, path, st);
 }
 
 static int truncate_file(Item *i, const char *path) {
@@ -1454,7 +1443,7 @@ static int truncate_file(Item *i, const char *path) {
                 }
         }
 
-        return fd_set_perms(i, fd, st);
+        return fd_set_perms(i, fd, path, st);
 }
 
 static int copy_files(Item *i) {
@@ -1506,7 +1495,7 @@ static int copy_files(Item *i) {
         if (fd < 0)
                 return log_error_errno(errno, "Failed to openat(%s): %m", i->path);
 
-        return fd_set_perms(i, fd, NULL);
+        return fd_set_perms(i, fd, i->path, NULL);
 }
 
 typedef enum {
@@ -1525,12 +1514,15 @@ static const char *creation_mode_verb_table[_CREATION_MODE_MAX] = {
 
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP_TO_STRING(creation_mode_verb, CreationMode);
 
-static int create_directory_or_subvolume(const char *path, mode_t mode, bool subvol) {
+static int create_directory_or_subvolume(const char *path, mode_t mode, bool subvol, CreationMode *creation) {
         _cleanup_close_ int pfd = -1;
-        CreationMode creation;
+        CreationMode c;
         int r;
 
         assert(path);
+
+        if (!creation)
+                creation = &c;
 
         pfd = path_open_parent_safe(path);
         if (pfd < 0)
@@ -1577,15 +1569,16 @@ static int create_directory_or_subvolume(const char *path, mode_t mode, bool sub
                         return -EEXIST;
                 }
 
-                creation = CREATION_EXISTING;
+                *creation = CREATION_EXISTING;
         } else
-                creation = CREATION_NORMAL;
+                *creation = CREATION_NORMAL;
 
-        log_debug("%s directory \"%s\".", creation_mode_verb_to_string(creation), path);
+        log_debug("%s directory \"%s\".", creation_mode_verb_to_string(*creation), path);
 
         r = openat(pfd, basename(path), O_NOCTTY|O_CLOEXEC|O_DIRECTORY);
         if (r < 0)
-                return -errno;
+                return log_error_errno(errno, "Failed to open directory '%s': %m", basename(path));
+
         return r;
 }
 
@@ -1595,29 +1588,31 @@ static int create_directory(Item *i, const char *path) {
         assert(i);
         assert(IN_SET(i->type, CREATE_DIRECTORY, TRUNCATE_DIRECTORY));
 
-        fd = create_directory_or_subvolume(path, i->mode, false);
+        fd = create_directory_or_subvolume(path, i->mode, false, NULL);
         if (fd == -EEXIST)
                 return 0;
         if (fd < 0)
                 return fd;
 
-        return fd_set_perms(i, fd, NULL);
+        return fd_set_perms(i, fd, path, NULL);
 }
 
 static int create_subvolume(Item *i, const char *path) {
         _cleanup_close_ int fd = -1;
+        CreationMode creation;
         int r, q = 0;
 
         assert(i);
         assert(IN_SET(i->type, CREATE_SUBVOLUME, CREATE_SUBVOLUME_NEW_QUOTA, CREATE_SUBVOLUME_INHERIT_QUOTA));
 
-        fd = create_directory_or_subvolume(path, i->mode, true);
+        fd = create_directory_or_subvolume(path, i->mode, true, &creation);
         if (fd == -EEXIST)
                 return 0;
         if (fd < 0)
                 return fd;
 
-        if (IN_SET(i->type, CREATE_SUBVOLUME_NEW_QUOTA, CREATE_SUBVOLUME_INHERIT_QUOTA)) {
+        if (creation == CREATION_NORMAL &&
+            IN_SET(i->type, CREATE_SUBVOLUME_NEW_QUOTA, CREATE_SUBVOLUME_INHERIT_QUOTA)) {
                 r = btrfs_subvol_auto_qgroup_fd(fd, 0, i->type == CREATE_SUBVOLUME_NEW_QUOTA);
                 if (r == -ENOTTY)
                         log_debug_errno(r, "Couldn't adjust quota for subvolume \"%s\" (unsupported fs or dir not a subvolume): %m", i->path);
@@ -1633,8 +1628,8 @@ static int create_subvolume(Item *i, const char *path) {
                         log_debug("Quota for subvolume \"%s\" already in place, no change made.", i->path);
         }
 
-        r = fd_set_perms(i, fd, NULL);
-        if (q < 0)
+        r = fd_set_perms(i, fd, path, NULL);
+        if (q < 0) /* prefer the quota change error from above */
                 return q;
 
         return r;
@@ -1734,7 +1729,7 @@ static int create_device(Item *i, mode_t file_type) {
         if (fd < 0)
                 return log_error_errno(errno, "Failed to openat(%s): %m", i->path);
 
-        return fd_set_perms(i, fd, NULL);
+        return fd_set_perms(i, fd, i->path, NULL);
 }
 
 static int create_fifo(Item *i, const char *path) {
@@ -1788,29 +1783,30 @@ static int create_fifo(Item *i, const char *path) {
 
         fd = openat(pfd, bn, O_NOFOLLOW|O_CLOEXEC|O_PATH);
         if (fd < 0)
-                return log_error_errno(fd, "Failed to openat(%s): %m", path);
+                return log_error_errno(errno, "Failed to openat(%s): %m", path);
 
-        return fd_set_perms(i, fd, NULL);
+        return fd_set_perms(i, fd, i->path, NULL);
 }
 
-typedef int (*action_t)(Item *, const char *);
-typedef int (*fdaction_t)(Item *, int fd, const struct stat *st);
+typedef int (*action_t)(Item *i, const char *path);
+typedef int (*fdaction_t)(Item *i, int fd, const char *path, const struct stat *st);
 
-static int item_do(Item *i, int fd, fdaction_t action) {
+static int item_do(Item *i, int fd, const char *path, fdaction_t action) {
         struct stat st;
         int r = 0, q;
 
         assert(i);
+        assert(path);
         assert(fd >= 0);
 
         if (fstat(fd, &st) < 0) {
-                r = -errno;
+                r = log_error_errno(errno, "fstat() on file failed: %m");
                 goto finish;
         }
 
         /* This returns the first error we run into, but nevertheless
          * tries to go on */
-        r = action(i, fd, &st);
+        r = action(i, fd, path, &st);
 
         if (S_ISDIR(st.st_mode)) {
                 char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
@@ -1823,7 +1819,9 @@ static int item_do(Item *i, int fd, fdaction_t action) {
 
                 d = opendir(procfs_path);
                 if (!d) {
-                        r = r ?: -errno;
+                        log_error_errno(errno, "Failed to opendir() '%s': %m", procfs_path);
+                        if (r == 0)
+                                r = -errno;
                         goto finish;
                 }
 
@@ -1834,11 +1832,18 @@ static int item_do(Item *i, int fd, fdaction_t action) {
                                 continue;
 
                         de_fd = openat(fd, de->d_name, O_NOFOLLOW|O_CLOEXEC|O_PATH);
-                        if (de_fd >= 0)
-                                /* pass ownership of dirent fd over  */
-                                q = item_do(i, de_fd, action);
-                        else
-                                q = -errno;
+                        if (de_fd < 0)
+                                q = log_error_errno(errno, "Failed to open() file '%s': %m", de->d_name);
+                        else {
+                                _cleanup_free_ char *de_path = NULL;
+
+                                de_path = path_join(NULL, path, de->d_name);
+                                if (!de_path)
+                                        q = log_oom();
+                                else
+                                        /* Pass ownership of dirent fd over */
+                                        q = item_do(i, de_fd, de_path, action);
+                        }
 
                         if (q < 0 && r == 0)
                                 r = q;
@@ -1890,11 +1895,13 @@ static int glob_item_recursively(Item *i, fdaction_t action) {
 
                 fd = open(*fn, O_CLOEXEC|O_NOFOLLOW|O_PATH);
                 if (fd < 0) {
-                        r = r ?: -errno;
+                        log_error_errno(errno, "Opening '%s' failed: %m", *fn);
+                        if (r == 0)
+                                r = -errno;
                         continue;
                 }
 
-                k = item_do(i, fd, action);
+                k = item_do(i, fd, *fn, action);
                 if (k < 0 && r == 0)
                         r = k;
 
@@ -2042,10 +2049,8 @@ static int create_item(Item *i) {
         case CREATE_BLOCK_DEVICE:
         case CREATE_CHAR_DEVICE:
                 if (have_effective_cap(CAP_MKNOD) == 0) {
-                        /* In a container we lack CAP_MKNOD. We
-                        shouldn't attempt to create the device node in
-                        that case to avoid noise, and we don't support
-                        virtualized devices in containers anyway. */
+                        /* In a container we lack CAP_MKNOD. We shouldn't attempt to create the device node in that
+                         * case to avoid noise, and we don't support virtualized devices in containers anyway. */
 
                         log_debug("We lack CAP_MKNOD, skipping creation of device node %s.", i->path);
                         return 0;
@@ -2270,6 +2275,9 @@ static int process_item(Item *i) {
         r = arg_create ? create_item(i) : 0;
         q = arg_remove ? remove_item(i) : 0;
         p = arg_clean ? clean_item(i) : 0;
+        /* Failure can only be tolerated for create */
+        if (i->allow_failure)
+                r = 0;
 
         return t < 0 ? t :
                 r < 0 ? r :
@@ -2316,18 +2324,16 @@ static void item_array_free(ItemArray *a) {
         free(a);
 }
 
-static int item_compare(const void *a, const void *b) {
-        const Item *x = a, *y = b;
-
+static int item_compare(const Item *a, const Item *b) {
         /* Make sure that the ownership taking item is put first, so
          * that we first create the node, and then can adjust it */
 
-        if (takes_ownership(x->type) && !takes_ownership(y->type))
+        if (takes_ownership(a->type) && !takes_ownership(b->type))
                 return -1;
-        if (!takes_ownership(x->type) && takes_ownership(y->type))
+        if (!takes_ownership(a->type) && takes_ownership(b->type))
                 return 1;
 
-        return (int) x->type - (int) y->type;
+        return CMP(a->type, b->type);
 }
 
 static bool item_compatible(Item *a, Item *b) {
@@ -2475,7 +2481,7 @@ static int parse_line(const char *fname, unsigned line, const char *buffer, bool
         ItemArray *existing;
         OrderedHashmap *h;
         int r, pos;
-        bool force = false, boot = false;
+        bool force = false, boot = false, allow_failure = false;
 
         assert(fname);
         assert(line >= 1);
@@ -2520,6 +2526,8 @@ static int parse_line(const char *fname, unsigned line, const char *buffer, bool
                         boot = true;
                 else if (action[pos] == '+' && !force)
                         force = true;
+                else if (action[pos] == '-' && !allow_failure)
+                        allow_failure = true;
                 else {
                         *invalid_config = true;
                         log_error("[%s:%u] Unknown modifiers in command '%s'",
@@ -2536,6 +2544,7 @@ static int parse_line(const char *fname, unsigned line, const char *buffer, bool
 
         i.type = action[0];
         i.force = force;
+        i.allow_failure = allow_failure;
 
         r = specifier_printf(path, specifier_table, NULL, &i.path);
         if (r == -ENXIO)
@@ -2704,7 +2713,7 @@ static int parse_line(const char *fname, unsigned line, const char *buffer, bool
         if (!isempty(user) && !streq(user, "-")) {
                 const char *u = user;
 
-                r = get_user_creds(&u, &i.uid, NULL, NULL, NULL);
+                r = get_user_creds(&u, &i.uid, NULL, NULL, NULL, USER_CREDS_ALLOW_MISSING);
                 if (r < 0) {
                         *invalid_config = true;
                         return log_error_errno(r, "[%s:%u] Unknown user '%s'.", fname, line, user);
@@ -2716,7 +2725,7 @@ static int parse_line(const char *fname, unsigned line, const char *buffer, bool
         if (!isempty(group) && !streq(group, "-")) {
                 const char *g = group;
 
-                r = get_group_creds(&g, &i.gid);
+                r = get_group_creds(&g, &i.gid, USER_CREDS_ALLOW_MISSING);
                 if (r < 0) {
                         *invalid_config = true;
                         log_error("[%s:%u] Unknown group '%s'.", fname, line, group);
@@ -2792,7 +2801,7 @@ static int parse_line(const char *fname, unsigned line, const char *buffer, bool
         memcpy(existing->items + existing->count++, &i, sizeof(i));
 
         /* Sort item array, to enforce stable ordering of application */
-        qsort_safe(existing->items, existing->count, sizeof(Item), item_compare);
+        typesafe_qsort(existing->items, existing->count, item_compare);
 
         zero(i);
         return 0;
@@ -2809,7 +2818,14 @@ static int cat_config(char **config_dirs, char **args) {
         return cat_files(NULL, files, 0);
 }
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-tmpfiles", "8", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] [CONFIGURATION FILE...]\n\n"
                "Creates, deletes and cleans up volatile and temporary files and directories.\n\n"
                "  -h --help                 Show this help\n"
@@ -2825,7 +2841,12 @@ static void help(void) {
                "     --root=PATH            Operate on an alternate filesystem root\n"
                "     --replace=PATH         Treat arguments as replacement for PATH\n"
                "     --no-pager             Do not pipe output into a pager\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -2872,8 +2893,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();
@@ -2959,10 +2979,9 @@ static int parse_argv(int argc, char *argv[]) {
 
 static int read_config_file(char **config_dirs, const char *fn, bool ignore_enoent, bool *invalid_config) {
         _cleanup_fclose_ FILE *_f = NULL;
-        FILE *f;
-        char line[LINE_MAX];
         Iterator iterator;
         unsigned v = 0;
+        FILE *f;
         Item *i;
         int r = 0;
 
@@ -2986,10 +3005,17 @@ static int read_config_file(char **config_dirs, const char *fn, bool ignore_enoe
                 f = _f;
         }
 
-        FOREACH_LINE(line, f, break) {
+        for (;;) {
+                _cleanup_free_ char *line = NULL;
+                bool invalid_line = false;
                 char *l;
                 int k;
-                bool invalid_line = false;
+
+                k = read_line(f, LONG_LINE_MAX, &line);
+                if (k < 0)
+                        return log_error_errno(k, "Failed to read '%s': %m", fn);
+                if (k == 0)
+                        break;
 
                 v++;
 

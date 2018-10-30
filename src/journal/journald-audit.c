@@ -497,7 +497,6 @@ static int enable_audit(int fd, bool b) {
 }
 
 int server_open_audit(Server *s) {
-        static const int one = 1;
         int r;
 
         if (s->audit_fd < 0) {
@@ -526,11 +525,11 @@ int server_open_audit(Server *s) {
                         return 0;
                 }
         } else
-                fd_nonblock(s->audit_fd, 1);
+                (void) fd_nonblock(s->audit_fd, true);
 
-        r = setsockopt(s->audit_fd, SOL_SOCKET, SO_PASSCRED, &one, sizeof(one));
+        r = setsockopt_int(s->audit_fd, SOL_SOCKET, SO_PASSCRED, true);
         if (r < 0)
-                return log_error_errno(errno, "Failed to set SO_PASSCRED on audit socket: %m");
+                return log_error_errno(r, "Failed to set SO_PASSCRED on audit socket: %m");
 
         r = sd_event_add_io(s->event, &s->audit_event_source, s->audit_fd, EPOLLIN, server_process_datagram, s);
         if (r < 0)

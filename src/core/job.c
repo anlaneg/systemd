@@ -10,10 +10,12 @@
 #include "dbus-job.h"
 #include "dbus.h"
 #include "escape.h"
+#include "fileio.h"
 #include "job.h"
 #include "log.h"
 #include "macro.h"
 #include "parse-util.h"
+#include "serialize.h"
 #include "set.h"
 #include "special.h"
 #include "stdio-util.h"
@@ -31,14 +33,15 @@ Job* job_new_raw(Unit *unit) {
 
         assert(unit);
 
-        j = new0(Job, 1);
+        j = new(Job, 1);
         if (!j)
                 return NULL;
 
-        j->manager = unit->manager;
-        j->unit = unit;
-        j->type = _JOB_TYPE_INVALID;
-        j->reloaded = false;
+        *j = (Job) {
+                .manager = unit->manager,
+                .unit = unit,
+                .type = _JOB_TYPE_INVALID,
+        };
 
         return j;
 }
@@ -973,7 +976,9 @@ static int job_dispatch_timer(sd_event_source *s, uint64_t monotonic, void *user
         u = j->unit;
         job_finish_and_invalidate(j, JOB_TIMEOUT, true, false);
 
-        emergency_action(u->manager, u->job_timeout_action, u->job_timeout_reboot_arg, "job timed out");
+        emergency_action(u->manager, u->job_timeout_action,
+                         EMERGENCY_ACTION_IS_WATCHDOG|EMERGENCY_ACTION_WARN,
+                         u->job_timeout_reboot_arg, "job timed out");
 
         return 0;
 }
@@ -1071,17 +1076,17 @@ int job_serialize(Job *j, FILE *f) {
         assert(j);
         assert(f);
 
-        fprintf(f, "job-id=%u\n", j->id);
-        fprintf(f, "job-type=%s\n", job_type_to_string(j->type));
-        fprintf(f, "job-state=%s\n", job_state_to_string(j->state));
-        fprintf(f, "job-irreversible=%s\n", yes_no(j->irreversible));
-        fprintf(f, "job-sent-dbus-new-signal=%s\n", yes_no(j->sent_dbus_new_signal));
-        fprintf(f, "job-ignore-order=%s\n", yes_no(j->ignore_order));
+        (void) serialize_item_format(f, "job-id", "%u", j->id);
+        (void) serialize_item(f, "job-type", job_type_to_string(j->type));
+        (void) serialize_item(f, "job-state", job_state_to_string(j->state));
+        (void) serialize_bool(f, "job-irreversible", j->irreversible);
+        (void) serialize_bool(f, "job-sent-dbus-new-signal", j->sent_dbus_new_signal);
+        (void) serialize_bool(f, "job-ignore-order", j->ignore_order);
 
         if (j->begin_usec > 0)
-                fprintf(f, "job-begin="USEC_FMT"\n", j->begin_usec);
+                (void) serialize_usec(f, "job-begin", j->begin_usec);
         if (j->begin_running_usec > 0)
-                fprintf(f, "job-begin-running="USEC_FMT"\n", j->begin_running_usec);
+                (void) serialize_usec(f, "job-begin-running", j->begin_running_usec);
 
         bus_track_serialize(j->bus_track, f, "subscribed");
 
@@ -1091,24 +1096,26 @@ int job_serialize(Job *j, FILE *f) {
 }
 
 int job_deserialize(Job *j, FILE *f) {
+        int r;
+
         assert(j);
         assert(f);
 
         for (;;) {
-                char line[LINE_MAX], *l, *v;
+                _cleanup_free_ char *line = NULL;
+                char *l, *v;
                 size_t k;
 
-                if (!fgets(line, sizeof(line), f)) {
-                        if (feof(f))
-                                return 0;
-                        return -errno;
-                }
+                r = read_line(f, LONG_LINE_MAX, &line);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to read serialization line: %m");
+                if (r == 0)
+                        return 0;
 
-                char_array_0(line);
                 l = strstrip(line);
 
                 /* End marker */
-                if (l[0] == 0)
+                if (isempty(l))
                         return 0;
 
                 k = strcspn(l, "=");
@@ -1122,16 +1129,16 @@ int job_deserialize(Job *j, FILE *f) {
                 if (streq(l, "job-id")) {
 
                         if (safe_atou32(v, &j->id) < 0)
-                                log_debug("Failed to parse job id value %s", v);
+                                log_debug("Failed to parse job id value: %s", v);
 
                 } else if (streq(l, "job-type")) {
                         JobType t;
 
                         t = job_type_from_string(v);
                         if (t < 0)
-                                log_debug("Failed to parse job type %s", v);
+                                log_debug("Failed to parse job type: %s", v);
                         else if (t >= _JOB_TYPE_MAX_IN_TRANSACTION)
-                                log_debug("Cannot deserialize job of type %s", v);
+                                log_debug("Cannot deserialize job of type: %s", v);
                         else
                                 j->type = t;
 
@@ -1140,7 +1147,7 @@ int job_deserialize(Job *j, FILE *f) {
 
                         s = job_state_from_string(v);
                         if (s < 0)
-                                log_debug("Failed to parse job state %s", v);
+                                log_debug("Failed to parse job state: %s", v);
                         else
                                 job_set_state(j, s);
 
@@ -1149,7 +1156,7 @@ int job_deserialize(Job *j, FILE *f) {
 
                         b = parse_boolean(v);
                         if (b < 0)
-                                log_debug("Failed to parse job irreversible flag %s", v);
+                                log_debug("Failed to parse job irreversible flag: %s", v);
                         else
                                 j->irreversible = j->irreversible || b;
 
@@ -1158,7 +1165,7 @@ int job_deserialize(Job *j, FILE *f) {
 
                         b = parse_boolean(v);
                         if (b < 0)
-                                log_debug("Failed to parse job sent_dbus_new_signal flag %s", v);
+                                log_debug("Failed to parse job sent_dbus_new_signal flag: %s", v);
                         else
                                 j->sent_dbus_new_signal = j->sent_dbus_new_signal || b;
 
@@ -1167,31 +1174,21 @@ int job_deserialize(Job *j, FILE *f) {
 
                         b = parse_boolean(v);
                         if (b < 0)
-                                log_debug("Failed to parse job ignore_order flag %s", v);
+                                log_debug("Failed to parse job ignore_order flag: %s", v);
                         else
                                 j->ignore_order = j->ignore_order || b;
 
-                } else if (streq(l, "job-begin")) {
-                        unsigned long long ull;
+                } else if (streq(l, "job-begin"))
+                        (void) deserialize_usec(v, &j->begin_usec);
 
-                        if (sscanf(v, "%llu", &ull) != 1)
-                                log_debug("Failed to parse job-begin value %s", v);
-                        else
-                                j->begin_usec = ull;
+                else if (streq(l, "job-begin-running"))
+                        (void) deserialize_usec(v, &j->begin_running_usec);
 
-                } else if (streq(l, "job-begin-running")) {
-                        unsigned long long ull;
-
-                        if (sscanf(v, "%llu", &ull) != 1)
-                                log_debug("Failed to parse job-begin-running value %s", v);
-                        else
-                                j->begin_running_usec = ull;
-
-                } else if (streq(l, "subscribed")) {
-
+                else if (streq(l, "subscribed")) {
                         if (strv_extend(&j->deserialized_clients, v) < 0)
-                                log_oom();
-                }
+                                return log_oom();
+                } else
+                        log_debug("Unknown job serialization key: %s", l);
         }
 }
 
@@ -1384,15 +1381,8 @@ void job_add_to_gc_queue(Job *j) {
         j->in_gc_queue = true;
 }
 
-static int job_compare(const void *a, const void *b) {
-        Job *x = *(Job**) a, *y = *(Job**) b;
-
-        if (x->id < y->id)
-                return -1;
-        if (x->id > y->id)
-                return 1;
-
-        return 0;
+static int job_compare(Job * const *a, Job * const *b) {
+        return CMP((*a)->id, (*b)->id);
 }
 
 static size_t sort_job_list(Job **list, size_t n) {
@@ -1400,7 +1390,7 @@ static size_t sort_job_list(Job **list, size_t n) {
         size_t a, b;
 
         /* Order by numeric IDs */
-        qsort_safe(list, n, sizeof(Job*), job_compare);
+        typesafe_qsort(list, n, job_compare);
 
         /* Filter out duplicates */
         for (a = 0, b = 0; a < n; a++) {

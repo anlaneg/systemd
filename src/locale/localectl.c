@@ -19,6 +19,7 @@
 #include "set.h"
 #include "spawn-polkit-agent.h"
 #include "strv.h"
+#include "terminal-util.h"
 #include "util.h"
 #include "verbs.h"
 #include "virt.h"
@@ -184,10 +185,8 @@ static int set_locale(int argc, char **argv, void *userdata) {
                 return bus_log_create_error(r);
 
         r = sd_bus_call(bus, m, 0, &error, NULL);
-        if (r < 0) {
-                log_error("Failed to issue method call: %s", bus_error_message(&error, -r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to issue method call: %s", bus_error_message(&error, -r));
 
         return 0;
 }
@@ -229,9 +228,9 @@ static int set_vconsole_keymap(int argc, char **argv, void *userdata) {
                         NULL,
                         "ssbb", map, toggle_map, arg_convert, arg_ask_password);
         if (r < 0)
-                log_error("Failed to set keymap: %s", bus_error_message(&error, -r));
+                return log_error_errno(r, "Failed to set keymap: %s", bus_error_message(&error, -r));
 
-        return r;
+        return 0;
 }
 
 static int list_vconsole_keymaps(int argc, char **argv, void *userdata) {
@@ -273,15 +272,14 @@ static int set_x11_keymap(int argc, char **argv, void *userdata) {
                         "ssssbb", layout, model, variant, options,
                                   arg_convert, arg_ask_password);
         if (r < 0)
-                log_error("Failed to set keymap: %s", bus_error_message(&error, -r));
+                return log_error_errno(r, "Failed to set keymap: %s", bus_error_message(&error, -r));
 
-        return r;
+        return 0;
 }
 
 static int list_x11_keymaps(int argc, char **argv, void *userdata) {
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_strv_free_ char **list = NULL;
-        char line[LINE_MAX];
         enum {
                 NONE,
                 MODELS,
@@ -306,8 +304,15 @@ static int list_x11_keymaps(int argc, char **argv, void *userdata) {
         else
                 assert_not_reached("Wrong parameter");
 
-        FOREACH_LINE(line, f, break) {
+        for (;;) {
+                _cleanup_free_ char *line = NULL;
                 char *l, *w;
+
+                r = read_line(f, LONG_LINE_MAX, &line);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to read keyboard mapping list: %m");
+                if (r == 0)
+                        break;
 
                 l = strstrip(line);
 
@@ -375,6 +380,13 @@ static int list_x11_keymaps(int argc, char **argv, void *userdata) {
 }
 
 static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("localectl", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] COMMAND ...\n\n"
                "Query or change system locale and keyboard settings.\n\n"
                "  -h --help                Show this help\n"
@@ -397,7 +409,10 @@ static int help(void) {
                "  list-x11-keymap-variants [LAYOUT]\n"
                "                           Show known X11 keyboard mapping variants\n"
                "  list-x11-keymap-options  Show known X11 keyboard mapping options\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
 
         return 0;
 }

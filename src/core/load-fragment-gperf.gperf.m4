@@ -57,6 +57,8 @@ $1.SyslogFacility,               config_parse_log_facility,          0,         
 $1.SyslogLevel,                  config_parse_log_level,             0,                             offsetof($1, exec_context.syslog_priority)
 $1.SyslogLevelPrefix,            config_parse_bool,                  0,                             offsetof($1, exec_context.syslog_level_prefix)
 $1.LogLevelMax,                  config_parse_log_level,             0,                             offsetof($1, exec_context.log_level_max)
+$1.LogRateLimitIntervalSec,      config_parse_sec,                   0,                             offsetof($1, exec_context.log_rate_limit_interval_usec)
+$1.LogRateLimitBurst,            config_parse_unsigned,              0,                             offsetof($1, exec_context.log_rate_limit_burst)
 $1.LogExtraFields,               config_parse_log_extra_fields,      0,                             offsetof($1, exec_context)
 $1.Capabilities,                 config_parse_warn_compat,           DISABLED_LEGACY,               offsetof($1, exec_context)
 $1.SecureBits,                   config_parse_exec_secure_bits,      0,                             offsetof($1, exec_context.secure_bits)
@@ -152,7 +154,8 @@ m4_define(`KILL_CONTEXT_CONFIG_ITEMS',
 $1.SendSIGHUP,                   config_parse_bool,                  0,                             offsetof($1, kill_context.send_sighup)
 $1.KillMode,                     config_parse_kill_mode,             0,                             offsetof($1, kill_context.kill_mode)
 $1.KillSignal,                   config_parse_signal,                0,                             offsetof($1, kill_context.kill_signal)
-$1.FinalKillSignal,              config_parse_signal,                0,                             offsetof($1, kill_context.final_kill_signal)'
+$1.FinalKillSignal,              config_parse_signal,                0,                             offsetof($1, kill_context.final_kill_signal)
+$1.WatchdogSignal,               config_parse_signal,                0,                             offsetof($1, kill_context.watchdog_signal)'
 )m4_dnl
 m4_define(`CGROUP_CONTEXT_CONFIG_ITEMS',
 `$1.Slice,                       config_parse_unit_slice,            0,                             0
@@ -179,6 +182,7 @@ $1.IOReadBandwidthMax,           config_parse_io_limit,              0,         
 $1.IOWriteBandwidthMax,          config_parse_io_limit,              0,                             offsetof($1, cgroup_context)
 $1.IOReadIOPSMax,                config_parse_io_limit,              0,                             offsetof($1, cgroup_context)
 $1.IOWriteIOPSMax,               config_parse_io_limit,              0,                             offsetof($1, cgroup_context)
+$1.IODeviceLatencyTargetSec,     config_parse_io_device_latency,     0,                             offsetof($1, cgroup_context)
 $1.BlockIOAccounting,            config_parse_bool,                  0,                             offsetof($1, cgroup_context.blockio_accounting)
 $1.BlockIOWeight,                config_parse_blockio_weight,        0,                             offsetof($1, cgroup_context.blockio_weight)
 $1.StartupBlockIOWeight,         config_parse_blockio_weight,        0,                             offsetof($1, cgroup_context.startup_blockio_weight)

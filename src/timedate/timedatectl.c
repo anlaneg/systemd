@@ -204,9 +204,9 @@ static int set_time(int argc, char **argv, void *userdata) {
                                NULL,
                                "xbb", (int64_t) t, relative, interactive);
         if (r < 0)
-                log_error("Failed to set time: %s", bus_error_message(&error, r));
+                return log_error_errno(r, "Failed to set time: %s", bus_error_message(&error, r));
 
-        return r;
+        return 0;
 }
 
 static int set_timezone(int argc, char **argv, void *userdata) {
@@ -225,9 +225,9 @@ static int set_timezone(int argc, char **argv, void *userdata) {
                                NULL,
                                "sb", argv[1], arg_ask_password);
         if (r < 0)
-                log_error("Failed to set time zone: %s", bus_error_message(&error, r));
+                return log_error_errno(r, "Failed to set time zone: %s", bus_error_message(&error, r));
 
-        return r;
+        return 0;
 }
 
 static int set_local_rtc(int argc, char **argv, void *userdata) {
@@ -250,9 +250,9 @@ static int set_local_rtc(int argc, char **argv, void *userdata) {
                                NULL,
                                "bbb", b, arg_adjust_system_clock, arg_ask_password);
         if (r < 0)
-                log_error("Failed to set local RTC: %s", bus_error_message(&error, r));
+                return log_error_errno(r, "Failed to set local RTC: %s", bus_error_message(&error, r));
 
-        return r;
+        return 0;
 }
 
 static int set_ntp(int argc, char **argv, void *userdata) {
@@ -275,9 +275,9 @@ static int set_ntp(int argc, char **argv, void *userdata) {
                                NULL,
                                "bb", b, arg_ask_password);
         if (r < 0)
-                log_error("Failed to set ntp: %s", bus_error_message(&error, r));
+                return log_error_errno(r, "Failed to set ntp: %s", bus_error_message(&error, r));
 
-        return r;
+        return 0;
 }
 
 static int list_timezones(int argc, char **argv, void *userdata) {
@@ -589,15 +589,7 @@ static int show_timesync_status(int argc, char **argv, void *userdata) {
         return 0;
 }
 
-#define property(name, fmt, ...)                                        \
-        do {                                                            \
-                if (value)                                              \
-                        printf(fmt "\n", __VA_ARGS__);                  \
-                else                                                    \
-                        printf("%s=" fmt "\n", name, __VA_ARGS__);      \
-        } while (0)
-
-static int print_timesync_property(const char *name, sd_bus_message *m, bool value, bool all) {
+static int print_timesync_property(const char *name, const char *expected_value, sd_bus_message *m, bool value, bool all) {
         char type;
         const char *contents;
         int r;
@@ -663,7 +655,7 @@ static int print_timesync_property(const char *name, sd_bus_message *m, bool val
                                 return r;
 
                         if (arg_all || !isempty(str))
-                                property(name, "%s", str);
+                                bus_print_property_value(name, expected_value, value, "%s", str);
 
                         return 1;
                 }
@@ -694,6 +686,13 @@ static int show_timesync(int argc, char **argv, void *userdata) {
 }
 
 static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("timedatectl", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] COMMAND ...\n\n"
                "Query or change system time and date settings.\n\n"
                "  -h --help                Show this help message\n"
@@ -720,7 +719,10 @@ static int help(void) {
                "systemd-timesyncd Commands:\n"
                "  timesync-status          Show status of systemd-timesyncd\n"
                "  show-timesync            Show properties of systemd-timesyncd\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
 
         return 0;
 }

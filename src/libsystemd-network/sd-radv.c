@@ -86,25 +86,8 @@ static void radv_reset(sd_radv *ra) {
         ra->ra_sent = 0;
 }
 
-_public_ sd_radv *sd_radv_ref(sd_radv *ra) {
-        if (!ra)
-                return NULL;
-
-        assert(ra->n_ref > 0);
-        ra->n_ref++;
-
-        return ra;
-}
-
-_public_ sd_radv *sd_radv_unref(sd_radv *ra) {
-        if (!ra)
-                return NULL;
-
-        assert(ra->n_ref > 0);
-        ra->n_ref--;
-
-        if (ra->n_ref > 0)
-                return NULL;
+static sd_radv *radv_free(sd_radv *ra) {
+        assert(ra);
 
         while (ra->prefixes) {
                 sd_radv_prefix *p = ra->prefixes;
@@ -124,6 +107,8 @@ _public_ sd_radv *sd_radv_unref(sd_radv *ra) {
 
         return mfree(ra);
 }
+
+DEFINE_PUBLIC_TRIVIAL_REF_UNREF_FUNC(sd_radv, sd_radv, radv_free);
 
 static int radv_send(sd_radv *ra, const struct in6_addr *dst,
                      const uint32_t router_lifetime) {
@@ -264,8 +249,11 @@ static int radv_recv(sd_event_source *s, int fd, uint32_t revents, void *userdat
                         log_radv("Received invalid source address from ICMPv6 socket. Ignoring.");
                         break;
 
+                case -EAGAIN: /* ignore spurious wakeups */
+                        break;
+
                 default:
-                        log_radv_warning_errno(r, "Error receiving from ICMPv6 socket: %m");
+                        log_radv_errno(r, "Unexpected error receiving from ICMPv6 socket: %m");
                         break;
                 }
 
@@ -276,7 +264,7 @@ static int radv_recv(sd_event_source *s, int fd, uint32_t revents, void *userdat
 
         r = radv_send(ra, &src, ra->lifetime);
         if (r < 0)
-                log_radv_warning_errno(r, "Unable to send solicited Router Advertisement to %s: %m", addr);
+                log_radv_errno(r, "Unable to send solicited Router Advertisement to %s: %m", addr);
         else
                 log_radv("Sent solicited Router Advertisement to %s", addr);
 
@@ -309,7 +297,7 @@ static int radv_timeout(sd_event_source *s, uint64_t usec, void *userdata) {
 
         r = radv_send(ra, NULL, ra->lifetime);
         if (r < 0)
-                log_radv_warning_errno(r, "Unable to send Router Advertisement: %m");
+                log_radv_errno(r, "Unable to send Router Advertisement: %m");
 
         /* RFC 4861, Section 6.2.4, sending initial Router Advertisements */
         if (ra->ra_sent < SD_RADV_MAX_INITIAL_RTR_ADVERTISEMENTS) {
@@ -363,7 +351,7 @@ _public_ int sd_radv_stop(sd_radv *ra) {
            with zero lifetime  */
         r = radv_send(ra, NULL, 0);
         if (r < 0)
-                log_radv_warning_errno(r, "Unable to send last Router Advertisement with router lifetime set to zero: %m");
+                log_radv_errno(r, "Unable to send last Router Advertisement with router lifetime set to zero: %m");
 
         radv_reset(ra);
         ra->fd = safe_close(ra->fd);
@@ -746,28 +734,7 @@ _public_ int sd_radv_prefix_new(sd_radv_prefix **ret) {
         return 0;
 }
 
-_public_ sd_radv_prefix *sd_radv_prefix_ref(sd_radv_prefix *p) {
-        if (!p)
-                return NULL;
-
-        assert(p->n_ref > 0);
-        p->n_ref++;
-
-        return p;
-}
-
-_public_ sd_radv_prefix *sd_radv_prefix_unref(sd_radv_prefix *p) {
-        if (!p)
-                return NULL;
-
-        assert(p->n_ref > 0);
-        p->n_ref--;
-
-        if (p->n_ref > 0)
-                return NULL;
-
-        return mfree(p);
-}
+DEFINE_PUBLIC_TRIVIAL_REF_UNREF_FUNC(sd_radv_prefix, sd_radv_prefix, mfree);
 
 _public_ int sd_radv_prefix_set_prefix(sd_radv_prefix *p, const struct in6_addr *in6_addr,
                                        unsigned char prefixlen) {

@@ -27,6 +27,13 @@ substs = configuration_data()
 substs.set('PACKAGE_URL',          'https://www.freedesktop.org/wiki/Software/systemd')
 substs.set('PACKAGE_VERSION',      meson.project_version())
 
+want_ossfuzz = get_option('oss-fuzz')
+want_libfuzzer = get_option('llvm-fuzz')
+if want_ossfuzz and want_libfuzzer
+        error('only one of oss-fuzz and llvm-fuzz can be specified')
+endif
+fuzzer_build = want_ossfuzz or want_libfuzzer
+
 #####################################################################
 
 # Try to install the git pre-commit hook
@@ -66,6 +73,10 @@ sysvrcnd_path = get_option('sysvrcnd-path')
 conf.set10('HAVE_SYSV_COMPAT', sysvinit_path != '' and sysvrcnd_path != '',
            description : 'SysV init scripts and rcN.d links are supported')
 
+conf.set10('BUMP_PROC_SYS_FS_FILE_MAX', get_option('bump-proc-sys-fs-file-max'))
+conf.set10('BUMP_PROC_SYS_FS_NR_OPEN',  get_option('bump-proc-sys-fs-nr-open'))
+conf.set('HIGH_RLIMIT_NOFILE',          256*1024)
+
 # join_paths ignore the preceding arguments if an absolute component is
 # encountered, so this should canonicalize various paths when they are
 # absolute or relative.
@@ -90,8 +101,8 @@ if rootlibdir == ''
 endif
 
 # Dirs of external packages
-pkgconfigdatadir = join_paths(datadir, 'pkgconfig')
-pkgconfiglibdir = join_paths(libdir, 'pkgconfig')
+pkgconfigdatadir = get_option('pkgconfigdatadir') == '' ? join_paths(datadir, 'pkgconfig') : get_option('pkgconfigdatadir')
+pkgconfiglibdir = get_option('pkgconfiglibdir') == '' ? join_paths(libdir, 'pkgconfig') : get_option('pkgconfiglibdir')
 polkitpolicydir = join_paths(datadir, 'polkit-1/actions')
 polkitrulesdir = join_paths(datadir, 'polkit-1/rules.d')
 polkitpkladir = join_paths(localstatedir, 'lib/polkit-1/localauthority/10-vendor.d')
@@ -206,6 +217,8 @@ conf.set_quoted('SYSTEM_SHUTDOWN_PATH',                       systemshutdowndir)
 conf.set_quoted('SYSTEM_SLEEP_PATH',                          systemsleepdir)
 conf.set_quoted('SYSTEMD_KBD_MODEL_MAP',                      join_paths(pkgdatadir, 'kbd-model-map'))
 conf.set_quoted('SYSTEMD_LANGUAGE_FALLBACK_MAP',              join_paths(pkgdatadir, 'language-fallback-map'))
+conf.set_quoted('SYSTEMD_TEST_DATA',                          join_paths(testsdir, 'testdata'))
+conf.set_quoted('SYSTEMD_CATALOG_DIR',                        catalogdir)
 conf.set_quoted('UDEVLIBEXECDIR',                             udevlibexecdir)
 conf.set_quoted('POLKIT_AGENT_BINARY_PATH',                   join_paths(bindir, 'pkttyagent'))
 conf.set_quoted('LIBDIR',                                     libdir)
@@ -218,11 +231,8 @@ conf.set_quoted('SYSTEMD_EXPORT_PATH',                        join_paths(rootlib
 conf.set_quoted('VENDOR_KEYRING_PATH',                        join_paths(rootlibexecdir, 'import-pubring.gpg'))
 conf.set_quoted('USER_KEYRING_PATH',                          join_paths(pkgsysconfdir, 'import-pubring.gpg'))
 conf.set_quoted('DOCUMENT_ROOT',                              join_paths(pkgdatadir, 'gatewayd'))
-conf.set('MEMORY_ACCOUNTING_DEFAULT',                         memory_accounting_default ? 'true' : 'false')
+conf.set10('MEMORY_ACCOUNTING_DEFAULT',                       memory_accounting_default)
 conf.set_quoted('MEMORY_ACCOUNTING_DEFAULT_YES_NO',           memory_accounting_default ? 'yes' : 'no')
-
-conf.set_quoted('ABS_BUILD_DIR',                              meson.build_root())
-conf.set_quoted('ABS_SRC_DIR',                                meson.source_root())
 
 substs.set('prefix',                                          prefixdir)
 substs.set('exec_prefix',                                     prefixdir)
@@ -263,6 +273,7 @@ substs.set('SYSTEM_SYSVRCND_PATH',                            sysvrcnd_path)
 substs.set('RC_LOCAL_SCRIPT_PATH_START',                      get_option('rc-local'))
 substs.set('RC_LOCAL_SCRIPT_PATH_STOP',                       get_option('halt-local'))
 substs.set('MEMORY_ACCOUNTING_DEFAULT',                       memory_accounting_default ? 'yes' : 'no')
+substs.set('HIGH_RLIMIT_NOFILE',                              conf.get('HIGH_RLIMIT_NOFILE'))
 
 #####################################################################
 
@@ -271,24 +282,22 @@ pkgconfig = import('pkgconfig')
 check_compilation_sh = find_program('tools/meson-check-compilation.sh')
 meson_build_sh = find_program('tools/meson-build.sh')
 
-if get_option('tests') != 'false'
-        cxx = find_program('c++', required : false)
-        if cxx.found()
-                #  Used only for tests
-                add_languages('cpp')
-        endif
+want_tests = get_option('tests')
+slow_tests = want_tests != 'false' and get_option('slow-tests')
+install_tests = get_option('install-tests')
+
+cxx = find_program('c++', required : fuzzer_build)
+if cxx.found()
+        #  Used only for tests
+        add_languages('cpp')
+        cxx_cmd = ' '.join(meson.get_compiler('cpp').cmd_array())
+else
+        cxx_cmd = ''
 endif
 
-want_ossfuzz = get_option('oss-fuzz')
-want_libfuzzer = get_option('llvm-fuzz')
-fuzzer_build = want_ossfuzz or want_libfuzzer
-if want_ossfuzz and want_libfuzzer
-        error('only one of oss-fuzz and llvm-fuzz can be specified')
-endif
 if want_libfuzzer
         fuzzing_engine = meson.get_compiler('cpp').find_library('Fuzzer')
-endif
-if want_ossfuzz
+elif want_ossfuzz
         fuzzing_engine = meson.get_compiler('cpp').find_library('FuzzingEngine')
 endif
 
@@ -321,6 +330,20 @@ possible_cc_flags = [
         '-Werror=shift-overflow=2',
         '-Wdate-time',
         '-Wnested-externs',
+
+        # negative arguments are correctly detected starting with meson 0.46.
+        '-Wno-unused-parameter',
+        '-Wno-missing-field-initializers',
+        '-Wno-unused-result',
+        '-Wno-format-signedness',
+
+        # work-around for gcc 7.1 turning this on on its own.
+        '-Wno-error=nonnull',
+
+        # Disable -Wmaybe-uninitialized, since it's noisy on gcc 8 with
+        # optimizations enabled, producing essentially false positives.
+        '-Wno-maybe-uninitialized',
+
         '-ffast-math',
         '-fno-common',
         '-fdiagnostics-show-option',
@@ -363,19 +386,6 @@ endif
 
 add_project_arguments(cc.get_supported_arguments(possible_cc_flags), language : 'c')
 add_project_link_arguments(cc.get_supported_link_arguments(possible_link_flags), language : 'c')
-
-# "negative" arguments: gcc on purpose does not return an error for "-Wno-"
-# arguments, just emits a warning. So test for the "positive" version instead.
-foreach arg : ['unused-parameter',
-               'missing-field-initializers',
-               'unused-result',
-               'format-signedness',
-               'error=nonnull', # work-around for gcc 7.1 turning this on on its own
-              ]
-        if cc.has_argument('-W' + arg)
-                add_project_arguments('-Wno-' + arg, language : 'c')
-        endif
-endforeach
 
 if cc.compiles('''
    #include <time.h>
@@ -464,6 +474,8 @@ foreach decl : [['IFLA_INET6_ADDR_GEN_MODE',         'linux/if_link.h'],
                 ['FRA_UID_RANGE',                    'linux/fib_rules.h'],
                 ['LO_FLAGS_PARTSCAN',                'linux/loop.h'],
                 ['VXCAN_INFO_PEER',                  'linux/can/vxcan.h'],
+                ['FOU_ATTR_REMCSUM_NOPARTIAL',       'linux/fou.h'],
+                ['FOU_CMD_GET',                      'linux/fou.h'],
                ]
         prefix = decl.length() > 2 ? decl[2] : ''
         have = cc.has_header_symbol(decl[1], decl[0], prefix : prefix)
@@ -595,6 +607,7 @@ if not cc.has_header('sys/capability.h')
 endif
 foreach header : ['crypt.h',
                   'linux/btrfs.h',
+                  'linux/fou.h',
                   'linux/memfd.h',
                   'linux/vm_sockets.h',
                   'sys/auxv.h',
@@ -763,7 +776,7 @@ substs.set('DEBUGTTY', get_option('debug-tty'))
 
 enable_debug_hashmap = false
 enable_debug_mmap_cache = false
-foreach name : get_option('debug')
+foreach name : get_option('debug-extra')
         if name == 'hashmap'
                 enable_debug_hashmap = true
         elif name == 'mmap-cache'
@@ -776,6 +789,7 @@ conf.set10('ENABLE_DEBUG_HASHMAP', enable_debug_hashmap)
 conf.set10('ENABLE_DEBUG_MMAP_CACHE', enable_debug_mmap_cache)
 
 conf.set10('VALGRIND', get_option('valgrind'))
+conf.set10('LOG_TRACE', get_option('log-trace'))
 
 #####################################################################
 
@@ -921,11 +935,17 @@ if want_libcryptsetup != 'false' and not fuzzer_build
                                    version : '>= 1.6.0',
                                    required : want_libcryptsetup == 'true')
         have = libcryptsetup.found()
+        have_sector = cc.has_member(
+                    'struct crypt_params_plain',
+                    'sector_size',
+                    prefix : '#include <libcryptsetup.h>')
 else
         have = false
+        have_sector = false
         libcryptsetup = []
 endif
 conf.set10('HAVE_LIBCRYPTSETUP', have)
+conf.set10('HAVE_LIBCRYPTSETUP_SECTOR_SIZE', have_sector)
 
 want_libcurl = get_option('libcurl')
 if want_libcurl != 'false' and not fuzzer_build
@@ -1189,7 +1209,6 @@ want_importd = get_option('importd')
 if want_importd != 'false'
         have = (conf.get('HAVE_LIBCURL') == 1 and
                 conf.get('HAVE_ZLIB') == 1 and
-                conf.get('HAVE_BZIP2') == 1 and
                 conf.get('HAVE_XZ') == 1 and
                 conf.get('HAVE_GCRYPT') == 1)
         if want_importd == 'true' and not have
@@ -1282,9 +1301,6 @@ conf.set10('ENABLE_NSS', enable_nss)
 
 conf.set10('ENABLE_TIMEDATECTL', get_option('timedated') or get_option('timesyncd'))
 
-want_tests = get_option('tests')
-install_tests = get_option('install-tests')
-slow_tests = get_option('slow-tests')
 tests = []
 fuzzers = []
 
@@ -1372,7 +1388,7 @@ libjournal_core = static_library(
 libsystemd_sym_path = '@0@/@1@'.format(meson.current_source_dir(), libsystemd_sym)
 libsystemd = shared_library(
         'systemd',
-        'src/systemd/sd-id128.h', # pick a header file at random to work around old meson bug
+        disable_mempool_c,
         version : libsystemd_version,
         include_directories : includes,
         link_args : ['-shared',
@@ -1398,6 +1414,7 @@ install_libsystemd_static = static_library(
         journal_client_sources,
         basic_sources,
         basic_gcrypt_sources,
+        disable_mempool_c,
         include_directories : includes,
         build_by_default : static_libsystemd != 'false',
         install : static_libsystemd != 'false',
@@ -1454,9 +1471,11 @@ subdir('test')
 test_dlopen = executable(
         'test-dlopen',
         test_dlopen_c,
+        disable_mempool_c,
         include_directories : includes,
         link_with : [libbasic],
-        dependencies : [libdl])
+        dependencies : [libdl],
+        build_by_default : want_tests != 'false')
 
 foreach tuple : [['myhostname', 'ENABLE_NSS_MYHOSTNAME'],
                  ['systemd',    'ENABLE_NSS_SYSTEMD'],
@@ -1468,11 +1487,12 @@ foreach tuple : [['myhostname', 'ENABLE_NSS_MYHOSTNAME'],
                 module = tuple[0]
 
                 sym = 'src/nss-@0@/nss-@0@.sym'.format(module)
-                version_script_arg = join_paths(meson.current_source_dir(), sym)
+                version_script_arg = join_paths(meson.source_root(), sym)
 
                 nss = shared_library(
                         'nss_' + module,
                         'src/nss-@0@/nss-@0@.c'.format(module),
+                        disable_mempool_c,
                         version : '2',
                         include_directories : includes,
                         # Note that we link NSS modules with '-z nodelete' so that mempools never get orphaned
@@ -1494,9 +1514,12 @@ foreach tuple : [['myhostname', 'ENABLE_NSS_MYHOSTNAME'],
                                          'rm $DESTDIR@0@/libnss_@1@.so'
                                          .format(rootlibdir, module))
 
-                test('dlopen-nss_' + module,
-                     test_dlopen,
-                     args : [nss.full_path()]) # path to dlopen must include a slash
+                if want_tests != 'false'
+                        test('dlopen-nss_' + module,
+                             test_dlopen,
+                             # path to dlopen must include a slash
+                             args : nss.full_path())
+                endif
         endif
 endforeach
 
@@ -1720,7 +1743,7 @@ if conf.get('ENABLE_LOGIND') == 1
         public_programs += exe
 
         if conf.get('HAVE_PAM') == 1
-                version_script_arg = join_paths(meson.current_source_dir(), pam_systemd_sym)
+                version_script_arg = join_paths(meson.source_root(), pam_systemd_sym)
                 pam_systemd = shared_library(
                         'pam_systemd',
                         pam_systemd_c,
@@ -1737,19 +1760,22 @@ if conf.get('ENABLE_LOGIND') == 1
                         install : true,
                         install_dir : pamlibdir)
 
-                test('dlopen-pam_systemd',
-                     test_dlopen,
-                     args : [pam_systemd.full_path()]) # path to dlopen must include a slash
+                if want_tests != 'false'
+                        test('dlopen-pam_systemd',
+                             test_dlopen,
+                             # path to dlopen must include a slash
+                             args : pam_systemd.full_path())
+                endif
         endif
-endif
 
-executable('systemd-user-runtime-dir',
-           user_runtime_dir_sources,
-           include_directories : includes,
-           link_with : [libshared, liblogind_core],
-           install_rpath : rootlibexecdir,
-           install : true,
-           install_dir : rootlibexecdir)
+        executable('systemd-user-runtime-dir',
+                   user_runtime_dir_sources,
+                   include_directories : includes,
+                   link_with : [libshared],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : rootlibexecdir)
+endif
 
 if conf.get('HAVE_PAM') == 1
         executable('systemd-user-sessions',
@@ -1770,7 +1796,33 @@ if conf.get('ENABLE_EFI') == 1 and conf.get('HAVE_BLKID') == 1
                          install_rpath : rootlibexecdir,
                          install : true)
         public_programs += exe
+
+        executable('systemd-bless-boot',
+                   'src/boot/bless-boot.c',
+                   include_directories : includes,
+                   link_with : [libshared],
+                   dependencies : [libblkid],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : rootlibexecdir)
+
+        executable('systemd-bless-boot-generator',
+                   'src/boot/bless-boot-generator.c',
+                   include_directories : includes,
+                   link_with : [libshared],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : systemgeneratordir)
 endif
+
+executable('systemd-boot-check-no-failures',
+           'src/boot/boot-check-no-failures.c',
+           include_directories : includes,
+           link_with : [libshared],
+           dependencies : [libblkid],
+           install_rpath : rootlibexecdir,
+           install : true,
+           install_dir : rootlibexecdir)
 
 exe = executable('systemd-socket-activate', 'src/activate/activate.c',
                  include_directories : includes,
@@ -1819,7 +1871,7 @@ if conf.get('ENABLE_PORTABLED') == 1
                          dependencies : [threads],
                          install_rpath : rootlibexecdir,
                          install : true,
-                         install_dir : rootlibexecdir)
+                         install_dir : rootbindir)
         public_programs += exe
 endif
 
@@ -2309,6 +2361,14 @@ executable('systemd-cgroups-agent',
            install : true,
            install_dir : rootlibexecdir)
 
+exe = executable('systemd-id128',
+                 'src/id128/id128.c',
+                 include_directories : includes,
+                 link_with : [libshared],
+                 install_rpath : rootlibexecdir,
+                 install : true)
+public_programs += exe
+
 exe = executable('systemd-path',
                  'src/path/path.c',
                  include_directories : includes,
@@ -2426,10 +2486,12 @@ if conf.get('ENABLE_TMPFILES') == 1
                          install_dir : rootbindir)
         public_programs += exe
 
-        test('test-systemd-tmpfiles',
-             test_systemd_tmpfiles_py,
-             args : exe.full_path())
-        # https://github.com/mesonbuild/meson/issues/2681
+        if want_tests != 'false'
+                test('test-systemd-tmpfiles',
+                     test_systemd_tmpfiles_py,
+                     # https://github.com/mesonbuild/meson/issues/2681
+                     args : exe.full_path())
+        endif
 endif
 
 if conf.get('ENABLE_HWDB') == 1
@@ -2467,7 +2529,7 @@ public_programs += exe
 exe = executable('systemd-udevd',
                  systemd_udevd_sources,
                  include_directories : includes,
-                 c_args : ['-DLOG_REALM=LOG_REALM_UDEV'],
+                 c_args : '-DLOG_REALM=LOG_REALM_UDEV',
                  link_with : [libudev_core,
                               libsystemd_network,
                               libudev_static],
@@ -2483,7 +2545,7 @@ public_programs += exe
 
 exe = executable('udevadm',
                  udevadm_sources,
-                 c_args : ['-DLOG_REALM=LOG_REALM_UDEV'],
+                 c_args : '-DLOG_REALM=LOG_REALM_UDEV',
                  include_directories : includes,
                  link_with : [libudev_core,
                               libsystemd_network,
@@ -2597,6 +2659,15 @@ executable('systemd-sulogin-shell',
 
 ############################################################
 
+custom_target(
+        'systemd-runtest.env',
+        output : 'systemd-runtest.env',
+        command : ['sh', '-c', '{ ' +
+                   'echo SYSTEMD_TEST_DATA=@0@; '.format(join_paths(meson.current_source_dir(), 'test')) +
+                   'echo SYSTEMD_CATALOG_DIR=@0@; '.format(join_paths(meson.current_build_dir(), 'catalog')) +
+                   '} >@OUTPUT@'],
+        build_by_default : true)
+
 foreach tuple : tests
         sources = tuple[0]
         link_with = tuple[1].length() > 0 ? tuple[1] : [libshared]
@@ -2612,9 +2683,8 @@ foreach tuple : tests
                 timeout = type.split('=')[1].to_int()
                 type = ''
         endif
-        if want_tests == 'false'
-                message('Not compiling @0@ because tests is set to false'.format(name))
-        elif condition == '' or conf.get(condition) == 1
+
+        if condition == '' or conf.get(condition) == 1
                 exe = executable(
                         name,
                         sources,
@@ -2622,6 +2692,7 @@ foreach tuple : tests
                         link_with : link_with,
                         dependencies : dependencies,
                         c_args : defs,
+                        build_by_default : want_tests != 'false',
                         install_rpath : rootlibexecdir,
                         install : install_tests,
                         install_dir : join_paths(testsdir, type))
@@ -2630,7 +2701,7 @@ foreach tuple : tests
                         message('@0@ is a manual test'.format(name))
                 elif type == 'unsafe' and want_tests != 'unsafe'
                         message('@0@ is an unsafe test'.format(name))
-                else
+                elif want_tests != 'false'
                         test(name, exe,
                              env : test_env,
                              timeout : timeout)
@@ -2645,9 +2716,12 @@ exe = executable(
         test_libsystemd_sym_c,
         include_directories : includes,
         link_with : [libsystemd],
+        build_by_default : want_tests != 'false',
         install : install_tests,
         install_dir : testsdir)
-test('test-libsystemd-sym', exe)
+if want_tests != 'false'
+        test('test-libsystemd-sym', exe)
+endif
 
 exe = executable(
         'test-libsystemd-static-sym',
@@ -2656,10 +2730,10 @@ exe = executable(
         link_with : [install_libsystemd_static],
         dependencies : [threads], # threads is already included in dependencies on the library,
                                   # but does not seem to get propagated. Add here as a work-around.
-        build_by_default : static_libsystemd_pic,
+        build_by_default : want_tests != 'false' and static_libsystemd_pic,
         install : install_tests and static_libsystemd_pic,
         install_dir : testsdir)
-if static_libsystemd_pic
+if want_tests != 'false' and static_libsystemd_pic
         test('test-libsystemd-static-sym', exe)
 endif
 
@@ -2667,22 +2741,25 @@ exe = executable(
         'test-libudev-sym',
         test_libudev_sym_c,
         include_directories : includes,
-        c_args : ['-Wno-deprecated-declarations'],
+        c_args : '-Wno-deprecated-declarations',
         link_with : [libudev],
+        build_by_default : want_tests != 'false',
         install : install_tests,
         install_dir : testsdir)
-test('test-libudev-sym', exe)
+if want_tests != 'false'
+        test('test-libudev-sym', exe)
+endif
 
 exe = executable(
         'test-libudev-static-sym',
         test_libudev_sym_c,
         include_directories : includes,
-        c_args : ['-Wno-deprecated-declarations'],
+        c_args : '-Wno-deprecated-declarations',
         link_with : [install_libudev_static],
-        build_by_default : static_libudev_pic,
+        build_by_default : want_tests != 'false' and static_libudev_pic,
         install : install_tests and static_libudev_pic,
         install_dir : testsdir)
-if static_libudev_pic
+if want_tests != 'false' and static_libudev_pic
         test('test-libudev-static-sym', exe)
 endif
 
@@ -2736,14 +2813,11 @@ subdir('network')
 subdir('man')
 subdir('shell-completion/bash')
 subdir('shell-completion/zsh')
-subdir('doc/sysvinit')
-subdir('doc/var-log')
+subdir('docs/sysvinit')
+subdir('docs/var-log')
 
-# FIXME: figure out if the warning is true:
-# https://github.com/mesonbuild/meson/wiki/Reference-manual#install_subdir
 install_subdir('factory/etc',
                install_dir : factorydir)
-
 
 install_data('xorg/50-systemd-user.sh',
              install_dir : xinitrcdir)
@@ -2753,13 +2827,13 @@ install_data('LICENSE.GPL2',
              'LICENSE.LGPL2.1',
              'NEWS',
              'README',
-             'doc/CODING_STYLE',
-             'doc/DISTRO_PORTING',
-             'doc/ENVIRONMENT.md',
-             'doc/HACKING',
-             'doc/TRANSIENT-SETTINGS.md',
-             'doc/TRANSLATORS',
-             'doc/UIDS-GIDS.md',
+             'docs/CODING_STYLE',
+             'docs/DISTRO_PORTING.md',
+             'docs/ENVIRONMENT.md',
+             'docs/HACKING',
+             'docs/TRANSIENT-SETTINGS.md',
+             'docs/TRANSLATORS.md',
+             'docs/UIDS-GIDS.md',
              'src/libsystemd/sd-bus/GVARIANT-SERIALIZATION',
              install_dir : docdir)
 
@@ -2772,9 +2846,11 @@ meson_check_help = find_program('tools/meson-check-help.sh')
 
 foreach exec : public_programs
         name = exec.full_path().split('/')[-1]
-        test('check-help-' + name,
-             meson_check_help,
-             args : [exec.full_path()])
+        if want_tests != 'false'
+                test('check-help-' + name,
+                     meson_check_help,
+                     args : exec.full_path())
+        endif
 endforeach
 
 ############################################################
@@ -2814,9 +2890,7 @@ foreach tuple : sanitizers
                                 test('@0@:@1@:@2@'.format(b, c, sanitizer),
                                      env,
                                      args : [exe.full_path(),
-                                             join_paths(meson.source_root(),
-                                                        'test/fuzz-regressions',
-                                                        p)])
+                                             join_paths(meson.source_root(), p)])
                         endif
                 endforeach
         endif
@@ -2828,7 +2902,7 @@ endforeach
 if git.found()
         all_files = run_command(
                 git,
-                ['--git-dir=@0@/.git'.format(meson.current_source_dir()),
+                ['--git-dir=@0@/.git'.format(meson.source_root()),
                  'ls-files',
                  ':/*.[ch]'])
         all_files = files(all_files.stdout().split())
@@ -2836,10 +2910,10 @@ if git.found()
         custom_target(
                 'tags',
                 output : 'tags',
-                command : [env, 'etags', '-o', '@0@/TAGS'.format(meson.current_source_dir())] + all_files)
+                command : [env, 'etags', '-o', '@0@/TAGS'.format(meson.source_root())] + all_files)
         run_target(
                 'ctags',
-                command : [env, 'ctags', '-o', '@0@/tags'.format(meson.current_source_dir())] + all_files)
+                command : [env, 'ctags', '-o', '@0@/tags'.format(meson.source_root())] + all_files)
 endif
 
 if git.found()
@@ -2852,17 +2926,17 @@ endif
 if git.found()
         git_head = run_command(
                 git,
-                ['--git-dir=@0@/.git'.format(meson.current_source_dir()),
+                ['--git-dir=@0@/.git'.format(meson.source_root()),
                  'rev-parse', 'HEAD']).stdout().strip()
         git_head_short = run_command(
                 git,
-                ['--git-dir=@0@/.git'.format(meson.current_source_dir()),
+                ['--git-dir=@0@/.git'.format(meson.source_root()),
                  'rev-parse', '--short=7', 'HEAD']).stdout().strip()
 
         run_target(
                 'git-snapshot',
                 command : ['git', 'archive',
-                           '-o', '@0@/systemd-@1@.tar.gz'.format(meson.current_source_dir(),
+                           '-o', '@0@/systemd-@1@.tar.gz'.format(meson.source_root(),
                                                                  git_head_short),
                            '--prefix', 'systemd-@0@/'.format(git_head),
                            'HEAD'])
@@ -2875,6 +2949,10 @@ run_target(
         'check-api-docs',
         depends : [man, libsystemd, libudev],
         command : [meson_check_api_docs_sh, libsystemd.full_path(), libudev.full_path()])
+
+run_target(
+        'make-index-md',
+        command : ['sh', '@0@/tools/make-index-md.sh'.format(meson.source_root()), meson.source_root()])
 
 ############################################################
 
@@ -2936,6 +3014,10 @@ alt_time_epoch = run_command('date', '-Is', '-u', '-d',
                              '@@0@'.format(time_epoch)).stdout().strip()
 status += [
         'time epoch:                        @0@ (@1@)'.format(time_epoch, alt_time_epoch)]
+
+status += [
+        'static libsystemd:                 @0@'.format(static_libsystemd),
+        'static libudev:                    @0@'.format(static_libudev)]
 
 # TODO:
 # CFLAGS:   ${OUR_CFLAGS} ${CFLAGS}
@@ -3016,10 +3098,10 @@ foreach tuple : [
         ['blkid'],
         ['dbus'],
         ['glib'],
-        ['nss-myhostname',   conf.get('ENABLE_NSS_MYHOSTNAME') == 1],
-        ['nss-mymachines',   conf.get('ENABLE_NSS_MYMACHINES') == 1],
-        ['nss-resolve',      conf.get('ENABLE_NSS_RESOLVE') == 1],
-        ['nss-systemd',      conf.get('ENABLE_NSS_SYSTEMD') == 1],
+        ['nss-myhostname'],
+        ['nss-mymachines'],
+        ['nss-resolve'],
+        ['nss-systemd'],
         ['hwdb'],
         ['tpm'],
         ['man pages',        want_man],
@@ -3035,6 +3117,9 @@ foreach tuple : [
         ['debug hashmap'],
         ['debug mmap cache'],
         ['valgrind',         conf.get('VALGRIND') == 1],
+        ['trace logging',    conf.get('LOG_TRACE') == 1],
+        ['link-udev-shared',      get_option('link-udev-shared')],
+        ['link-systemctl-shared', get_option('link-systemctl-shared')],
 ]
 
         if tuple.length() >= 2

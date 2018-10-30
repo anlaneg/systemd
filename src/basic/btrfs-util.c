@@ -118,6 +118,7 @@ int btrfs_is_subvol(const char *path) {
 
 int btrfs_subvol_make_fd(int fd, const char *subvolume) {
         struct btrfs_ioctl_vol_args args = {};
+        _cleanup_close_ int real_fd = -1;
         int r;
 
         assert(subvolume);
@@ -125,6 +126,20 @@ int btrfs_subvol_make_fd(int fd, const char *subvolume) {
         r = validate_subvolume_name(subvolume);
         if (r < 0)
                 return r;
+
+        r = fcntl(fd, F_GETFL);
+        if (r < 0)
+                return -errno;
+        if (FLAGS_SET(r, O_PATH)) {
+                /* An O_PATH fd was specified, let's convert here to a proper one, as btrfs ioctl's can't deal with
+                 * O_PATH. */
+
+                real_fd = fd_reopen(fd, O_RDONLY|O_CLOEXEC|O_DIRECTORY);
+                if (real_fd < 0)
+                        return real_fd;
+
+                fd = real_fd;
+        }
 
         strncpy(args.name, subvolume, sizeof(args.name)-1);
 
@@ -389,26 +404,21 @@ static void btrfs_ioctl_search_args_set(struct btrfs_ioctl_search_args *args, co
 }
 
 static int btrfs_ioctl_search_args_compare(const struct btrfs_ioctl_search_args *args) {
+        int r;
+
         assert(args);
 
         /* Compare min and max */
 
-        if (args->key.min_objectid < args->key.max_objectid)
-                return -1;
-        if (args->key.min_objectid > args->key.max_objectid)
-                return 1;
+        r = CMP(args->key.min_objectid, args->key.max_objectid);
+        if (r != 0)
+                return r;
 
-        if (args->key.min_type < args->key.max_type)
-                return -1;
-        if (args->key.min_type > args->key.max_type)
-                return 1;
+        r = CMP(args->key.min_type, args->key.max_type);
+        if (r != 0)
+                return r;
 
-        if (args->key.min_offset < args->key.max_offset)
-                return -1;
-        if (args->key.min_offset > args->key.max_offset)
-                return 1;
-
-        return 0;
+        return CMP(args->key.min_offset, args->key.max_offset);
 }
 
 #define FOREACH_BTRFS_IOCTL_SEARCH_HEADER(i, sh, args)                  \
@@ -862,7 +872,7 @@ int btrfs_subvol_set_subtree_quota_limit(const char *path, uint64_t subvol_id, u
 
 int btrfs_resize_loopback_fd(int fd, uint64_t new_size, bool grow_only) {
         struct btrfs_ioctl_vol_args args = {};
-        char p[SYS_BLOCK_PATH_MAX("/loop/backing_file")];
+        char p[SYS_BLOCK_PATH_MAX("/loop/backing_file")], q[DEV_NUM_PATH_MAX];
         _cleanup_free_ char *backing = NULL;
         _cleanup_close_ int loop_fd = -1, backing_fd = -1;
         struct stat st;
@@ -907,8 +917,8 @@ int btrfs_resize_loopback_fd(int fd, uint64_t new_size, bool grow_only) {
         if (grow_only && new_size < (uint64_t) st.st_size)
                 return -EINVAL;
 
-        xsprintf_sys_block_path(p, NULL, dev);
-        loop_fd = open(p, O_RDWR|O_CLOEXEC|O_NOCTTY);
+        xsprintf_dev_num_path(q, "block", dev);
+        loop_fd = open(q, O_RDWR|O_CLOEXEC|O_NOCTTY);
         if (loop_fd < 0)
                 return -errno;
 
@@ -1700,7 +1710,7 @@ int btrfs_subvol_snapshot_fd(int old_fd, const char *new_path, BtrfsSnapshotFlag
                                  * it: the IMMUTABLE bit. Let's use this here, if this is requested. */
 
                                 if (flags & BTRFS_SNAPSHOT_FALLBACK_IMMUTABLE)
-                                        (void) chattr_path(new_path, FS_IMMUTABLE_FL, FS_IMMUTABLE_FL);
+                                        (void) chattr_path(new_path, FS_IMMUTABLE_FL, FS_IMMUTABLE_FL, NULL);
                         } else {
                                 r = btrfs_subvol_set_read_only(new_path, true);
                                 if (r < 0)

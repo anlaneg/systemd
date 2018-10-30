@@ -164,34 +164,30 @@ static void route_hash_func(const void *b, struct siphash *state) {
 
 static int route_compare_func(const void *_a, const void *_b) {
         const Route *a = _a, *b = _b;
+        int r;
 
-        if (a->family < b->family)
-                return -1;
-        if (a->family > b->family)
-                return 1;
+        r = CMP(a->family, b->family);
+        if (r != 0)
+                return r;
 
         switch (a->family) {
         case AF_INET:
         case AF_INET6:
-                if (a->dst_prefixlen < b->dst_prefixlen)
-                        return -1;
-                if (a->dst_prefixlen > b->dst_prefixlen)
-                        return 1;
+                r = CMP(a->dst_prefixlen, b->dst_prefixlen);
+                if (r != 0)
+                        return r;
 
-                if (a->tos < b->tos)
-                        return -1;
-                if (a->tos > b->tos)
-                        return 1;
+                r = CMP(a->tos, b->tos);
+                if (r != 0)
+                        return r;
 
-                if (a->priority < b->priority)
-                        return -1;
-                if (a->priority > b->priority)
-                        return 1;
+                r = CMP(a->priority, b->priority);
+                if (r != 0)
+                        return r;
 
-                if (a->table < b->table)
-                        return -1;
-                if (a->table > b->table)
-                        return 1;
+                r = CMP(a->table, b->table);
+                if (r != 0)
+                        return r;
 
                 return memcmp(&a->dst, &b->dst, FAMILY_ADDRESS_SIZE(a->family));
         default:
@@ -437,13 +433,14 @@ int route_remove(Route *route, Link *link,
         if (r < 0)
                 return log_error_errno(r, "Could not append RTA_PRIORITY attribute: %m");
 
-        if (!IN_SET(route->type, RTN_UNREACHABLE, RTN_PROHIBIT, RTN_BLACKHOLE)) {
+        if (!IN_SET(route->type, RTN_UNREACHABLE, RTN_PROHIBIT, RTN_BLACKHOLE, RTN_THROW)) {
                 r = sd_netlink_message_append_u32(req, RTA_OIF, link->ifindex);
                 if (r < 0)
                         return log_error_errno(r, "Could not append RTA_OIF attribute: %m");
         }
 
-        r = sd_netlink_call_async(link->manager->rtnl, req, callback, link, 0, NULL);
+        r = sd_netlink_call_async(link->manager->rtnl, NULL, req, callback,
+                                  link_netlink_destroy_callback, link, 0, __func__);
         if (r < 0)
                 return log_error_errno(r, "Could not send rtnetlink message: %m");
 
@@ -452,32 +449,13 @@ int route_remove(Route *route, Link *link,
         return 0;
 }
 
-static int route_expire_callback(sd_netlink *rtnl, sd_netlink_message *m, void *userdata) {
-        Link *link = userdata;
-        int r;
-
-        assert(rtnl);
-        assert(m);
-        assert(link);
-        assert(link->ifname);
-
-        if (IN_SET(link->state, LINK_STATE_FAILED, LINK_STATE_LINGER))
-                return 1;
-
-        r = sd_netlink_message_get_errno(m);
-        if (r < 0 && r != -EEXIST)
-                log_link_warning_errno(link, r, "could not remove route: %m");
-
-        return 1;
-}
-
 int route_expire_handler(sd_event_source *s, uint64_t usec, void *userdata) {
         Route *route = userdata;
         int r;
 
         assert(route);
 
-        r = route_remove(route, route->link, route_expire_callback);
+        r = route_remove(route, route->link, link_route_remove_handler);
         if (r < 0)
                 log_warning_errno(r, "Could not remove route: %m");
         else
@@ -604,7 +582,7 @@ int route_configure(
         if (r < 0)
                 return log_error_errno(r, "Could not set route type: %m");
 
-        if (!IN_SET(route->type, RTN_UNREACHABLE, RTN_PROHIBIT, RTN_BLACKHOLE)) {
+        if (!IN_SET(route->type, RTN_UNREACHABLE, RTN_PROHIBIT, RTN_BLACKHOLE, RTN_THROW)) {
                 r = sd_netlink_message_append_u32(req, RTA_OIF, link->ifindex);
                 if (r < 0)
                         return log_error_errno(r, "Could not append RTA_OIF attribute: %m");
@@ -642,7 +620,8 @@ int route_configure(
         if (r < 0)
                 return log_error_errno(r, "Could not append RTA_METRICS attribute: %m");
 
-        r = sd_netlink_call_async(link->manager->rtnl, req, callback, link, 0, NULL);
+        r = sd_netlink_call_async(link->manager->rtnl, NULL, req, callback,
+                                  link_netlink_destroy_callback, link, 0, __func__);
         if (r < 0)
                 return log_error_errno(r, "Could not send rtnetlink message: %m");
 
@@ -1066,6 +1045,8 @@ int config_parse_route_type(
                 n->type = RTN_UNREACHABLE;
         else if (streq(rvalue, "prohibit"))
                 n->type = RTN_PROHIBIT;
+        else if (streq(rvalue, "throw"))
+                n->type = RTN_THROW;
         else {
                 log_syntax(unit, LOG_ERR, filename, line, r, "Could not parse route type \"%s\", ignoring assignment: %m", rvalue);
                 return 0;

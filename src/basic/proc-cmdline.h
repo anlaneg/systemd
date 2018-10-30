@@ -6,14 +6,16 @@
 #include "log.h"
 
 enum {
-        PROC_CMDLINE_STRIP_RD_PREFIX = 1,
-        PROC_CMDLINE_VALUE_OPTIONAL = 2,
+        PROC_CMDLINE_STRIP_RD_PREFIX = 1 << 0,
+        PROC_CMDLINE_VALUE_OPTIONAL  = 1 << 1,
+        PROC_CMDLINE_RD_STRICT       = 1 << 2,
 };
 
 typedef int (*proc_cmdline_parse_t)(const char *key, const char *value, void *data);
 
 int proc_cmdline(char **ret);
 
+int proc_cmdline_parse_given(const char *line, proc_cmdline_parse_t parse_item, void *data, unsigned flags);
 int proc_cmdline_parse(const proc_cmdline_parse_t parse, void *userdata, unsigned flags);
 
 int proc_cmdline_get_key(const char *parameter, unsigned flags, char **value);

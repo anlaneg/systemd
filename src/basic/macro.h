@@ -1,13 +1,14 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
+#include <assert.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <sys/param.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 
-#define _printf_(a,b) __attribute__ ((format (printf, a, b)))
+#define _printf_(a, b) __attribute__ ((format (printf, a, b)))
 #ifdef __clang__
 #  define _alloc_(...)
 #else
@@ -22,8 +23,8 @@
 #define _packed_ __attribute__ ((packed))
 #define _malloc_ __attribute__ ((malloc))
 #define _weak_ __attribute__ ((weak))
-#define _likely_(x) (__builtin_expect(!!(x),1))
-#define _unlikely_(x) (__builtin_expect(!!(x),0))
+#define _likely_(x) (__builtin_expect(!!(x), 1))
+#define _unlikely_(x) (__builtin_expect(!!(x), 0))
 #define _public_ __attribute__ ((visibility("default")))
 #define _hidden_ __attribute__ ((visibility("hidden")))
 #define _weakref_(x) __attribute__((weakref(#x)))
@@ -56,10 +57,6 @@
 #endif
 
 /* Temporarily disable some warnings */
-#define DISABLE_WARNING_DECLARATION_AFTER_STATEMENT                     \
-        _Pragma("GCC diagnostic push");                                 \
-        _Pragma("GCC diagnostic ignored \"-Wdeclaration-after-statement\"")
-
 #define DISABLE_WARNING_FORMAT_NONLITERAL                               \
         _Pragma("GCC diagnostic push");                                 \
         _Pragma("GCC diagnostic ignored \"-Wformat-nonliteral\"")
@@ -146,10 +143,10 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
 #  define VOID_0 ((void*)0)
 #endif
 
-#define ELEMENTSOF(x)                                                    \
-        __extension__ (__builtin_choose_expr(                            \
+#define ELEMENTSOF(x)                                                   \
+        (__builtin_choose_expr(                                         \
                 !__builtin_types_compatible_p(typeof(x), typeof(&*(x))), \
-                sizeof(x)/sizeof((x)[0]),                                \
+                sizeof(x)/sizeof((x)[0]),                               \
                 VOID_0))
 
 /*
@@ -167,23 +164,23 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
  */
 #define container_of(ptr, type, member) __container_of(UNIQ, (ptr), type, member)
 #define __container_of(uniq, ptr, type, member)                         \
-        __extension__ ({                                                \
+        ({                                                              \
                 const typeof( ((type*)0)->member ) *UNIQ_T(A, uniq) = (ptr); \
-                (type*)( (char *)UNIQ_T(A, uniq) - offsetof(type,member) ); \
+                (type*)( (char *)UNIQ_T(A, uniq) - offsetof(type, member) ); \
         })
 
 #undef MAX
 #define MAX(a, b) __MAX(UNIQ, (a), UNIQ, (b))
 #define __MAX(aq, a, bq, b)                             \
-        __extension__ ({                                \
+        ({                                              \
                 const typeof(a) UNIQ_T(A, aq) = (a);    \
                 const typeof(b) UNIQ_T(B, bq) = (b);    \
-                UNIQ_T(A,aq) > UNIQ_T(B,bq) ? UNIQ_T(A,aq) : UNIQ_T(B,bq); \
+                UNIQ_T(A, aq) > UNIQ_T(B, bq) ? UNIQ_T(A, aq) : UNIQ_T(B, bq); \
         })
 
 /* evaluates to (void) if _A or _B are not constant or of different types */
 #define CONST_MAX(_A, _B) \
-        __extension__ (__builtin_choose_expr(                           \
+        (__builtin_choose_expr(                                         \
                 __builtin_constant_p(_A) &&                             \
                 __builtin_constant_p(_B) &&                             \
                 __builtin_types_compatible_p(typeof(_A), typeof(_B)),   \
@@ -193,47 +190,56 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
 /* takes two types and returns the size of the larger one */
 #define MAXSIZE(A, B) (sizeof(union _packed_ { typeof(A) a; typeof(B) b; }))
 
-#define MAX3(x,y,z)                                     \
-        __extension__ ({                                \
-                        const typeof(x) _c = MAX(x,y);  \
-                        MAX(_c, z);                     \
-                })
+#define MAX3(x, y, z)                                   \
+        ({                                              \
+                const typeof(x) _c = MAX(x, y);         \
+                MAX(_c, z);                             \
+        })
 
 #undef MIN
 #define MIN(a, b) __MIN(UNIQ, (a), UNIQ, (b))
 #define __MIN(aq, a, bq, b)                             \
-        __extension__ ({                                \
+        ({                                              \
                 const typeof(a) UNIQ_T(A, aq) = (a);    \
                 const typeof(b) UNIQ_T(B, bq) = (b);    \
-                UNIQ_T(A,aq) < UNIQ_T(B,bq) ? UNIQ_T(A,aq) : UNIQ_T(B,bq); \
+                UNIQ_T(A, aq) < UNIQ_T(B, bq) ? UNIQ_T(A, aq) : UNIQ_T(B, bq); \
         })
 
-#define MIN3(x,y,z)                                     \
-        __extension__ ({                                \
-                        const typeof(x) _c = MIN(x,y);  \
-                        MIN(_c, z);                     \
-                })
+#define MIN3(x, y, z)                                   \
+        ({                                              \
+                const typeof(x) _c = MIN(x, y);         \
+                MIN(_c, z);                             \
+        })
 
 #define LESS_BY(a, b) __LESS_BY(UNIQ, (a), UNIQ, (b))
 #define __LESS_BY(aq, a, bq, b)                         \
-        __extension__ ({                                \
+        ({                                              \
                 const typeof(a) UNIQ_T(A, aq) = (a);    \
                 const typeof(b) UNIQ_T(B, bq) = (b);    \
-                UNIQ_T(A,aq) > UNIQ_T(B,bq) ? UNIQ_T(A,aq) - UNIQ_T(B,bq) : 0; \
+                UNIQ_T(A, aq) > UNIQ_T(B, bq) ? UNIQ_T(A, aq) - UNIQ_T(B, bq) : 0; \
+        })
+
+#define CMP(a, b) __CMP(UNIQ, (a), UNIQ, (b))
+#define __CMP(aq, a, bq, b)                             \
+        ({                                              \
+                const typeof(a) UNIQ_T(A, aq) = (a);    \
+                const typeof(b) UNIQ_T(B, bq) = (b);    \
+                UNIQ_T(A, aq) < UNIQ_T(B, bq) ? -1 :    \
+                UNIQ_T(A, aq) > UNIQ_T(B, bq) ? 1 : 0;  \
         })
 
 #undef CLAMP
 #define CLAMP(x, low, high) __CLAMP(UNIQ, (x), UNIQ, (low), UNIQ, (high))
 #define __CLAMP(xq, x, lowq, low, highq, high)                          \
-        __extension__ ({                                                \
-                const typeof(x) UNIQ_T(X,xq) = (x);                     \
-                const typeof(low) UNIQ_T(LOW,lowq) = (low);             \
-                const typeof(high) UNIQ_T(HIGH,highq) = (high);         \
-                        UNIQ_T(X,xq) > UNIQ_T(HIGH,highq) ?             \
-                                UNIQ_T(HIGH,highq) :                    \
-                                UNIQ_T(X,xq) < UNIQ_T(LOW,lowq) ?       \
-                                        UNIQ_T(LOW,lowq) :              \
-                                        UNIQ_T(X,xq);                   \
+        ({                                                              \
+                const typeof(x) UNIQ_T(X, xq) = (x);                    \
+                const typeof(low) UNIQ_T(LOW, lowq) = (low);            \
+                const typeof(high) UNIQ_T(HIGH, highq) = (high);        \
+                        UNIQ_T(X, xq) > UNIQ_T(HIGH, highq) ?           \
+                                UNIQ_T(HIGH, highq) :                   \
+                                UNIQ_T(X, xq) < UNIQ_T(LOW, lowq) ?     \
+                                        UNIQ_T(LOW, lowq) :             \
+                                        UNIQ_T(X, xq);                  \
         })
 
 /* [(x + y - 1) / y] suffers from an integer overflow, even though the
@@ -241,7 +247,7 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
  * [x / y + !!(x % y)]. Note that on "Real CPUs" a division returns both the
  * quotient and the remainder, so both should be equally fast. */
 #define DIV_ROUND_UP(_x, _y)                                            \
-        __extension__ ({                                                \
+        ({                                                              \
                 const typeof(_x) __x = (_x);                            \
                 const typeof(_y) __y = (_y);                            \
                 (__x / __y + !!(__x % __y));                            \
@@ -305,20 +311,13 @@ static inline int __coverity_check__(int condition) {
         } while (false)
 
 #if defined(static_assert)
-/* static_assert() is sometimes defined in a way that trips up
- * -Wdeclaration-after-statement, hence let's temporarily turn off
- * this warning around it. */
 #define assert_cc(expr)                                                 \
-        DISABLE_WARNING_DECLARATION_AFTER_STATEMENT;                    \
-        static_assert(expr, #expr);                                     \
-        REENABLE_WARNING
+        static_assert(expr, #expr);
 #else
 #define assert_cc(expr)                                                 \
-        DISABLE_WARNING_DECLARATION_AFTER_STATEMENT;                    \
         struct CONCATENATE(_assert_struct_, __COUNTER__) {              \
                 char x[(expr) ? 0 : -1];                                \
-        };                                                              \
-        REENABLE_WARNING
+        };
 #endif
 
 #define assert_return(expr, r)                                          \
@@ -337,7 +336,7 @@ static inline int __coverity_check__(int condition) {
 
 #define PTR_TO_INT(p) ((int) ((intptr_t) (p)))
 #define INT_TO_PTR(u) ((void *) ((intptr_t) (u)))
-#define PTR_TO_UINT(p) ((unsigned int) ((uintptr_t) (p)))
+#define PTR_TO_UINT(p) ((unsigned) ((uintptr_t) (p)))
 #define UINT_TO_PTR(u) ((void *) ((uintptr_t) (u)))
 
 #define PTR_TO_LONG(p) ((long) ((intptr_t) (p)))
@@ -417,8 +416,11 @@ static inline int __coverity_check__(int condition) {
 #define IN_SET(x, ...)                          \
         ({                                      \
                 bool _found = false;            \
-                /* If the build breaks in the line below, you need to extend the case macros */ \
-                static _unused_ char _static_assert__macros_need_to_be_extended[20 - sizeof((int[]){__VA_ARGS__})/sizeof(int)]; \
+                /* If the build breaks in the line below, you need to extend the case macros. (We use "long double" as  \
+                 * type for the array, in the hope that checkers such as ubsan don't complain that the initializers for \
+                 * the array are not representable by the base type. Ideally we'd use typeof(x) as base type, but that  \
+                 * doesn't work, as we want to use this on bitfields and gcc refuses typeof() on bitfields.) */         \
+                assert_cc((sizeof((long double[]){__VA_ARGS__})/sizeof(long double)) <= 20); \
                 switch(x) {                     \
                 FOR_EACH_MAKE_CASE(__VA_ARGS__) \
                         _found = true;          \
@@ -454,5 +456,54 @@ static inline int __coverity_check__(int condition) {
                 if (*p)                                         \
                         func(*p);                               \
         }
+
+#define _DEFINE_TRIVIAL_REF_FUNC(type, name, scope)             \
+        scope type *name##_ref(type *p) {                       \
+                if (!p)                                         \
+                        return NULL;                            \
+                                                                \
+                assert(p->n_ref > 0);                           \
+                p->n_ref++;                                     \
+                return p;                                       \
+        }
+
+#define _DEFINE_TRIVIAL_UNREF_FUNC(type, name, free_func, scope) \
+        scope type *name##_unref(type *p) {                      \
+                if (!p)                                          \
+                        return NULL;                             \
+                                                                 \
+                assert(p->n_ref > 0);                            \
+                p->n_ref--;                                      \
+                if (p->n_ref > 0)                                \
+                        return NULL;                             \
+                                                                 \
+                return free_func(p);                             \
+        }
+
+#define DEFINE_TRIVIAL_REF_FUNC(type, name)     \
+        _DEFINE_TRIVIAL_REF_FUNC(type, name,)
+#define DEFINE_PRIVATE_TRIVIAL_REF_FUNC(type, name)     \
+        _DEFINE_TRIVIAL_REF_FUNC(type, name, static)
+#define DEFINE_PUBLIC_TRIVIAL_REF_FUNC(type, name)      \
+        _DEFINE_TRIVIAL_REF_FUNC(type, name, _public_)
+
+#define DEFINE_TRIVIAL_UNREF_FUNC(type, name, free_func)        \
+        _DEFINE_TRIVIAL_UNREF_FUNC(type, name, free_func,)
+#define DEFINE_PRIVATE_TRIVIAL_UNREF_FUNC(type, name, free_func)        \
+        _DEFINE_TRIVIAL_UNREF_FUNC(type, name, free_func, static)
+#define DEFINE_PUBLIC_TRIVIAL_UNREF_FUNC(type, name, free_func)         \
+        _DEFINE_TRIVIAL_UNREF_FUNC(type, name, free_func, _public_)
+
+#define DEFINE_TRIVIAL_REF_UNREF_FUNC(type, name, free_func)    \
+        DEFINE_TRIVIAL_REF_FUNC(type, name);                    \
+        DEFINE_TRIVIAL_UNREF_FUNC(type, name, free_func);
+
+#define DEFINE_PRIVATE_TRIVIAL_REF_UNREF_FUNC(type, name, free_func)    \
+        DEFINE_PRIVATE_TRIVIAL_REF_FUNC(type, name);                    \
+        DEFINE_PRIVATE_TRIVIAL_UNREF_FUNC(type, name, free_func);
+
+#define DEFINE_PUBLIC_TRIVIAL_REF_UNREF_FUNC(type, name, free_func)    \
+        DEFINE_PUBLIC_TRIVIAL_REF_FUNC(type, name);                    \
+        DEFINE_PUBLIC_TRIVIAL_UNREF_FUNC(type, name, free_func);
 
 #include "log.h"

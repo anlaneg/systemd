@@ -228,20 +228,24 @@ static int ask_password_plymouth(
         r = 0;
 
 finish:
-        explicit_bzero(buffer, sizeof(buffer));
+        explicit_bzero_safe(buffer, sizeof(buffer));
         return r;
 }
 
 static int send_passwords(const char *socket_name, char **passwords) {
         _cleanup_free_ char *packet = NULL;
         _cleanup_close_ int socket_fd = -1;
-        union sockaddr_union sa = { .un.sun_family = AF_UNIX };
+        union sockaddr_union sa = {};
         size_t packet_length = 1;
         char **p, *d;
         ssize_t n;
-        int r;
+        int r, salen;
 
         assert(socket_name);
+
+        salen = sockaddr_un_set_path(&sa.un, socket_name);
+        if (salen < 0)
+                return salen;
 
         STRV_FOREACH(p, passwords)
                 packet_length += strlen(*p) + 1;
@@ -262,9 +266,7 @@ static int send_passwords(const char *socket_name, char **passwords) {
                 goto finish;
         }
 
-        strncpy(sa.un.sun_path, socket_name, sizeof(sa.un.sun_path));
-
-        n = sendto(socket_fd, packet, packet_length, MSG_NOSIGNAL, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+        n = sendto(socket_fd, packet, packet_length, MSG_NOSIGNAL, &sa.sa, salen);
         if (n < 0) {
                 r = log_debug_errno(errno, "sendto(): %m");
                 goto finish;
@@ -273,7 +275,7 @@ static int send_passwords(const char *socket_name, char **passwords) {
         r = (int) n;
 
 finish:
-        explicit_bzero(packet, packet_length);
+        explicit_bzero_safe(packet, packet_length);
         return r;
 }
 
@@ -323,7 +325,7 @@ static int parse_password(const char *filename, char **wall) {
 
                 if (asprintf(&_wall,
                              "%s%sPassword entry required for \'%s\' (PID %u).\r\n"
-                             "Please enter password with the systemd-tty-ask-password-agent tool!",
+                             "Please enter password with the systemd-tty-ask-password-agent tool:",
                              strempty(*wall),
                              *wall ? "\r\n\r\n" : "",
                              message,
@@ -562,7 +564,14 @@ static int watch_passwords(void) {
         return 0;
 }
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-tty-ask-password-agent", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...]\n\n"
                "Process system password requests.\n\n"
                "  -h --help     Show this help\n"
@@ -572,8 +581,13 @@ static void help(void) {
                "     --watch    Continuously process password requests\n"
                "     --wall     Continuously forward password requests to wall\n"
                "     --plymouth Ask question with Plymouth instead of on TTY\n"
-               "     --console  Ask question on /dev/console instead of current TTY\n",
-               program_invocation_short_name);
+               "     --console  Ask question on /dev/console instead of current TTY\n"
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -610,8 +624,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();

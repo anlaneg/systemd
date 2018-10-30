@@ -39,17 +39,11 @@ int proc_cmdline(char **ret) {
                 return read_one_line_file("/proc/cmdline", ret);
 }
 
-int proc_cmdline_parse(proc_cmdline_parse_t parse_item, void *data, unsigned flags) {
-
-        _cleanup_free_ char *line = NULL;
+int proc_cmdline_parse_given(const char *line, proc_cmdline_parse_t parse_item, void *data, unsigned flags) {
         const char *p;
         int r;
 
         assert(parse_item);
-
-        r = proc_cmdline(&line);
-        if (r < 0)
-                return r;
 
         p = line;
         for (;;) {
@@ -70,9 +64,11 @@ int proc_cmdline_parse(proc_cmdline_parse_t parse_item, void *data, unsigned fla
                         if (!in_initrd())
                                 continue;
 
-                        if (flags & PROC_CMDLINE_STRIP_RD_PREFIX)
+                        if (FLAGS_SET(flags, PROC_CMDLINE_STRIP_RD_PREFIX))
                                 key = q;
-                }
+
+                } else if (FLAGS_SET(flags, PROC_CMDLINE_RD_STRICT) && in_initrd())
+                        continue; /* And optionally filter out arguments that are intended only for the host */
 
                 value = strchr(key, '=');
                 if (value)
@@ -86,15 +82,26 @@ int proc_cmdline_parse(proc_cmdline_parse_t parse_item, void *data, unsigned fla
         return 0;
 }
 
-static bool relaxed_equal_char(char a, char b) {
+int proc_cmdline_parse(proc_cmdline_parse_t parse_item, void *data, unsigned flags) {
+        _cleanup_free_ char *line = NULL;
+        int r;
 
+        assert(parse_item);
+
+        r = proc_cmdline(&line);
+        if (r < 0)
+                return r;
+
+        return proc_cmdline_parse_given(line, parse_item, data, flags);
+}
+
+static bool relaxed_equal_char(char a, char b) {
         return a == b ||
                 (a == '_' && b == '-') ||
                 (a == '-' && b == '_');
 }
 
 char *proc_cmdline_key_startswith(const char *s, const char *prefix) {
-
         assert(s);
         assert(prefix);
 
@@ -142,7 +149,7 @@ int proc_cmdline_get_key(const char *key, unsigned flags, char **value) {
         if (isempty(key))
                 return -EINVAL;
 
-        if ((flags & PROC_CMDLINE_VALUE_OPTIONAL) && !value)
+        if (FLAGS_SET(flags, PROC_CMDLINE_VALUE_OPTIONAL) && !value)
                 return -EINVAL;
 
         r = proc_cmdline(&line);
@@ -152,7 +159,7 @@ int proc_cmdline_get_key(const char *key, unsigned flags, char **value) {
         p = line;
         for (;;) {
                 _cleanup_free_ char *word = NULL;
-                const char *e;
+                const char *e, *k, *q;
 
                 r = extract_first_word(&p, &word, NULL, EXTRACT_QUOTES|EXTRACT_RELAX);
                 if (r < 0)
@@ -160,13 +167,23 @@ int proc_cmdline_get_key(const char *key, unsigned flags, char **value) {
                 if (r == 0)
                         break;
 
+                k = word;
+
                 /* Automatically filter out arguments that are intended only for the initrd, if we are not in the
                  * initrd. */
-                if (!in_initrd() && startswith(word, "rd."))
+                q = startswith(word, "rd.");
+                if (q) {
+                        if (!in_initrd())
+                                continue;
+
+                        if (FLAGS_SET(flags, PROC_CMDLINE_STRIP_RD_PREFIX))
+                                k = q;
+
+                } else if (FLAGS_SET(flags, PROC_CMDLINE_RD_STRICT) && in_initrd())
                         continue;
 
                 if (value) {
-                        e = proc_cmdline_key_startswith(word, key);
+                        e = proc_cmdline_key_startswith(k, key);
                         if (!e)
                                 continue;
 
@@ -177,11 +194,11 @@ int proc_cmdline_get_key(const char *key, unsigned flags, char **value) {
 
                                 found = true;
 
-                        } else if (*e == 0 && (flags & PROC_CMDLINE_VALUE_OPTIONAL))
+                        } else if (*e == 0 && FLAGS_SET(flags, PROC_CMDLINE_VALUE_OPTIONAL))
                                 found = true;
 
                 } else {
-                        if (streq(word, key))
+                        if (streq(k, key))
                                 found = true;
                 }
         }

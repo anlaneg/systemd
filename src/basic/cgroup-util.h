@@ -19,6 +19,7 @@
 
 /* An enum of well known cgroup controllers */
 typedef enum CGroupController {
+        /* Original cgroup controllers */
         CGROUP_CONTROLLER_CPU,
         CGROUP_CONTROLLER_CPUACCT,    /* v1 only */
         CGROUP_CONTROLLER_IO,         /* v2 only */
@@ -26,11 +27,16 @@ typedef enum CGroupController {
         CGROUP_CONTROLLER_MEMORY,
         CGROUP_CONTROLLER_DEVICES,    /* v1 only */
         CGROUP_CONTROLLER_PIDS,
+
+        /* BPF-based pseudo-controllers, v2 only */
+        CGROUP_CONTROLLER_BPF_FIREWALL,
+        CGROUP_CONTROLLER_BPF_DEVICES,
+
         _CGROUP_CONTROLLER_MAX,
         _CGROUP_CONTROLLER_INVALID = -1,
 } CGroupController;
 
-#define CGROUP_CONTROLLER_TO_MASK(c) (1 << (c))
+#define CGROUP_CONTROLLER_TO_MASK(c) (1U << (c))
 
 /* A bit mask of well known cgroup controllers */
 typedef enum CGroupMask {
@@ -41,6 +47,18 @@ typedef enum CGroupMask {
         CGROUP_MASK_MEMORY = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_MEMORY),
         CGROUP_MASK_DEVICES = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_DEVICES),
         CGROUP_MASK_PIDS = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_PIDS),
+        CGROUP_MASK_BPF_FIREWALL = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_BPF_FIREWALL),
+        CGROUP_MASK_BPF_DEVICES = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_BPF_DEVICES),
+
+        /* All real cgroupv1 controllers */
+        CGROUP_MASK_V1 = CGROUP_MASK_CPU|CGROUP_MASK_CPUACCT|CGROUP_MASK_BLKIO|CGROUP_MASK_MEMORY|CGROUP_MASK_DEVICES|CGROUP_MASK_PIDS,
+
+        /* All real cgroupv2 controllers */
+        CGROUP_MASK_V2 = CGROUP_MASK_CPU|CGROUP_MASK_IO|CGROUP_MASK_MEMORY|CGROUP_MASK_PIDS,
+
+        /* All cgroupv2 BPF pseudo-controllers */
+        CGROUP_MASK_BPF = CGROUP_MASK_BPF_FIREWALL|CGROUP_MASK_BPF_DEVICES,
+
         _CGROUP_MASK_ALL = CGROUP_CONTROLLER_TO_MASK(_CGROUP_CONTROLLER_MAX) - 1
 } CGroupMask;
 

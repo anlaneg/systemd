@@ -1681,7 +1681,6 @@ static int parse_line(const char *fname, unsigned line, const char *buffer) {
 static int read_config_file(const char *fn, bool ignore_enoent) {
         _cleanup_fclose_ FILE *rf = NULL;
         FILE *f = NULL;
-        char line[LINE_MAX];
         unsigned v = 0;
         int r = 0;
 
@@ -1701,9 +1700,16 @@ static int read_config_file(const char *fn, bool ignore_enoent) {
                 f = rf;
         }
 
-        FOREACH_LINE(line, f, break) {
+        for (;;) {
+                _cleanup_free_ char *line = NULL;
                 char *l;
                 int k;
+
+                k = read_line(f, LONG_LINE_MAX, &line);
+                if (k < 0)
+                        return log_error_errno(k, "Failed to read '%s': %m", fn);
+                if (k == 0)
+                        break;
 
                 v++;
 
@@ -1759,7 +1765,14 @@ static int cat_config(void) {
         return cat_files(NULL, files, 0);
 }
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-sysusers.service", "8", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] [CONFIGURATION FILE...]\n\n"
                "Creates system user accounts.\n\n"
                "  -h --help                 Show this help\n"
@@ -1769,7 +1782,12 @@ static void help(void) {
                "     --replace=PATH         Treat arguments as replacement for PATH\n"
                "     --inline               Treat arguments as configuration lines\n"
                "     --no-pager             Do not pipe output into a pager\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -1804,8 +1822,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();

@@ -22,6 +22,7 @@
 #include "cgroup-show.h"
 #include "cgroup-util.h"
 #include "copy.h"
+#include "def.h"
 #include "env-util.h"
 #include "fd-util.h"
 #include "format-table.h"
@@ -37,6 +38,7 @@
 #include "path-util.h"
 #include "process-util.h"
 #include "ptyfwd.h"
+#include "rlimit-util.h"
 #include "sigbus.h"
 #include "signal-util.h"
 #include "spawn-polkit-agent.h"
@@ -540,7 +542,7 @@ typedef struct MachineStatusInfo {
         pid_t leader;
         struct dual_timestamp timestamp;
         int *netif;
-        unsigned n_netif;
+        size_t n_netif;
 } MachineStatusInfo;
 
 static void machine_status_info_clear(MachineStatusInfo *info) {
@@ -600,7 +602,7 @@ static void print_machine_status_info(sd_bus *bus, MachineStatusInfo *i) {
                 printf("\t    Root: %s\n", i->root_directory);
 
         if (i->n_netif > 0) {
-                unsigned c;
+                size_t c;
 
                 fputs("\t   Iface:", stdout);
 
@@ -773,10 +775,8 @@ static int show_machine(int argc, char *argv[], void *userdata) {
                                        &error,
                                        &reply,
                                        "s", argv[i]);
-                if (r < 0) {
-                        log_error("Could not get path to machine: %s", bus_error_message(&error, -r));
-                        return r;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Could not get path to machine: %s", bus_error_message(&error, -r));
 
                 r = sd_bus_message_read(reply, "o", &path);
                 if (r < 0)
@@ -1118,10 +1118,8 @@ static int show_image(int argc, char *argv[], void *userdata) {
                                 &error,
                                 &reply,
                                 "s", argv[i]);
-                if (r < 0) {
-                        log_error("Could not get path to image: %s", bus_error_message(&error, -r));
-                        return r;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Could not get path to image: %s", bus_error_message(&error, -r));
 
                 r = sd_bus_message_read(reply, "o", &path);
                 if (r < 0)
@@ -1158,10 +1156,8 @@ static int kill_machine(int argc, char *argv[], void *userdata) {
                                 &error,
                                 NULL,
                                 "ssi", argv[i], arg_kill_who, arg_signal);
-                if (r < 0) {
-                        log_error("Could not kill machine: %s", bus_error_message(&error, -r));
-                        return r;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Could not kill machine: %s", bus_error_message(&error, -r));
         }
 
         return 0;
@@ -1200,10 +1196,8 @@ static int terminate_machine(int argc, char *argv[], void *userdata) {
                                 &error,
                                 NULL,
                                 "s", argv[i]);
-                if (r < 0) {
-                        log_error("Could not terminate machine: %s", bus_error_message(&error, -r));
-                        return r;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Could not terminate machine: %s", bus_error_message(&error, -r));
         }
 
         return 0;
@@ -1285,10 +1279,8 @@ static int bind_mount(int argc, char *argv[], void *userdata) {
                         argv[3],
                         arg_read_only,
                         arg_mkdir);
-        if (r < 0) {
-                log_error("Failed to bind mount: %s", bus_error_message(&error, -r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to bind mount: %s", bus_error_message(&error, -r));
 
         return 0;
 }
@@ -1335,8 +1327,8 @@ static int process_forward(sd_event *event, PTYForward **forward, int master, PT
                         log_info("Connected to machine %s. Press ^] three times within 1s to exit session.", name);
         }
 
-        sd_event_add_signal(event, NULL, SIGINT, NULL, NULL);
-        sd_event_add_signal(event, NULL, SIGTERM, NULL, NULL);
+        (void) sd_event_add_signal(event, NULL, SIGINT, NULL, NULL);
+        (void) sd_event_add_signal(event, NULL, SIGTERM, NULL, NULL);
 
         r = pty_forward_new(event, master, flags, forward);
         if (r < 0)
@@ -1459,10 +1451,8 @@ static int login_machine(int argc, char *argv[], void *userdata) {
                         &error,
                         &reply,
                         "s", machine);
-        if (r < 0) {
-                log_error("Failed to get login PTY: %s", bus_error_message(&error, -r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to get login PTY: %s", bus_error_message(&error, -r));
 
         r = sd_bus_message_read(reply, "hs", &master, NULL);
         if (r < 0)
@@ -1550,10 +1540,8 @@ static int shell_machine(int argc, char *argv[], void *userdata) {
                 return bus_log_create_error(r);
 
         r = sd_bus_call(bus, m, 0, &error, &reply);
-        if (r < 0) {
-                log_error("Failed to get shell PTY: %s", bus_error_message(&error, -r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to get shell PTY: %s", bus_error_message(&error, -r));
 
         r = sd_bus_message_read(reply, "hs", &master, NULL);
         if (r < 0)
@@ -1615,10 +1603,8 @@ static int rename_image(int argc, char *argv[], void *userdata) {
                         &error,
                         NULL,
                         "ss", argv[1], argv[2]);
-        if (r < 0) {
-                log_error("Could not rename image: %s", bus_error_message(&error, -r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Could not rename image: %s", bus_error_message(&error, -r));
 
         return 0;
 }
@@ -1681,10 +1667,8 @@ static int read_only_image(int argc, char *argv[], void *userdata) {
                         &error,
                         NULL,
                         "sb", argv[1], b);
-        if (r < 0) {
-                log_error("Could not mark image read-only: %s", bus_error_message(&error, -r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Could not mark image read-only: %s", bus_error_message(&error, -r));
 
         return 0;
 }
@@ -1773,10 +1757,8 @@ static int start_machine(int argc, char *argv[], void *userdata) {
                                 &error,
                                 &reply,
                                 "ss", unit, "fail");
-                if (r < 0) {
-                        log_error("Failed to start unit: %s", bus_error_message(&error, -r));
-                        return r;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Failed to start unit: %s", bus_error_message(&error, -r));
 
                 r = sd_bus_message_read(reply, "o", &object);
                 if (r < 0)
@@ -1855,10 +1837,8 @@ static int enable_machine(int argc, char *argv[], void *userdata) {
                 return bus_log_create_error(r);
 
         r = sd_bus_call(bus, m, 0, &error, &reply);
-        if (r < 0) {
-                log_error("Failed to enable or disable unit: %s", bus_error_message(&error, -r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to enable or disable unit: %s", bus_error_message(&error, -r));
 
         if (streq(argv[0], "enable")) {
                 r = sd_bus_message_read(reply, "b", NULL);
@@ -1993,10 +1973,8 @@ static int transfer_image_common(sd_bus *bus, sd_bus_message *m) {
                 return log_error_errno(r, "Failed to request match: %m");
 
         r = sd_bus_call(bus, m, 0, &error, &reply);
-        if (r < 0) {
-                log_error("Failed to transfer image: %s", bus_error_message(&error, -r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to transfer image: %s", bus_error_message(&error, -r));
 
         r = sd_bus_message_read(reply, "uo", &id, &path);
         if (r < 0)
@@ -2007,8 +1985,8 @@ static int transfer_image_common(sd_bus *bus, sd_bus_message *m) {
         if (!arg_quiet)
                 log_info("Enqueued transfer job %u. Press C-c to continue download in background.", id);
 
-        sd_event_add_signal(event, NULL, SIGINT, transfer_signal_handler, UINT32_TO_PTR(id));
-        sd_event_add_signal(event, NULL, SIGTERM, transfer_signal_handler, UINT32_TO_PTR(id));
+        (void) sd_event_add_signal(event, NULL, SIGINT, transfer_signal_handler, UINT32_TO_PTR(id));
+        (void) sd_event_add_signal(event, NULL, SIGTERM, transfer_signal_handler, UINT32_TO_PTR(id));
 
         r = sd_event_loop(event);
         if (r < 0)
@@ -2402,10 +2380,8 @@ typedef struct TransferInfo {
         double progress;
 } TransferInfo;
 
-static int compare_transfer_info(const void *a, const void *b) {
-        const TransferInfo *x = a, *y = b;
-
-        return strcmp(x->local, y->local);
+static int compare_transfer_info(const TransferInfo *a, const TransferInfo *b) {
+        return strcmp(a->local, b->local);
 }
 
 static int list_transfers(int argc, char *argv[], void *userdata) {
@@ -2430,10 +2406,8 @@ static int list_transfers(int argc, char *argv[], void *userdata) {
                                &error,
                                &reply,
                                NULL);
-        if (r < 0) {
-                log_error("Could not get transfers: %s", bus_error_message(&error, -r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Could not get transfers: %s", bus_error_message(&error, -r));
 
         r = sd_bus_message_enter_container(reply, 'a', "(usssdo)");
         if (r < 0)
@@ -2475,7 +2449,7 @@ static int list_transfers(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return bus_log_parse_error(r);
 
-        qsort_safe(transfers, n_transfers, sizeof(TransferInfo), compare_transfer_info);
+        typesafe_qsort(transfers, n_transfers, compare_transfer_info);
 
         if (arg_legend && n_transfers > 0)
                 printf("%-*s %-*s %-*s %-*s %-*s\n",
@@ -2528,10 +2502,8 @@ static int cancel_transfer(int argc, char *argv[], void *userdata) {
                                 &error,
                                 NULL,
                                 "u", id);
-                if (r < 0) {
-                        log_error("Could not cancel transfer: %s", bus_error_message(&error, -r));
-                        return r;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Could not cancel transfer: %s", bus_error_message(&error, -r));
         }
 
         return 0;
@@ -2637,7 +2609,14 @@ static int clean_images(int argc, char *argv[], void *userdata) {
 }
 
 static int help(int argc, char *argv[], void *userdata) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
         (void) pager_open(arg_no_pager, false);
+
+        r = terminal_urlify_man("machinectl", "1", &link);
+        if (r < 0)
+                return log_oom();
 
         printf("%s [OPTIONS...] {COMMAND} ...\n\n"
                "Send control commands to or query the virtual machine and container\n"
@@ -2665,7 +2644,8 @@ static int help(int argc, char *argv[], void *userdata) {
                "  -o --output=STRING          Change journal output mode (short, short-precise,\n"
                "                               short-iso, short-iso-precise, short-full,\n"
                "                               short-monotonic, short-unix, verbose, export,\n"
-               "                               json, json-pretty, json-sse, cat)\n"
+               "                               json, json-pretty, json-sse, json-seq, cat,\n"
+               "                               with-unit)\n"
                "     --verify=MODE            Verification mode for downloaded images (no,\n"
                "                              checksum, signature)\n"
                "     --force                  Download image even if already exists\n\n"
@@ -2707,7 +2687,10 @@ static int help(int argc, char *argv[], void *userdata) {
                "  export-raw NAME [FILE]      Export a RAW container or VM image locally\n"
                "  list-transfers              Show list of downloads in progress\n"
                "  cancel-transfer             Cancel a download\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
 
         return 0;
 }
@@ -3049,6 +3032,10 @@ int main(int argc, char*argv[]) {
         setlocale(LC_ALL, "");
         log_parse_environment();
         log_open();
+
+        /* The journal merging logic potentially needs a lot of fds. */
+        (void) rlimit_nofile_bump(HIGH_RLIMIT_NOFILE);
+
         sigbus_install();
 
         r = parse_argv(argc, argv);

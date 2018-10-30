@@ -100,18 +100,7 @@ _public_ sd_event *sd_ndisc_get_event(sd_ndisc *nd) {
         return nd->event;
 }
 
-_public_ sd_ndisc *sd_ndisc_ref(sd_ndisc *nd) {
-
-        if (!nd)
-                return NULL;
-
-        assert(nd->n_ref > 0);
-        nd->n_ref++;
-
-        return nd;
-}
-
-static int ndisc_reset(sd_ndisc *nd) {
+static void ndisc_reset(sd_ndisc *nd) {
         assert(nd);
 
         nd->timeout_event_source = sd_event_source_unref(nd->timeout_event_source);
@@ -119,25 +108,17 @@ static int ndisc_reset(sd_ndisc *nd) {
         nd->retransmit_time = 0;
         nd->recv_event_source = sd_event_source_unref(nd->recv_event_source);
         nd->fd = safe_close(nd->fd);
-
-        return 0;
 }
 
-_public_ sd_ndisc *sd_ndisc_unref(sd_ndisc *nd) {
-
-        if (!nd)
-                return NULL;
-
-        assert(nd->n_ref > 0);
-        nd->n_ref--;
-
-        if (nd->n_ref > 0)
-                return NULL;
+static sd_ndisc *ndisc_free(sd_ndisc *nd) {
+        assert(nd);
 
         ndisc_reset(nd);
         sd_ndisc_detach_event(nd);
         return mfree(nd);
 }
+
+DEFINE_PUBLIC_TRIVIAL_REF_UNREF_FUNC(sd_ndisc, sd_ndisc, ndisc_free);
 
 _public_ int sd_ndisc_new(sd_ndisc **ret) {
         _cleanup_(sd_ndisc_unrefp) sd_ndisc *nd = NULL;
@@ -238,7 +219,14 @@ static int ndisc_recv(sd_event_source *s, int fd, uint32_t revents, void *userda
                         break;
 
                 case -EPFNOSUPPORT:
-                        log_ndisc("Received invalid source address from ICMPv6 socket.");
+                        log_ndisc("Received invalid source address from ICMPv6 socket. Ignoring.");
+                        break;
+
+                case -EAGAIN: /* ignore spurious wakeups */
+                        break;
+
+                default:
+                        log_ndisc_errno(r, "Unexpected error while reading from ICMPv6, ignoring: %m");
                         break;
                 }
 
@@ -311,7 +299,7 @@ static int ndisc_timeout(sd_event_source *s, uint64_t usec, void *userdata) {
         return 0;
 
 fail:
-        sd_ndisc_stop(nd);
+        (void) sd_ndisc_stop(nd);
         return 0;
 }
 

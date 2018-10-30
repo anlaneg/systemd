@@ -19,7 +19,7 @@ typedef enum KillOperation {
         KILL_TERMINATE,
         KILL_TERMINATE_AND_LOG,
         KILL_KILL,
-        KILL_ABORT,
+        KILL_WATCHDOG,
         _KILL_OPERATION_MAX,
         _KILL_OPERATION_INVALID = -1
 } KillOperation;
@@ -104,12 +104,6 @@ struct UnitRef {
         Unit *source, *target;
         LIST_FIELDS(UnitRef, refs_by_target);
 };
-
-typedef enum UnitCGroupBPFState {
-        UNIT_CGROUP_BPF_OFF = 0,
-        UNIT_CGROUP_BPF_ON = 1,
-        UNIT_CGROUP_BPF_INVALIDATED = -1,
-} UnitCGroupBPFState;
 
 typedef struct Unit {
         Manager *manager;
@@ -212,6 +206,9 @@ typedef struct Unit {
         /* Target dependencies queue */
         LIST_FIELDS(Unit, target_deps_queue);
 
+        /* Queue of units with StopWhenUnneeded set that shell be checked for clean-up. */
+        LIST_FIELDS(Unit, stop_when_unneeded_queue);
+
         /* PIDs we keep an eye on. Note that a unit might have many
          * more, but these are the ones we care enough about to
          * process SIGCHLD for */
@@ -255,9 +252,13 @@ typedef struct Unit {
         char *cgroup_path;
         CGroupMask cgroup_realized_mask;
         CGroupMask cgroup_enabled_mask;
+        CGroupMask cgroup_invalidated_mask;
         CGroupMask cgroup_subtree_mask;
         CGroupMask cgroup_members_mask;
         int cgroup_inotify_wd;
+
+        /* Device Controller BPF program */
+        BPFProgram *bpf_device_control_installed;
 
         /* IP BPF Firewalling/accounting */
         int ip_accounting_ingress_map_fd;
@@ -322,6 +323,7 @@ typedef struct Unit {
         bool in_cgroup_realize_queue:1;
         bool in_cgroup_empty_queue:1;
         bool in_target_deps_queue:1;
+        bool in_stop_when_unneeded_queue:1;
 
         bool sent_dbus_new_signal:1;
 
@@ -331,8 +333,6 @@ typedef struct Unit {
         bool cgroup_realized:1;
         bool cgroup_members_mask_valid:1;
         bool cgroup_subtree_mask_valid:1;
-
-        UnitCGroupBPFState cgroup_bpf_state:2;
 
         /* Reset cgroup accounting next time we fork something off */
         bool reset_accounting:1;
@@ -349,6 +349,8 @@ typedef struct Unit {
         bool exported_invocation_id:1;
         bool exported_log_level_max:1;
         bool exported_log_extra_fields:1;
+        bool exported_log_rate_limit_interval:1;
+        bool exported_log_rate_limit_burst:1;
 
         /* When writing transient unit files, stores which section we stored last. If < 0, we didn't write any yet. If
          * == 0 we are in the [Unit] section, if > 0 we are in the unit type-specific section. */
@@ -598,8 +600,8 @@ int unit_add_name(Unit *u, const char *name);
 int unit_add_dependency(Unit *u, UnitDependency d, Unit *other, bool add_reference, UnitDependencyMask mask);
 int unit_add_two_dependencies(Unit *u, UnitDependency d, UnitDependency e, Unit *other, bool add_reference, UnitDependencyMask mask);
 
-int unit_add_dependency_by_name(Unit *u, UnitDependency d, const char *name, const char *filename, bool add_reference, UnitDependencyMask mask);
-int unit_add_two_dependencies_by_name(Unit *u, UnitDependency d, UnitDependency e, const char *name, const char *path, bool add_reference, UnitDependencyMask mask);
+int unit_add_dependency_by_name(Unit *u, UnitDependency d, const char *name, bool add_reference, UnitDependencyMask mask);
+int unit_add_two_dependencies_by_name(Unit *u, UnitDependency d, UnitDependency e, const char *name, bool add_reference, UnitDependencyMask mask);
 
 int unit_add_exec_dependencies(Unit *u, ExecContext *c);
 
@@ -613,6 +615,7 @@ void unit_add_to_dbus_queue(Unit *u);
 void unit_add_to_cleanup_queue(Unit *u);
 void unit_add_to_gc_queue(Unit *u);
 void unit_add_to_target_deps_queue(Unit *u);
+void unit_submit_to_stop_when_unneeded_queue(Unit *u);
 
 int unit_merge(Unit *u, Unit *other);
 int unit_merge_by_name(Unit *u, const char *other);
@@ -679,12 +682,7 @@ bool unit_can_serialize(Unit *u) _pure_;
 
 int unit_serialize(Unit *u, FILE *f, FDSet *fds, bool serialize_jobs);
 int unit_deserialize(Unit *u, FILE *f, FDSet *fds);
-void unit_deserialize_skip(FILE *f);
-
-int unit_serialize_item(Unit *u, FILE *f, const char *key, const char *value);
-int unit_serialize_item_escaped(Unit *u, FILE *f, const char *key, const char *value);
-int unit_serialize_item_fd(Unit *u, FILE *f, FDSet *fds, const char *key, int fd);
-void unit_serialize_item_format(Unit *u, FILE *f, const char *key, const char *value, ...) _printf_(4,5);
+int unit_deserialize_skip(FILE *f);
 
 int unit_add_node_dependency(Unit *u, const char *what, bool wants, UnitDependency d, UnitDependencyMask mask);
 
@@ -748,6 +746,8 @@ int unit_require_mounts_for(Unit *u, const char *path, UnitDependencyMask mask);
 bool unit_type_supported(UnitType t);
 
 bool unit_is_pristine(Unit *u);
+
+bool unit_is_unneeded(Unit *u);
 
 pid_t unit_control_pid(Unit *u);
 pid_t unit_main_pid(Unit *u);

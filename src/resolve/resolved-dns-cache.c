@@ -228,11 +228,7 @@ void dns_cache_prune(DnsCache *c) {
 static int dns_cache_item_prioq_compare_func(const void *a, const void *b) {
         const DnsCacheItem *x = a, *y = b;
 
-        if (x->until < y->until)
-                return -1;
-        if (x->until > y->until)
-                return 1;
-        return 0;
+        return CMP(x->until, y->until);
 }
 
 static int dns_cache_init(DnsCache *c) {
@@ -787,7 +783,7 @@ static DnsCacheItem *dns_cache_get_by_key_follow_cname_dname_nsec(DnsCache *c, D
         if (dns_type_may_redirect(k->type)) {
                 /* Check if we have a CNAME record instead */
                 i = hashmap_get(c->by_key, &DNS_RESOURCE_KEY_CONST(k->class, DNS_TYPE_CNAME, n));
-                if (i)
+                if (i && i->type != DNS_CACHE_NODATA)
                         return i;
 
                 /* OK, let's look for cached DNAME records. */
@@ -796,7 +792,7 @@ static DnsCacheItem *dns_cache_get_by_key_follow_cname_dname_nsec(DnsCache *c, D
                                 return NULL;
 
                         i = hashmap_get(c->by_key, &DNS_RESOURCE_KEY_CONST(k->class, DNS_TYPE_DNAME, n));
-                        if (i)
+                        if (i && i->type != DNS_CACHE_NODATA)
                                 return i;
 
                         /* Jump one label ahead */

@@ -71,6 +71,9 @@ sensor:modalias:acpi:INVN6500*:dmi:*svn*Acer*:*pn*AspireSW5-012*
 sensor:modalias:acpi:BMA250E*:dmi:*:svnAcer:pnIconiaW1-810:*
  ACCEL_MOUNT_MATRIX=1, 0, 0; 0, -1, 0; 0, 0, 1
 
+sensor:modalias:acpi:KIOX0009*:dmi:*:svnAcer:pnOneS1003:*
+ ACCEL_MOUNT_MATRIX=1, 0, 0; 0, -1, 0; 0, 0, 1
+
 #########################################
 # Archos
 #########################################
@@ -83,11 +86,17 @@ sensor:modalias:acpi:SMO8500*:dmi:*:svnARCHOS:pnARCHOS80Cesium:*
 sensor:modalias:acpi:INVN6500*:dmi:*svnASUSTeK*:*pnT100CHI*
  ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, 1, 0; 0, 0, 1
 
+sensor:modalias:acpi:INVN6500*:dmi:*svnASUSTeK*:pnT300CHI*
+ ACCEL_MOUNT_MATRIX=0, -1, 0; 1, 0, 0; 0, 0, 1
+
 sensor:modalias:acpi:INVN6500*:dmi:*svnASUSTeK*:*pnT100TA*
  ACCEL_MOUNT_MATRIX=1, 0, 0; 0, -1, 0; 0, 0, 1
 
 sensor:modalias:acpi:INVN6500*:dmi:*svnASUSTeK*:pnT200TA*
  ACCEL_MOUNT_MATRIX=1, 0, 0; 0, -1, 0; 0, 0, 1
+
+sensor:modalias:acpi:INVN6500*:dmi:*svnASUSTeK*:*pnTP201SA*
+ ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
 
 sensor:modalias:acpi:INVN6500*:dmi:*svnASUSTeK*:pn*E205SA*
  ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
@@ -128,7 +137,11 @@ sensor:modalias:acpi:BMA250E*:dmi:bvnINSYDECorp.:bvrCHUWI.D86JLBNR*:svnInsyde:pn
 sensor:modalias:acpi:BOSC0200*:dmi:*:svnHampoo:pnD2D3_Vi8A1:*
  ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
 
-# Chuwi Hi8 Pro
+# Chuwi Vi10 (CWI505)
+sensor:modalias:acpi:BMA250E*:dmi:bvnINSYDECorp.:bvrG1D_S165*:svnilife:pnS165:*
+ ACCEL_MOUNT_MATRIX=0, 1, 0; 1, 0, 0; 0, 0, 1
+
+# Chuwi Hi8 Pro (CWI513)
 sensor:modalias:acpi:BOSC0200*:dmi:*:svnHampoo:pnX1D3_C806N:*
  ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
 
@@ -153,6 +166,12 @@ sensor:modalias:acpi:BOSC0200*:dmi:bvnAmericanMegatrendsInc.:bvr5.11:bd05/28/201
  ACCEL_MOUNT_MATRIX=1, 0, 0; 0, -1, 0; 0, 0, 1
 
 #########################################
+# Connect
+#########################################
+sensor:modalias:acpi:KIOX000A*:dmi:*:svnConnect:pnTablet9:*
+ ACCEL_MOUNT_MATRIX=0, 1, 0; 1, 0, 0; 0, 0, 1
+
+#########################################
 # Cube
 #########################################
 
@@ -171,6 +190,10 @@ sensor:modalias:acpi:KIOX000A*:dmi:*:svnCube:pni16:*
 # Cube i7 Stylus I8L Model
 sensor:modalias:acpi:KIOX000A*:dmi:*:svnCube:pni8-L:*
  ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, 1, 0; 0, 0, 1
+
+# Cube iWork 10 Flagship
+sensor:modalias:acpi:BOSC0200*:dmi:*:svnCube:pnI15-TC:*
+ ACCEL_MOUNT_MATRIX=1, 0, 0; 0, -1, 0; 0, 0, 1
 
 #########################################
 # Cytrix (Mytrix)
@@ -212,6 +235,10 @@ sensor:modalias:platform:lis3lv02d:dmi:*svn*Hewlett-Packard*:*pn*HPEliteBook8560
 sensor:modalias:acpi:SMO8500*:dmi:*:svnHewlett-Packard:pnHPStream7Tablet:*
 sensor:modalias:acpi:SMO8500*:dmi:*:svnHewlett-Packard:pnHPStream8Tablet:*
   ACCEL_MOUNT_MATRIX=0, 1, 0; 1, 0, 0; 0, 0, 1
+
+# HP Pavillion X2 10-n000nd
+sensor:modalias:i2c:bmc150_accel:dmi:*:svnHewlett-Packard:pnHPPavilionx2Detachable:*:rn815D:*
+  ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
 
 #########################################
 # I.T.Works
@@ -318,8 +345,15 @@ sensor:modalias:acpi:KIOX000A*:dmi:*:svnTMAX:pnTM800W560L:*
 #########################################
 # Onda
 #########################################
+sensor:modalias:acpi:BOSC0200*:dmi:*:svnONDA:pnV80PLUS:*
+ ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
+
 sensor:modalias:acpi:BMA250E*:dmi:bvnINSYDECorp.:bvrONDA.D89*:svnInsyde:pnONDATablet:*
 sensor:modalias:acpi:BMA250E*:dmi:bvnINSYDECorp.:bvrONDA.W89*:svnInsyde:pnONDATablet:*
+ ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
+
+# Onda v975w, generic DMI strings, match entire dmi modalias inc. bios-date
+sensor:modalias:acpi:SMO8500*:dmi:bvnAmericanMegatrendsInc.:bvr5.6.5:bd07/25/2014:svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnAptioCRB:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:
  ACCEL_MOUNT_MATRIX=0, -1, 0; -1, 0, 0; 0, 0, 1
 
 #########################################
@@ -363,6 +397,10 @@ sensor:modalias:acpi:KIOX000A*:dmi:*:svnTECLAST:pnX80Pro:*
 
 sensor:modalias:acpi:KIOX000A*:dmi:*:svnTECLAST:pnX98PlusII:*
  ACCEL_MOUNT_MATRIX=1, 0, 0; 0, -1, 0; 0, 0, 1
+
+# Teclast X98 Plus I (A5C6), generic DMI strings, match entire dmi modalias inc. bios-date
+sensor:modalias:acpi:KIOX000A*:dmi:bvnAmericanMegatrendsInc.:bvr5.011:bd11/03/2015:svnTobefilledbyO.E.M.:pnTobefilledbyO.E.M.:pvrTobefilledbyO.E.M.:rvnAMICorporation:rnCherryTrailCR:rvrTobefilledbyO.E.M.:cvnToBeFilledByO.E.M.:ct3:cvrToBeFilledByO.E.M.:
+ ACCEL_MOUNT_MATRIX=0, 1, 0; 1, 0, 0; 0, 0, 1
 
 #########################################
 # Trekstor

@@ -16,30 +16,22 @@
 #include "process-util.h"
 #include "string-util.h"
 #include "strv.h"
+#include "tests.h"
 #include "util.h"
 
 static void test_parse_env_file(void) {
         _cleanup_(unlink_tempfilep) char
                 t[] = "/tmp/test-fileio-in-XXXXXX",
                 p[] = "/tmp/test-fileio-out-XXXXXX";
-        int fd, r;
         FILE *f;
         _cleanup_free_ char *one = NULL, *two = NULL, *three = NULL, *four = NULL, *five = NULL,
                         *six = NULL, *seven = NULL, *eight = NULL, *nine = NULL, *ten = NULL;
         _cleanup_strv_free_ char **a = NULL, **b = NULL;
         char **i;
         unsigned k;
+        int r;
 
-        fd = mkostemp_safe(p);
-        assert_se(fd >= 0);
-        close(fd);
-
-        fd = mkostemp_safe(t);
-        assert_se(fd >= 0);
-
-        f = fdopen(fd, "w");
-        assert_se(f);
-
+        assert_se(fmkostemp_safe(t, "w", &f) == 0);
         fputs("one=BAR   \n"
               "# comment\n"
               " # comment \n"
@@ -127,6 +119,12 @@ static void test_parse_env_file(void) {
         assert_se(streq(nine, "nineval"));
         assert_se(ten == NULL);
 
+        {
+                /* prepare a temporary file to write the environment to */
+                _cleanup_close_ int fd = mkostemp_safe(p);
+                assert_se(fd >= 0);
+        }
+
         r = write_env_file(p, a);
         assert_se(r >= 0);
 
@@ -138,21 +136,12 @@ static void test_parse_multiline_env_file(void) {
         _cleanup_(unlink_tempfilep) char
                 t[] = "/tmp/test-fileio-in-XXXXXX",
                 p[] = "/tmp/test-fileio-out-XXXXXX";
-        int fd, r;
         FILE *f;
         _cleanup_strv_free_ char **a = NULL, **b = NULL;
         char **i;
+        int r;
 
-        fd = mkostemp_safe(p);
-        assert_se(fd >= 0);
-        close(fd);
-
-        fd = mkostemp_safe(t);
-        assert_se(fd >= 0);
-
-        f = fdopen(fd, "w");
-        assert_se(f);
-
+        assert_se(fmkostemp_safe(t, "w", &f) == 0);
         fputs("one=BAR\\\n"
               "    VAR\\\n"
               "\tGAR\n"
@@ -179,6 +168,11 @@ static void test_parse_multiline_env_file(void) {
         assert_se(streq_ptr(a[2], "tri=bar     var \tgar "));
         assert_se(a[3] == NULL);
 
+        {
+                _cleanup_close_ int fd = mkostemp_safe(p);
+                assert_se(fd >= 0);
+        }
+
         r = write_env_file(p, a);
         assert_se(r >= 0);
 
@@ -188,18 +182,13 @@ static void test_parse_multiline_env_file(void) {
 
 static void test_merge_env_file(void) {
         _cleanup_(unlink_tempfilep) char t[] = "/tmp/test-fileio-XXXXXX";
-        int fd, r;
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_strv_free_ char **a = NULL;
         char **i;
+        int r;
 
-        fd = mkostemp_safe(t);
-        assert_se(fd >= 0);
-
+        assert_se(fmkostemp_safe(t, "w", &f) == 0);
         log_info("/* %s (%s) */", __func__, t);
-
-        f = fdopen(fd, "w");
-        assert_se(f);
 
         r = write_string_stream(f,
                                 "one=1   \n"
@@ -257,18 +246,13 @@ static void test_merge_env_file(void) {
 
 static void test_merge_env_file_invalid(void) {
         _cleanup_(unlink_tempfilep) char t[] = "/tmp/test-fileio-XXXXXX";
-        int fd, r;
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_strv_free_ char **a = NULL;
         char **i;
+        int r;
 
-        fd = mkostemp_safe(t);
-        assert_se(fd >= 0);
-
+        assert_se(fmkostemp_safe(t, "w", &f) == 0);
         log_info("/* %s (%s) */", __func__, t);
-
-        f = fdopen(fd, "w");
-        assert_se(f);
 
         r = write_string_stream(f,
                                 "unset one   \n"
@@ -296,16 +280,11 @@ static void test_merge_env_file_invalid(void) {
 
 static void test_executable_is_script(void) {
         _cleanup_(unlink_tempfilep) char t[] = "/tmp/test-fileio-XXXXXX";
-        int fd, r;
         _cleanup_fclose_ FILE *f = NULL;
         char *command;
+        int r;
 
-        fd = mkostemp_safe(t);
-        assert_se(fd >= 0);
-
-        f = fdopen(fd, "w");
-        assert_se(f);
-
+        assert_se(fmkostemp_safe(t, "w", &f) == 0);
         fputs("#! /bin/script -a -b \ngoo goo", f);
         fflush(f);
 
@@ -710,9 +689,7 @@ static void test_read_line3(void) {
 }
 
 int main(int argc, char *argv[]) {
-        log_set_max_level(LOG_DEBUG);
-        log_parse_environment();
-        log_open();
+        test_setup_logging(LOG_DEBUG);
 
         test_parse_env_file();
         test_parse_multiline_env_file();

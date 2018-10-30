@@ -16,6 +16,7 @@
 #include "stat-util.h"
 #include "string-table.h"
 #include "string-util.h"
+#include "strv.h"
 
 #include "netdev/bridge.h"
 #include "netdev/bond.h"
@@ -33,6 +34,7 @@
 #include "netdev/vxcan.h"
 #include "netdev/wireguard.h"
 #include "netdev/netdevsim.h"
+#include "netdev/fou-tunnel.h"
 
 const NetDevVTable * const netdev_vtable[_NETDEV_KIND_MAX] = {
         [NETDEV_KIND_BRIDGE] = &bridge_vtable,
@@ -61,6 +63,7 @@ const NetDevVTable * const netdev_vtable[_NETDEV_KIND_MAX] = {
         [NETDEV_KIND_VXCAN] = &vxcan_vtable,
         [NETDEV_KIND_WIREGUARD] = &wireguard_vtable,
         [NETDEV_KIND_NETDEVSIM] = &netdevsim_vtable,
+        [NETDEV_KIND_FOU] = &foutnl_vtable,
 };
 
 static const char* const netdev_kind_table[_NETDEV_KIND_MAX] = {
@@ -90,41 +93,29 @@ static const char* const netdev_kind_table[_NETDEV_KIND_MAX] = {
         [NETDEV_KIND_VXCAN] = "vxcan",
         [NETDEV_KIND_WIREGUARD] = "wireguard",
         [NETDEV_KIND_NETDEVSIM] = "netdevsim",
+        [NETDEV_KIND_FOU] = "fou",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(netdev_kind, NetDevKind);
 DEFINE_CONFIG_PARSE_ENUM(config_parse_netdev_kind, netdev_kind, NetDevKind, "Failed to parse netdev kind");
 
-static void netdev_cancel_callbacks(NetDev *netdev) {
-        _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *m = NULL;
+static void netdev_callbacks_clear(NetDev *netdev) {
         netdev_join_callback *callback;
 
-        if (!netdev || !netdev->manager)
+        if (!netdev)
                 return;
 
-        rtnl_message_new_synthetic_error(netdev->manager->rtnl, -ENODEV, 0, &m);
-
         while ((callback = netdev->callbacks)) {
-                if (m) {
-                        assert(callback->link);
-                        assert(callback->callback);
-                        assert(netdev->manager);
-                        assert(netdev->manager->rtnl);
-
-                        callback->callback(netdev->manager->rtnl, m, callback->link);
-                }
-
                 LIST_REMOVE(callbacks, netdev->callbacks, callback);
                 link_unref(callback->link);
                 free(callback);
         }
 }
 
-static void netdev_free(NetDev *netdev) {
-        if (!netdev)
-                return;
+static NetDev *netdev_free(NetDev *netdev) {
+        assert(netdev);
 
-        netdev_cancel_callbacks(netdev);
+        netdev_callbacks_clear(netdev);
 
         if (netdev->ifname && netdev->manager)
                 hashmap_remove(netdev->manager->netdevs, netdev->ifname);
@@ -153,21 +144,17 @@ static void netdev_free(NetDev *netdev) {
             NETDEV_VTABLE(netdev)->done)
                 NETDEV_VTABLE(netdev)->done(netdev);
 
-        free(netdev);
+        return mfree(netdev);
 }
 
-NetDev *netdev_unref(NetDev *netdev) {
-        if (netdev && (-- netdev->n_ref <= 0))
-                netdev_free(netdev);
+DEFINE_TRIVIAL_REF_UNREF_FUNC(NetDev, netdev, netdev_free);
 
-        return NULL;
-}
+void netdev_netlink_destroy_callback(void *userdata) {
+        NetDev *netdev = userdata;
 
-NetDev *netdev_ref(NetDev *netdev) {
-        if (netdev)
-                assert_se(++ netdev->n_ref >= 2);
+        assert(userdata);
 
-        return netdev;
+        netdev_unref(netdev);
 }
 
 void netdev_drop(NetDev *netdev) {
@@ -178,7 +165,7 @@ void netdev_drop(NetDev *netdev) {
 
         log_netdev_debug(netdev, "netdev removed");
 
-        netdev_cancel_callbacks(netdev);
+        netdev_callbacks_clear(netdev);
 
         netdev_unref(netdev);
 
@@ -206,7 +193,7 @@ int netdev_get(Manager *manager, const char *name, NetDev **ret) {
 static int netdev_enter_failed(NetDev *netdev) {
         netdev->state = NETDEV_STATE_FAILED;
 
-        netdev_cancel_callbacks(netdev);
+        netdev_callbacks_clear(netdev);
 
         return 0;
 }
@@ -238,7 +225,8 @@ static int netdev_enslave_ready(NetDev *netdev, Link* link, sd_netlink_message_h
         if (r < 0)
                 return log_netdev_error_errno(netdev, r, "Could not append IFLA_MASTER attribute: %m");
 
-        r = sd_netlink_call_async(netdev->manager->rtnl, req, callback, link, 0, NULL);
+        r = sd_netlink_call_async(netdev->manager->rtnl, NULL, req, callback,
+                                  link_netlink_destroy_callback, link, 0, __func__);
         if (r < 0)
                 return log_netdev_error_errno(netdev, r, "Could not send rtnetlink message: %m");
 
@@ -283,9 +271,10 @@ static int netdev_enter_ready(NetDev *netdev) {
 
 /* callback for netdev's created without a backing Link */
 static int netdev_create_handler(sd_netlink *rtnl, sd_netlink_message *m, void *userdata) {
-        _cleanup_(netdev_unrefp) NetDev *netdev = userdata;
+        NetDev *netdev = userdata;
         int r;
 
+        assert(netdev);
         assert(netdev->state != _NETDEV_STATE_INVALID);
 
         r = sd_netlink_message_get_errno(m);
@@ -303,7 +292,7 @@ static int netdev_create_handler(sd_netlink *rtnl, sd_netlink_message *m, void *
         return 1;
 }
 
-int netdev_enslave(NetDev *netdev, Link *link, sd_netlink_message_handler_t callback) {
+static int netdev_enslave(NetDev *netdev, Link *link, sd_netlink_message_handler_t callback) {
         int r;
 
         assert(netdev);
@@ -330,8 +319,7 @@ int netdev_enslave(NetDev *netdev, Link *link, sd_netlink_message_handler_t call
                         return log_oom();
 
                 cb->callback = callback;
-                cb->link = link;
-                link_ref(link);
+                cb->link = link_ref(link);
 
                 LIST_PREPEND(callbacks, netdev->callbacks, cb);
 
@@ -546,13 +534,15 @@ static int netdev_create(NetDev *netdev, Link *link,
                         return log_netdev_error_errno(netdev, r, "Could not append IFLA_LINKINFO attribute: %m");
 
                 if (link) {
-                        r = sd_netlink_call_async(netdev->manager->rtnl, m, callback, link, 0, NULL);
+                        r = sd_netlink_call_async(netdev->manager->rtnl, NULL, m, callback,
+                                                  link_netlink_destroy_callback, link, 0, __func__);
                         if (r < 0)
                                 return log_netdev_error_errno(netdev, r, "Could not send rtnetlink message: %m");
 
                         link_ref(link);
                 } else {
-                        r = sd_netlink_call_async(netdev->manager->rtnl, m, netdev_create_handler, netdev, 0, NULL);
+                        r = sd_netlink_call_async(netdev->manager->rtnl, NULL, m, netdev_create_handler,
+                                                  netdev_netlink_destroy_callback, netdev, 0, __func__);
                         if (r < 0)
                                 return log_netdev_error_errno(netdev, r, "Could not send rtnetlink message: %m");
 

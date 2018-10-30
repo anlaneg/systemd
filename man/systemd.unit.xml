@@ -39,19 +39,26 @@
     <filename><replaceable>slice</replaceable>.slice</filename>,
     <filename><replaceable>scope</replaceable>.scope</filename></para>
 
-    <para><literallayout><filename>/etc/systemd/system.control/*</filename>
+    <refsect2>
+      <title>System Unit Search Path</title>
+
+      <para><literallayout><filename>/etc/systemd/system.control/*</filename>
 <filename>/run/systemd/system.control/*</filename>
 <filename>/run/systemd/transient/*</filename>
 <filename>/run/systemd/generator.early/*</filename>
 <filename>/etc/systemd/system/*</filename>
+<filename>/etc/systemd/systemd.attached/*</filename>
 <filename>/run/systemd/system/*</filename>
+<filename>/run/systemd/systemd.attached/*</filename>
 <filename>/run/systemd/generator/*</filename>
 <filename>…</filename>
 <filename>/usr/lib/systemd/system/*</filename>
-<filename>/run/systemd/generator.late/*</filename>
-    </literallayout></para>
+<filename>/run/systemd/generator.late/*</filename></literallayout></para>
+    </refsect2>
 
-    <para><literallayout><filename>~/.config/systemd/user.control/*</filename>
+    <refsect2>
+      <title>User Unit Search Path</title>
+      <para><literallayout><filename>~/.config/systemd/user.control/*</filename>
 <filename>$XDG_RUNTIME_DIR/systemd/user.control/*</filename>
 <filename>$XDG_RUNTIME_DIR/systemd/transient/*</filename>
 <filename>$XDG_RUNTIME_DIR/systemd/generator.early/*</filename>
@@ -63,8 +70,9 @@
 <filename>~/.local/share/systemd/user/*</filename>
 <filename>…</filename>
 <filename>/usr/lib/systemd/user/*</filename>
-<filename>$XDG_RUNTIME_DIR/systemd/generator.late/*</filename>
-    </literallayout></para>
+<filename>$XDG_RUNTIME_DIR/systemd/generator.late/*</filename></literallayout></para>
+    </refsect2>
+
   </refsynopsisdiv>
 
   <refsect1>
@@ -857,6 +865,29 @@
       </varlistentry>
 
       <varlistentry>
+        <term><varname>FailureAction=</varname></term>
+        <term><varname>SuccessAction=</varname></term>
+
+        <listitem><para>Configure the action to take when the unit stops and enters a failed state or inactive state.
+        Takes one of <option>none</option>, <option>reboot</option>, <option>reboot-force</option>,
+        <option>reboot-immediate</option>, <option>poweroff</option>, <option>poweroff-force</option>,
+        <option>poweroff-immediate</option>, <option>exit</option>, and <option>exit-force</option>. In system mode,
+        all options are allowed. In user mode, only <option>none</option>, <option>exit</option>, and
+        <option>exit-force</option> are allowed. Both options default to <option>none</option>.</para>
+
+        <para>If <option>none</option> is set, no action will be triggered. <option>reboot</option> causes a reboot
+        following the normal shutdown procedure (i.e. equivalent to <command>systemctl reboot</command>).
+        <option>reboot-force</option> causes a forced reboot which will terminate all processes forcibly but should
+        cause no dirty file systems on reboot (i.e. equivalent to <command>systemctl reboot -f</command>) and
+        <option>reboot-immediate</option> causes immediate execution of the
+        <citerefentry><refentrytitle>reboot</refentrytitle><manvolnum>2</manvolnum></citerefentry> system call, which
+        might result in data loss. Similarly, <option>poweroff</option>, <option>poweroff-force</option>,
+        <option>poweroff-immediate</option> have the effect of powering down the system with similar
+        semantics. <option>exit</option> causes the manager to exit following the normal shutdown procedure, and
+        <option>exit-force</option> causes it terminate without shutting down services.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><varname>JobTimeoutSec=</varname></term>
         <term><varname>JobRunningTimeoutSec=</varname></term>
         <term><varname>JobTimeoutAction=</varname></term>
@@ -912,29 +943,13 @@
       <varlistentry>
         <term><varname>StartLimitAction=</varname></term>
 
-        <listitem><para>Configure the action to take if the rate limit configured with
-        <varname>StartLimitIntervalSec=</varname> and <varname>StartLimitBurst=</varname> is hit. Takes one of
-        <option>none</option>, <option>reboot</option>, <option>reboot-force</option>,
-        <option>reboot-immediate</option>, <option>poweroff</option>, <option>poweroff-force</option> or
-        <option>poweroff-immediate</option>. If <option>none</option> is set, hitting the rate limit will trigger no
-        action besides that the start will not be permitted. <option>reboot</option> causes a reboot following the
-        normal shutdown procedure (i.e. equivalent to <command>systemctl reboot</command>).
-        <option>reboot-force</option> causes a forced reboot which will terminate all processes forcibly but should
-        cause no dirty file systems on reboot (i.e. equivalent to <command>systemctl reboot -f</command>) and
-        <option>reboot-immediate</option> causes immediate execution of the
-        <citerefentry><refentrytitle>reboot</refentrytitle><manvolnum>2</manvolnum></citerefentry> system call, which
-        might result in data loss. Similarly, <option>poweroff</option>, <option>poweroff-force</option>,
-        <option>poweroff-immediate</option> have the effect of powering down the system with similar
-        semantics. Defaults to <option>none</option>.</para></listitem>
+        <listitem><para>Configure an additional action to take if the rate limit configured with
+        <varname>StartLimitIntervalSec=</varname> and <varname>StartLimitBurst=</varname> is hit.  Takes the same
+        values as the setting <varname>FailureAction=</varname>/<varname>SuccessAction=</varname> settings and executes
+        the same actions. If <option>none</option> is set, hitting the rate limit will trigger no action besides that
+        the start will not be permitted. Defaults to <option>none</option>.</para></listitem>
       </varlistentry>
 
-      <varlistentry>
-        <term><varname>FailureAction=</varname></term>
-        <term><varname>SuccessAction=</varname></term>
-        <listitem><para>Configure the action to take when the unit stops and enters a failed state or inactive
-        state. Takes the same values as the setting <varname>StartLimitAction=</varname> setting and executes the same
-        actions. Both options default to <option>none</option>.</para></listitem>
-      </varlistentry>
 
       <varlistentry>
         <term><varname>RebootArgument=</varname></term>
@@ -1478,8 +1493,8 @@
     </variablelist>
 
     <para>The following specifiers are interpreted in the Install
-    section: %n, %N, %p, %i, %j, %U, %u, %m, %H, %b, %v. For their meaning
-    see the next section.
+    section: %n, %N, %p, %i, %j, %g, %G, %U, %u, %m, %H, %b, %v. For their
+    meaning see the next section.
     </para>
   </refsect1>
 
@@ -1605,6 +1620,16 @@
             <entry><literal>%T</literal></entry>
             <entry>Directory for temporary files</entry>
             <entry>This is either <filename>/tmp</filename> or the path <literal>$TMPDIR</literal>, <literal>$TEMP</literal> or <literal>$TMP</literal> are set to.</entry>
+          </row>
+          <row>
+            <entry><literal>%g</literal></entry>
+            <entry>User group</entry>
+            <entry>This is the name of the group running the service manager instance. In case of the system manager this resolves to <literal>root</literal>.</entry>
+          </row>
+          <row>
+            <entry><literal>%G</literal></entry>
+            <entry>User GID</entry>
+            <entry>This is the numeric GID of the user running the service manager instance. In case of the system manager this resolves to <literal>0</literal>.</entry>
           </row>
           <row>
             <entry><literal>%u</literal></entry>

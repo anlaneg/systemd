@@ -36,12 +36,7 @@ static int network_config_compare_func(const void *a, const void *b) {
         if (r != 0)
                 return r;
 
-        if (x->line < y->line)
-                return -1;
-        if (x->line > y->line)
-                return 1;
-
-        return 0;
+        return CMP(x->line, y->line);
 }
 
 const struct hash_ops network_config_hash_ops = {
@@ -85,8 +80,7 @@ void network_apply_anonymize_if_set(Network *network) {
         network->dhcp_client_identifier = DHCP_CLIENT_ID_MAC;
         /* RFC 7844 3.10:
          SHOULD NOT use the Vendor Class Identifier option */
-        /* NOTE: it was not initiallized to any value in network_load_one. */
-        network->dhcp_vendor_class_identifier = false;
+        network->dhcp_vendor_class_identifier = mfree(network->dhcp_vendor_class_identifier);
         /* RFC7844 section 3.6.:
          The client intending to protect its privacy SHOULD only request a
          minimal number of options in the PRL and SHOULD also randomly shuffle
@@ -206,10 +200,6 @@ static int network_load_one(Manager *manager, const char *filename) {
         network->dhcp_client_identifier = DHCP_CLIENT_ID_DUID;
         network->dhcp_route_table = RT_TABLE_MAIN;
         network->dhcp_route_table_set = false;
-        /* NOTE: the following vars were not set to any default,
-         * even if they are commented in the man?
-         * These vars might be overwriten by network_apply_anonymize_if_set */
-        network->dhcp_vendor_class_identifier = false;
         /* NOTE: from man: UseMTU=... Defaults to false*/
         network->dhcp_use_mtu = false;
         /* NOTE: from man: UseTimezone=... Defaults to "no".*/
@@ -285,6 +275,12 @@ static int network_load_one(Manager *manager, const char *filename) {
         /* IPMasquerade=yes implies IPForward=yes */
         if (network->ip_masquerade)
                 network->ip_forward |= ADDRESS_FAMILY_IPV4;
+
+        if (network->mtu > 0 && network->dhcp_use_mtu) {
+                log_warning("MTUBytes= in [Link] section and UseMTU= in [DHCP] section are set in %s. "
+                            "Disabling UseMTU=.", filename);
+                network->dhcp_use_mtu = false;
+        }
 
         LIST_PREPEND(networks, manager->networks, network);
 
@@ -420,6 +416,9 @@ void network_free(Network *network) {
 
                 if (network->manager->networks_by_name)
                         hashmap_remove(network->manager->networks_by_name, network->name);
+
+                if (network->manager->duids_requesting_uuid)
+                        set_remove(network->manager->duids_requesting_uuid, &network->duid);
         }
 
         free(network->name);
@@ -455,26 +454,25 @@ int network_get_by_name(Manager *manager, const char *name, Network **ret) {
         return 0;
 }
 
-int network_get(Manager *manager, struct udev_device *device,
+int network_get(Manager *manager, sd_device *device,
                 const char *ifname, const struct ether_addr *address,
                 Network **ret) {
-        Network *network;
-        struct udev_device *parent;
         const char *path = NULL, *parent_driver = NULL, *driver = NULL, *devtype = NULL;
+        sd_device *parent;
+        Network *network;
 
         assert(manager);
         assert(ret);
 
         if (device) {
-                path = udev_device_get_property_value(device, "ID_PATH");
+                (void) sd_device_get_property_value(device, "ID_PATH", &path);
 
-                parent = udev_device_get_parent(device);
-                if (parent)
-                        parent_driver = udev_device_get_driver(parent);
+                if (sd_device_get_parent(device, &parent) >= 0)
+                        (void) sd_device_get_driver(parent, &parent_driver);
 
-                driver = udev_device_get_property_value(device, "ID_NET_DRIVER");
+                (void) sd_device_get_property_value(device, "ID_NET_DRIVER", &driver);
 
-                devtype = udev_device_get_devtype(device);
+                (void) sd_device_get_devtype(device, &devtype);
         }
 
         LIST_FOREACH(networks, network, manager->networks) {
@@ -489,8 +487,7 @@ int network_get(Manager *manager, struct udev_device *device,
                                 const char *attr;
                                 uint8_t name_assign_type = NET_NAME_UNKNOWN;
 
-                                attr = udev_device_get_sysattr_value(device, "name_assign_type");
-                                if (attr)
+                                if (sd_device_get_sysattr_value(device, "name_assign_type", &attr) >= 0)
                                         (void) safe_atou8(attr, &name_assign_type);
 
                                 if (name_assign_type == NET_NAME_ENUM)

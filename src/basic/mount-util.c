@@ -13,6 +13,7 @@
 #include <libmount.h>
 
 #include "alloc-util.h"
+#include "def.h"
 #include "escape.h"
 #include "extract-word.h"
 #include "fd-util.h"
@@ -471,7 +472,7 @@ int bind_remount_recursive_with_mountinfo(const char *prefix, bool ro, char **bl
 
                                         if (path_startswith(p, *i)) {
                                                 blacklisted = true;
-                                                log_debug("Not remounting %s, because blacklisted by %s, called for %s", p, *i, cleaned);
+                                                log_debug("Not remounting %s blacklisted by %s, called for %s", p, *i, cleaned);
                                                 break;
                                         }
                                 }
@@ -517,7 +518,7 @@ int bind_remount_recursive_with_mountinfo(const char *prefix, bool ro, char **bl
                         (void) get_mount_flags(cleaned, &orig_flags);
                         orig_flags &= ~MS_RDONLY;
 
-                        if (mount(NULL, prefix, NULL, orig_flags|MS_BIND|MS_REMOUNT|(ro ? MS_RDONLY : 0), NULL) < 0)
+                        if (mount(NULL, cleaned, NULL, orig_flags|MS_BIND|MS_REMOUNT|(ro ? MS_RDONLY : 0), NULL) < 0)
                                 return -errno;
 
                         log_debug("Made top-level directory %s a mount point.", prefix);
@@ -543,6 +544,18 @@ int bind_remount_recursive_with_mountinfo(const char *prefix, bool ro, char **bl
                         r = path_is_mount_point(x, NULL, 0);
                         if (IN_SET(r, 0, -ENOENT))
                                 continue;
+                        if (IN_SET(r, -EACCES, -EPERM)) {
+                                /* Even if root user invoke this, submounts under private FUSE or NFS mount points
+                                 * may not be acceessed. E.g.,
+                                 *
+                                 * $ bindfs --no-allow-other ~/mnt/mnt ~/mnt/mnt
+                                 * $ bindfs --no-allow-other ~/mnt ~/mnt
+                                 *
+                                 * Then, root user cannot access the mount point ~/mnt/mnt.
+                                 * In such cases, the submounts are ignored, as we have no way to manage them. */
+                                log_debug_errno(r, "Failed to determine '%s' is mount point or not, ignoring: %m", x);
+                                continue;
+                        }
                         if (r < 0)
                                 return r;
 
@@ -828,8 +841,8 @@ int mount_verbose(
                           strna(type), where, strnull(fl), strempty(o));
         if (mount(what, where, type, f, o) < 0)
                 return log_full_errno(error_log_level, errno,
-                                      "Failed to mount %s on %s (%s \"%s\"): %m",
-                                      strna(type), where, strnull(fl), strempty(o));
+                                      "Failed to mount %s (type %s) on %s (%s \"%s\"): %m",
+                                      strna(what), strna(type), where, strnull(fl), strempty(o));
         return 0;
 }
 
@@ -938,4 +951,47 @@ int mount_option_mangle(
         *ret_remaining_options = TAKE_PTR(ret);
 
         return 0;
+}
+
+int dev_is_devtmpfs(void) {
+        _cleanup_fclose_ FILE *proc_self_mountinfo = NULL;
+        int mount_id, r;
+        char *e;
+
+        r = path_get_mnt_id("/dev", &mount_id);
+        if (r < 0)
+                return r;
+
+        proc_self_mountinfo = fopen("/proc/self/mountinfo", "re");
+        if (!proc_self_mountinfo)
+                return -errno;
+
+        (void) __fsetlocking(proc_self_mountinfo, FSETLOCKING_BYCALLER);
+
+        for (;;) {
+                _cleanup_free_ char *line = NULL;
+                int mid;
+
+                r = read_line(proc_self_mountinfo, LONG_LINE_MAX, &line);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        break;
+
+                if (sscanf(line, "%i", &mid) != 1)
+                        continue;
+
+                if (mid != mount_id)
+                        continue;
+
+                e = strstr(line, " - ");
+                if (!e)
+                        continue;
+
+                /* accept any name that starts with the currently expected type */
+                if (startswith(e + 3, "devtmpfs"))
+                        return true;
+        }
+
+        return false;
 }
