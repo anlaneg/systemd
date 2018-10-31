@@ -125,6 +125,7 @@ struct Manager {
          * not, and the list of jobs may neither. */
 
         /* Active jobs and units */
+	    //保存units
         Hashmap *units;  /* name string => Unit object n:1 */
         Hashmap *units_by_invocation_id;
         Hashmap *jobs;   /* job id => Job object 1:1 */

@@ -2120,6 +2120,7 @@ static int load_configuration(int argc, char **argv, const char **ret_error_mess
         }
 
         /* Initialize default unit */
+        //按systemd约定，默认加载的第一个target是default.target
         if (!arg_default_unit) {
         		//如果未指定default_unit,则使用default.target
                 arg_default_unit = strdup(SPECIAL_DEFAULT_TARGET);

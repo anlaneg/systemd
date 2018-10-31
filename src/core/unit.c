@@ -52,6 +52,7 @@
 #include "user-util.h"
 #include "virt.h"
 
+//各unit类型
 const UnitVTable * const unit_vtable[_UNIT_TYPE_MAX] = {
         [UNIT_SERVICE] = &service_vtable,
         [UNIT_SOCKET] = &socket_vtable,
@@ -176,10 +177,12 @@ static void unit_init(Unit *u) {
         if (kc)
                 kill_context_init(kc);
 
+        //如果有init,调用init
         if (UNIT_VTABLE(u)->init)
                 UNIT_VTABLE(u)->init(u);
 }
 
+//向manager->units中添加unit
 int unit_add_name(Unit *u, const char *text) {
         _cleanup_free_ char *s = NULL, *i = NULL;
         UnitType t;
@@ -241,6 +244,7 @@ int unit_add_name(Unit *u, const char *text) {
                 return r;
         assert(r > 0);
 
+        //添加unit
         r = hashmap_put(u->manager->units, s, u);
         if (r < 0) {
                 (void) set_remove(u->names, s);
@@ -254,6 +258,7 @@ int unit_add_name(Unit *u, const char *text) {
 
                 LIST_PREPEND(units_by_type, u->manager->units_by_type[t], u);
 
+                //初始化unit
                 unit_init(u);
         }
 
@@ -1499,6 +1504,7 @@ int unit_load(Unit *u) {
                 u->fragment_mtime = now(CLOCK_REALTIME);
         }
 
+        //加载unit
         if (UNIT_VTABLE(u)->load) {
                 r = UNIT_VTABLE(u)->load(u);
                 if (r < 0)
@@ -1779,6 +1785,7 @@ static bool unit_verify_deps(Unit *u) {
  *         -ENOLINK:    The necessary dependencies are not fulfilled.
  *         -ESTALE:     This unit has been started before and can't be started a second time
  */
+//unit启动
 int unit_start(Unit *u) {
         UnitActiveState state;
         Unit *following;
@@ -1852,6 +1859,7 @@ int unit_start(Unit *u) {
 
         unit_add_to_dbus_queue(u);
 
+        //将unit启动
         return UNIT_VTABLE(u)->start(u);
 }
 

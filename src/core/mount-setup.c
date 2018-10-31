@@ -178,10 +178,11 @@ static int mount_one(const MountPoint *p, bool relabel) {
                   p->type,
                   strna(p->options));
 
-        if (mount(p->what,
-                  p->where,
-                  p->type,
-                  p->flags,
+        //调用mount实现挂载
+        if (mount(p->what,//要挂载的设备
+                  p->where,//挂载在哪个位置
+                  p->type,//文件系统类型
+                  p->flags,//标记
                   p->options) < 0) {
                 log_full_errno(priority, errno, "Failed to mount %s at %s: %m", p->type, p->where);
                 return (p->mode & MNT_FATAL) ? -errno : 0;

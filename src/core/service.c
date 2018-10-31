@@ -4085,7 +4085,7 @@ const UnitVTable service_vtable = {
         .can_transient = true,
         .can_delegate = true,
 
-        .init = service_init,
+        .init = service_init,/*service初始化函数*/
         .done = service_done,
         .load = service_load,
         .release_resources = service_release_resources,

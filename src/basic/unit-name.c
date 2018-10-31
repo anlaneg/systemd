@@ -39,26 +39,30 @@ bool unit_name_is_valid(const char *n, UnitNameFlags flags) {
         if (_unlikely_(flags == 0))
                 return false;
 
+        //名称为空
         if (isempty(n))
                 return false;
 
+        //名称长度过长
         if (strlen(n) >= UNIT_NAME_MAX)
                 return false;
 
+        //名称必须包含'.',不得以'.'开头
         e = strrchr(n, '.');
         if (!e || e == n)
                 return false;
 
+        //检查后缀是否为合法的unit后缀
         if (unit_type_from_string(e + 1) < 0)
                 return false;
 
         for (i = n, at = NULL; i < e; i++) {
 
                 if (*i == '@' && !at)
-                        at = i;
+                        at = i;//at首次出现，记录其出现的位置
 
                 if (!strchr("@" VALID_CHARS, *i))
-                        return false;
+                        return false;//?????
         }
 
         if (at == n)
@@ -193,6 +197,7 @@ int unit_name_to_prefix_and_instance(const char *n, char **ret) {
         return 0;
 }
 
+//取unit对应的类型，通过名称后缀获取，例如service
 UnitType unit_name_to_type(const char *n) {
         const char *e;
 
@@ -201,8 +206,10 @@ UnitType unit_name_to_type(const char *n) {
         if (!unit_name_is_valid(n, UNIT_NAME_ANY))
                 return _UNIT_TYPE_INVALID;
 
+        //必须有e
         assert_se(e = strrchr(n, '.'));
 
+        //返回unit对应的类型
         return unit_type_from_string(e + 1);
 }
 

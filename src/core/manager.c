@@ -1853,6 +1853,7 @@ Job *manager_get_job(Manager *m, uint32_t id) {
         return hashmap_get(m->jobs, UINT32_TO_PTR(id));
 }
 
+//获取名称为$name的unit
 Unit *manager_get_unit(Manager *m, const char *name) {
         assert(m);
         assert(name);
@@ -1885,6 +1886,7 @@ static int manager_dispatch_target_deps_queue(Manager *m) {
                         Iterator i;
                         void *v;
 
+                        //添加依赖的unit
                         HASHMAP_FOREACH_KEY(v, target, u->dependencies[deps[k]], i) {
                                 r = unit_add_default_target_dependency(u, target);
                                 if (r < 0)
@@ -1914,6 +1916,7 @@ unsigned manager_dispatch_load_queue(Manager *m) {
         while ((u = m->load_queue)) {
                 assert(u->in_load_queue);
 
+                //加载unit
                 unit_load(u);
                 n++;
         }
@@ -1947,13 +1950,16 @@ int manager_load_unit_prepare(
          * load anything from disk. */
 
         if (path && !is_path(path))
+        	   //如果path被给出，则必须为绝对路径
                 return sd_bus_error_setf(e, SD_BUS_ERROR_INVALID_ARGS, "Path %s is not absolute.", path);
 
+        //如果未给出name,则自path中提取
         if (!name)
                 name = basename(path);
 
         t = unit_name_to_type(name);
 
+        //类型无效，或者名称有效
         if (t == _UNIT_TYPE_INVALID || !unit_name_is_valid(name, UNIT_NAME_PLAIN|UNIT_NAME_INSTANCE)) {
                 if (unit_name_is_valid(name, UNIT_NAME_TEMPLATE))
                         return sd_bus_error_setf(e, SD_BUS_ERROR_INVALID_ARGS, "Unit name %s is missing the instance name.", name);
@@ -1961,12 +1967,15 @@ int manager_load_unit_prepare(
                 return sd_bus_error_setf(e, SD_BUS_ERROR_INVALID_ARGS, "Unit name %s is not valid.", name);
         }
 
+        //获取指定名称的unit
         ret = manager_get_unit(m, name);
         if (ret) {
+        		//名称已存在，返回
                 *_ret = ret;
                 return 1;
         }
 
+        //构造unit
         ret = cleanup_ret = unit_new(m, unit_vtable[t]->object_size);
         if (!ret)
                 return -ENOMEM;
@@ -2008,7 +2017,7 @@ int manager_load_unit(
 
         r = manager_load_unit_prepare(m, name, path, e, _ret);
         if (r != 0)
-                return r;
+                return r;//加载失败
 
         manager_dispatch_load_queue(m);
 
@@ -2028,6 +2037,7 @@ int manager_load_startable_unit_or_warn(
         Unit *unit;
         int r;
 
+        //加载名称为name的unit
         r = manager_load_unit(m, name, path, &error, &unit);
         if (r < 0)
                 return log_error_errno(r, "Failed to load %s %s: %s",
@@ -2131,6 +2141,7 @@ static int manager_dispatch_run_queue(sd_event_source *source, void *userdata) {
         assert(source);
         assert(m);
 
+        //遍历执行m->run_queue上所有job
         while ((j = m->run_queue)) {
                 assert(j->installed);
                 assert(j->in_run_queue);

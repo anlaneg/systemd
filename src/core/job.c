@@ -509,6 +509,7 @@ static void job_change_type(Job *j, JobType newtype) {
         j->type = newtype;
 }
 
+//执行job
 static int job_perform_on_unit(Job **j) {
         uint32_t id;
         Manager *m;
@@ -527,23 +528,23 @@ static int job_perform_on_unit(Job **j) {
 
         m = (*j)->manager;
         u = (*j)->unit;
-        t = (*j)->type;
+        t = (*j)->type;//取job类型
         id = (*j)->id;
 
         switch (t) {
                 case JOB_START:
-                        r = unit_start(u);
+                        r = unit_start(u);//开启unit
                         break;
 
                 case JOB_RESTART:
                         t = JOB_STOP;
                         _fallthrough_;
                 case JOB_STOP:
-                        r = unit_stop(u);
+                        r = unit_stop(u);//停止unit
                         break;
 
                 case JOB_RELOAD:
-                        r = unit_reload(u);
+                        r = unit_reload(u);//重新加载unit
                         break;
 
                 default:
@@ -559,6 +560,7 @@ static int job_perform_on_unit(Job **j) {
         return r;
 }
 
+//运行job
 int job_run_and_invalidate(Job *j) {
         int r;
 
@@ -567,6 +569,7 @@ int job_run_and_invalidate(Job *j) {
         assert(j->type < _JOB_TYPE_MAX_IN_TRANSACTION);
         assert(j->in_run_queue);
 
+        //将j自j->manager->run_queue上移走
         LIST_REMOVE(run_queue, j->manager->run_queue, j);
         j->in_run_queue = false;
 
@@ -596,7 +599,7 @@ int job_run_and_invalidate(Job *j) {
                 case JOB_START:
                 case JOB_STOP:
                 case JOB_RESTART:
-                        r = job_perform_on_unit(&j);
+                        r = job_perform_on_unit(&j);//执行job对应的unit
 
                         /* If the unit type does not support starting/stopping,
                          * then simply wait. */
@@ -1032,6 +1035,7 @@ int job_start_timer(Job *j, bool job_running) {
         return 0;
 }
 
+//加入job
 void job_add_to_run_queue(Job *j) {
         assert(j);
         assert(j->installed);

@@ -422,7 +422,7 @@ typedef struct UnitVTable {
          * not allocate memory, and is called with zero-initialized
          * data. It should hence only initialize variables that need
          * to be set != 0. */
-        void (*init)(Unit *u);
+        void (*init)(Unit *u);//unit初始化
 
         /* This should free all type-specific variables. It should be
          * idempotent. */
@@ -431,7 +431,7 @@ typedef struct UnitVTable {
         /* Actually load data from disk. This may fail, and should set
          * load_state to UNIT_LOADED, UNIT_MERGED or leave it at
          * UNIT_STUB if no configuration could be found. */
-        int (*load)(Unit *u);
+        int (*load)(Unit *u);//加载unit
 
         /* During deserialization we only record the intended state to return to. With coldplug() we actually put the
          * deserialized state in effect. This is where unit_notify() should be called to start things up. */
@@ -443,8 +443,11 @@ typedef struct UnitVTable {
 
         void (*dump)(Unit *u, FILE *f, const char *prefix);
 
+        //启动unit
         int (*start)(Unit *u);
+        //停止unit
         int (*stop)(Unit *u);
+        //重新加载unit
         int (*reload)(Unit *u);
 
         int (*kill)(Unit *u, KillWho w, int signo, sd_bus_error *error);
