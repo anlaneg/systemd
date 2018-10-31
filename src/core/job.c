@@ -1041,7 +1041,7 @@ void job_add_to_run_queue(Job *j) {
         assert(j->installed);
 
         if (j->in_run_queue)
-                return;
+                return;//已加入队列，退出
 
         if (!j->manager->run_queue)
                 sd_event_source_set_enabled(j->manager->run_queue_event_source, SD_EVENT_ONESHOT);

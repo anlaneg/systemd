@@ -148,7 +148,7 @@ struct Job {
         JobResult result;
 
         bool installed:1;
-        bool in_run_queue:1;
+        bool in_run_queue:1;//标记job在queue中
         bool matters_to_anchor:1;
         bool in_dbus_queue:1;
         bool sent_dbus_new_signal:1;
