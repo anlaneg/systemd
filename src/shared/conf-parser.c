@@ -66,13 +66,13 @@ int config_item_table_lookup(
 }
 
 int config_item_perf_lookup(
-                const void *table,
-                const char *section,
-                const char *lvalue,
-                ConfigParserCallback *func,
-                int *ltype,
-                void **data,
-                void *userdata) {
+                const void *table,//查询函数
+                const char *section,//段名称
+                const char *lvalue,//key值
+                ConfigParserCallback *func,/*出参，解析key value的值*/
+                int *ltype,/*解析key value的类型*/
+                void **data,/*出参，parse函数对应的参数*/
+                void *userdata/*入参，计算data*/) {
 
         ConfigPerfItemLookup lookup = (ConfigPerfItemLookup) table;
         const ConfigPerfItem *p;
@@ -88,17 +88,21 @@ int config_item_perf_lookup(
         else {
                 char *key;
 
+                //构造查询key
                 key = strjoin(section, ".", lvalue);
                 if (!key)
                         return -ENOMEM;
 
+                //查询key
                 p = lookup(key, strlen(key));
                 free(key);
         }
 
+        //查询不到，返回0
         if (!p)
                 return 0;
 
+        //返回解析函数，值类型，参数
         *func = p->parse;
         *ltype = p->ltype;
         *data = (uint8_t*) userdata + p->offset;
@@ -114,8 +118,8 @@ static int next_assignment(
                 const void *table,
                 const char *section,
                 unsigned section_line,
-                const char *lvalue,
-                const char *rvalue,
+                const char *lvalue,//key值
+                const char *rvalue,//value值
                 ConfigParseFlags flags,
                 void *userdata) {
 
@@ -130,10 +134,12 @@ static int next_assignment(
         assert(lvalue);
         assert(rvalue);
 
+        //获取解析用的func
         r = lookup(table, section, lvalue, &func, &ltype, &data, userdata);
         if (r < 0)
                 return r;
 
+        //调用解析用的func
         if (r > 0) {
                 if (func)
                         return func(unit, filename, line, section, section_line,
@@ -154,13 +160,13 @@ static int parse_line(
                 const char* unit,
                 const char *filename,
                 unsigned line,
-                const char *sections,
+                const char *sections/*容许的section名称数组*/,
                 ConfigItemLookup lookup,
                 const void *table,
                 ConfigParseFlags flags,
-                char **section,
-                unsigned *section_line,
-                bool *section_ignored,
+                char **section/*记录当前的section名称*/,
+                unsigned *section_line/*段所在行号*/,
+                bool *section_ignored/*段名称是否被忽略*/,
                 char *l,
                 void *userdata) {
 
@@ -231,15 +237,16 @@ static int parse_line(
 
                 //检查sections中是否包含对应的n
                 if (sections && !nulstr_contains(sections, n)) {
-
+                		//sections中不包含n
                         if (!(flags & CONFIG_PARSE_RELAXED) && !startswith(n, "X-"))
                                 log_syntax(unit, LOG_WARNING, filename, line, 0, "Unknown section '%s'. Ignoring.", n);
 
                         free(n);
                         *section = mfree(*section);
                         *section_line = 0;
-                        *section_ignored = true;
+                        *section_ignored = true;//忽略此section
                 } else {
+                		//使用此section
                         free_and_replace(*section, n);
                         *section_line = line;
                         *section_ignored = false;
@@ -269,11 +276,11 @@ static int parse_line(
 
         return next_assignment(unit,
                                filename,
-                               line,
+                               line,//行号
                                lookup,
                                table,
-                               *section,
-                               *section_line,
+                               *section,//此行所属的section
+                               *section_line,//此行所属的section所在的行号
                                strstrip(l),//此行表示的key
                                strstrip(e),//此行表示的value
                                flags,
@@ -281,7 +288,8 @@ static int parse_line(
 }
 
 /* Go through the file and parse each line */
-int config_parse(const char *unit,
+//解析parse
+int config_parse(const char *unit/*unit名称*/,
                  const char *filename,
                  FILE *f,
                  const char *sections,
@@ -292,7 +300,7 @@ int config_parse(const char *unit,
 
         _cleanup_free_ char *section = NULL, *continuation = NULL;
         _cleanup_fclose_ FILE *ours = NULL;
-        unsigned line = 0, section_line = 0;
+        unsigned line = 0/*行号*/, section_line = 0;
         bool section_ignored = false;
         int r;
 
@@ -390,7 +398,7 @@ int config_parse(const char *unit,
                 //解析单行数据
                 r = parse_line(unit,
                                filename,
-                               ++line,
+                               ++line,//增加行号
                                sections,
                                lookup,
                                table,

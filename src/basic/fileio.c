@@ -1607,6 +1607,7 @@ int mkdtemp_malloc(const char *template, char **ret) {
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(FILE*, funlockfile);
 
+//自file读取一行数据
 int read_line(FILE *f, size_t limit, char **ret) {
         _cleanup_free_ char *buffer = NULL;
         size_t n = 0, allocated = 0, count = 0;

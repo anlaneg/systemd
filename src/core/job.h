@@ -111,9 +111,10 @@ struct JobDependency {
 };
 
 struct Job {
-        Manager *manager;
-        Unit *unit;
+        Manager *manager;//从属于那个manager
+        Unit *unit;//job对应的unit
 
+        //提供到不同队列的挂载点
         LIST_FIELDS(Job, transaction);
         LIST_FIELDS(Job, run_queue);
         LIST_FIELDS(Job, dbus_queue);
@@ -126,7 +127,7 @@ struct Job {
         Job* marker;
         unsigned generation;
 
-        uint32_t id;
+        uint32_t id;//job的id号（同一个manager下唯一）
 
         JobType type;
         JobState state;
@@ -148,13 +149,13 @@ struct Job {
         JobResult result;
 
         bool installed:1;
-        bool in_run_queue:1;//标记job在queue中
+        bool in_run_queue:1;//标记job在run_queue中
         bool matters_to_anchor:1;
-        bool in_dbus_queue:1;
+        bool in_dbus_queue:1;//标记job在dbus_queue中
         bool sent_dbus_new_signal:1;
         bool ignore_order:1;
         bool irreversible:1;
-        bool in_gc_queue:1;
+        bool in_gc_queue:1;//标记job在gc_queue中
         bool ref_by_private_bus:1;
         bool reloaded:1;
 };

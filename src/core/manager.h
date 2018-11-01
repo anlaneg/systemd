@@ -132,7 +132,7 @@ struct Manager {
 
         /* To make it easy to iterate through the units of a specific
          * type we maintain a per type linked list */
-        LIST_HEAD(Unit, units_by_type[_UNIT_TYPE_MAX]);
+        LIST_HEAD(Unit, units_by_type[_UNIT_TYPE_MAX]);//
 
         /* Units that need to be loaded */
         LIST_HEAD(Unit, load_queue); /* this is actually more a stack than a queue, but uh. */
@@ -346,7 +346,7 @@ struct Manager {
         unsigned n_failed_jobs;
 
         /* Jobs in progress watching */
-        unsigned n_running_jobs;
+        unsigned n_running_jobs;//当前运行的jobs数目
         unsigned n_on_console;
         unsigned jobs_in_progress_iteration;
 

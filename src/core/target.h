@@ -5,6 +5,7 @@
 
 typedef struct Target Target;
 
+//Target类型的Unit,继续自unit
 struct Target {
         Unit meta;
 

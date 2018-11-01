@@ -750,13 +750,14 @@ static int service_load(Unit *u) {
         assert(s);
 
         /* Load a .service file */
+        //加载service　文件，填充unit
         r = unit_load_fragment(u);
         if (r < 0)
                 return r;
 
         /* Still nothing found? Then let's give up */
         if (u->load_state == UNIT_STUB)
-                return -ENOENT;
+                return -ENOENT;//加载失败
 
         /* This is a new unit? Then let's add in some extras */
         if (u->load_state == UNIT_LOADED) {
@@ -4087,14 +4088,14 @@ const UnitVTable service_vtable = {
 
         .init = service_init,/*service初始化函数*/
         .done = service_done,
-        .load = service_load,
+        .load = service_load,/*service load函数*/
         .release_resources = service_release_resources,
 
         .coldplug = service_coldplug,
 
         .dump = service_dump,
 
-        .start = service_start,
+        .start = service_start,/*service start函数*/
         .stop = service_stop,
         .reload = service_reload,
 

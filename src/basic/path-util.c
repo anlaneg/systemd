@@ -59,15 +59,18 @@ int path_split_and_make_absolute(const char *p, char ***ret) {
         return r;
 }
 
+//构造路径
 char *path_make_absolute(const char *p, const char *prefix) {
         assert(p);
 
         /* Makes every item in the list an absolute path by prepending
          * the prefix, if specified and necessary */
 
+        //p如果是绝对路径或者前缀为空，则直接返回p
         if (path_is_absolute(p) || isempty(prefix))
                 return strdup(p);
 
+        //将prefix与p合起来
         if (endswith(prefix, "/"))
                 return strjoin(prefix, p);
         else
@@ -329,7 +332,7 @@ char **path_strv_resolve_uniq(char **l, const char *root) {
 
 char *path_simplify(char *path, bool kill_dots) {
         char *f, *t;
-        bool slash = false, ignore_slash = false, absolute;
+        bool slash = false, ignore_slash = false, absolute/*绝对路径*/;
 
         assert(path);
 

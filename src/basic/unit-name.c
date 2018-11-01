@@ -56,26 +56,32 @@ bool unit_name_is_valid(const char *n, UnitNameFlags flags) {
         if (unit_type_from_string(e + 1) < 0)
                 return false;
 
-        for (i = n, at = NULL; i < e; i++) {
+        //校验文件名称，必须为约定的合法字符
+        for (i = n, at = NULL; i < e/*'.'所在的位置*/; i++) {
 
                 if (*i == '@' && !at)
                         at = i;//at首次出现，记录其出现的位置
 
+                //字符必须为VALID_CHARS及'@'
                 if (!strchr("@" VALID_CHARS, *i))
-                        return false;//?????
+                        return false;
         }
 
+        //'@'符不能是第一个
         if (at == n)
                 return false;
 
+        //如果有UNIT_NAME_PLAIN标记，则不容许有@号
         if (flags & UNIT_NAME_PLAIN)
                 if (!at)
                         return true;
 
+        //如果UNIT_NAME_INSTANCE标记，则＠必须存在，且必须不能是'.'号之前的字符
         if (flags & UNIT_NAME_INSTANCE)
                 if (at && e > at + 1)
                         return true;
 
+        //如果有unit_name_template标记，则@必须是'.'号之前的字符
         if (flags & UNIT_NAME_TEMPLATE)
                 if (at && e == at + 1)
                         return true;
@@ -104,6 +110,7 @@ bool unit_instance_is_valid(const char *i) {
         /* We allow additional @ in the instance string, we do not
          * allow them in the prefix! */
 
+        //检查字符串i是否合首valid_chars约束
         return in_charset(i, "@" VALID_CHARS);
 }
 
@@ -144,6 +151,7 @@ int unit_name_to_prefix(const char *n, char **ret) {
         return 0;
 }
 
+//取实例名称
 int unit_name_to_instance(const char *n, char **instance) {
         const char *p, *d;
         char *i;
@@ -155,7 +163,7 @@ int unit_name_to_instance(const char *n, char **instance) {
                 return -EINVAL;
 
         /* Everything past the first @ and before the last . is the instance */
-        p = strchr(n, '@');
+        p = strchr(n, '@');//找到'@'
         if (!p) {
                 *instance = NULL;
                 return 0;
@@ -163,10 +171,11 @@ int unit_name_to_instance(const char *n, char **instance) {
 
         p++;
 
-        d = strrchr(p, '.');
+        d = strrchr(p, '.');//找到'.'
         if (!d)
                 return -EINVAL;
 
+        //复制p,d之间的字符串返回
         i = strndup(p, d-p);
         if (!i)
                 return -ENOMEM;
@@ -463,21 +472,28 @@ int unit_name_replace_instance(const char *f, const char *i, char **ret) {
         assert(i);
         assert(ret);
 
+        //f必须为有效的实例名或者模板名
         if (!unit_name_is_valid(f, UNIT_NAME_INSTANCE|UNIT_NAME_TEMPLATE))
                 return -EINVAL;
+
+        //f必须为有效的名称
         if (!unit_instance_is_valid(i))
                 return -EINVAL;
 
+        //一定包含'@',一定包含'.'
         assert_se(p = strchr(f, '@'));
         assert_se(e = strrchr(f, '.'));
 
-        a = p - f;
-        b = strlen(i);
+        a = p - f;//到'@‘号的偏移量
+        b = strlen(i);//实例名长度
 
+        //对于字符串"XXXX@XX.XXX"，在@后添加i，申请必要的长度(含'\0')
         s = new(char, a + 1 + b + strlen(e) + 1);
         if (!s)
                 return -ENOMEM;
 
+        //1.先copy头部f,p+1范围,存入s,返回s;2.再copy　i字符串到s,返回s;3.再copy e到s
+        //这个实现看起来是错的。
         strcpy(mempcpy(mempcpy(s, f, a + 1), i, b), e);
 
         *ret = s;

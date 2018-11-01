@@ -50,6 +50,7 @@ static clockid_t map_clock_id(clockid_t c) {
         }
 }
 
+//取当前时间
 usec_t now(clockid_t clock_id) {
         struct timespec ts;
 

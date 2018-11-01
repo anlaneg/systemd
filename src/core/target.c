@@ -113,12 +113,13 @@ static void target_dump(Unit *u, FILE *f, const char *prefix) {
                 prefix, target_state_to_string(t->state));
 }
 
+//target启动
 static int target_start(Unit *u) {
         Target *t = TARGET(u);
         int r;
 
         assert(t);
-        assert(t->state == TARGET_DEAD);
+        assert(t->state == TARGET_DEAD);//默认状态（０）
 
         r = unit_acquire_invocation_id(u);
         if (r < 0)
@@ -184,6 +185,7 @@ _pure_ static const char *target_sub_state_to_string(Unit *u) {
         return target_state_to_string(TARGET(u)->state);
 }
 
+//target类型unit
 const UnitVTable target_vtable = {
         .object_size = sizeof(Target),
 

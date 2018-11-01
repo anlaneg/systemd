@@ -8,8 +8,10 @@
 
 #include "macro.h"
 
+//申请n个t类型大小的内存
 #define new(t, n) ((t*) malloc_multiply(sizeof(t), (n)))
 
+//申请n个t类型大小的内存（并清０)
 #define new0(t, n) ((t*) calloc((n), sizeof(t)))
 
 #define newa(t, n)                                              \
@@ -67,10 +69,12 @@ static inline void freep(void *p) {
 
 #define _cleanup_free_ _cleanup_(freep)
 
+//检查size*need是否超过64bit可提供的内存大小
 static inline bool size_multiply_overflow(size_t size, size_t need) {
         return _unlikely_(need != 0 && size > (SIZE_MAX / need));
 }
 
+//申请size*need内存
 _malloc_  _alloc_(1, 2) static inline void *malloc_multiply(size_t size, size_t need) {
         if (size_multiply_overflow(size, need))
                 return NULL;

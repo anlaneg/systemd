@@ -26,6 +26,7 @@
 #include "unit.h"
 #include "virt.h"
 
+//创建job
 Job* job_new_raw(Unit *unit) {
         Job *j;
 
@@ -46,6 +47,7 @@ Job* job_new_raw(Unit *unit) {
         return j;
 }
 
+//指定type构造job
 Job* job_new(Unit *unit, JobType type) {
         Job *j;
 
@@ -105,11 +107,13 @@ void job_free(Job *j) {
         free(j);
 }
 
+//设置job当前状态
 static void job_set_state(Job *j, JobState state) {
         assert(j);
         assert(state >= 0);
         assert(state < _JOB_STATE_MAX);
 
+        //已设置状态
         if (j->state == state)
                 return;
 
@@ -579,6 +583,7 @@ int job_run_and_invalidate(Job *j) {
         if (!job_is_runnable(j))
                 return -EAGAIN;
 
+        //启动超时timer
         job_start_timer(j, true);
         job_set_state(j, JOB_RUNNING);
         job_add_to_dbus_queue(j);
@@ -986,6 +991,7 @@ static int job_dispatch_timer(sd_event_source *s, uint64_t monotonic, void *user
         return 0;
 }
 
+//启动job超时timer
 int job_start_timer(Job *j, bool job_running) {
         int r;
         usec_t timeout_time, old_timeout_time;
@@ -994,10 +1000,12 @@ int job_start_timer(Job *j, bool job_running) {
                 j->begin_running_usec = now(CLOCK_MONOTONIC);
 
                 if (j->unit->job_running_timeout == USEC_INFINITY)
-                        return 0;
+                        return 0;//如果超时时间不限，则直接返回0
 
+                //计算超时时间
                 timeout_time = usec_add(j->begin_running_usec, j->unit->job_running_timeout);
 
+                //如果有timer,则仅当首个timeout时间大于timeout_time时才更新
                 if (j->timer_event_source) {
                         /* Update only if JobRunningTimeoutSec= results in earlier timeout */
                         r = sd_event_source_get_time(j->timer_event_source, &old_timeout_time);
@@ -1021,6 +1029,7 @@ int job_start_timer(Job *j, bool job_running) {
                 timeout_time = usec_add(j->begin_usec, j->unit->job_timeout);
         }
 
+        //添加超时定时器（针对j做job_dispatch_timer)
         r = sd_event_add_time(
                         j->manager->event,
                         &j->timer_event_source,
@@ -1030,6 +1039,7 @@ int job_start_timer(Job *j, bool job_running) {
         if (r < 0)
                 return r;
 
+        //设置timer事件描述
         (void) sd_event_source_set_description(j->timer_event_source, "job-start");
 
         return 0;

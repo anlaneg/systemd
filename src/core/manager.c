@@ -1935,7 +1935,7 @@ int manager_load_unit_prepare(
                 const char *name,
                 const char *path,
                 sd_bus_error *e,
-                Unit **_ret) {
+                Unit **_ret/*出参，返回加载后的unit*/) {
 
         _cleanup_(unit_freep) Unit *cleanup_ret = NULL;
         Unit *ret;
@@ -1959,11 +1959,14 @@ int manager_load_unit_prepare(
 
         t = unit_name_to_type(name);
 
-        //类型无效，或者名称有效
+        //类型无效，且名称不是有效的name_plain,name_instance格式
         if (t == _UNIT_TYPE_INVALID || !unit_name_is_valid(name, UNIT_NAME_PLAIN|UNIT_NAME_INSTANCE)) {
+        		//检查name是否为合法的name_template格式
                 if (unit_name_is_valid(name, UNIT_NAME_TEMPLATE))
+                		//指出unit需要实体化
                         return sd_bus_error_setf(e, SD_BUS_ERROR_INVALID_ARGS, "Unit name %s is missing the instance name.", name);
 
+                //遇到无效的unit名称
                 return sd_bus_error_setf(e, SD_BUS_ERROR_INVALID_ARGS, "Unit name %s is not valid.", name);
         }
 
@@ -1986,6 +1989,7 @@ int manager_load_unit_prepare(
                         return -ENOMEM;
         }
 
+        //向manager->units中添加unit
         r = unit_add_name(ret, name);
         if (r < 0)
                 return r;
@@ -2005,7 +2009,7 @@ int manager_load_unit(
                 const char *name,
                 const char *path,
                 sd_bus_error *e,
-                Unit **_ret) {
+                Unit **_ret/*出参，返回加载后的unit*/) {
 
         int r;
 
@@ -2027,9 +2031,9 @@ int manager_load_unit(
 
 int manager_load_startable_unit_or_warn(
                 Manager *m,
-                const char *name,
-                const char *path,
-                Unit **ret) {
+                const char *name,//unit名称
+                const char *path,//unit文件所在路径
+                Unit **ret/*出参，指出加载后的unit*/) {
 
         /* Load a unit, make sure it loaded fully and is not masked. */
 

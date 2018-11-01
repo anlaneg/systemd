@@ -89,6 +89,7 @@ static enum {
         ACTION_DUMP_CONFIGURATION_ITEMS,
         ACTION_DUMP_BUS_PROPERTIES,
 } arg_action = ACTION_RUN;
+//默认unit名称
 static char *arg_default_unit = NULL;
 static bool arg_system = false;
 static bool arg_dump_core = true;
@@ -2545,6 +2546,7 @@ int main(int argc, char *argv[]) {
         arg_serialization = safe_fclose(arg_serialization);
 
         if (queue_default_job) {
+        		//将默认job入队
                 r = do_queue_default_job(m, &error_message);
                 if (r < 0)
                         goto finish;

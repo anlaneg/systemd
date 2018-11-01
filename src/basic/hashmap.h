@@ -148,6 +148,7 @@ static inline int ordered_hashmap_replace(OrderedHashmap *h, const void *key, vo
 }
 
 void *internal_hashmap_get(HashmapBase *h, const void *key);
+//哈希表查找函数
 static inline void *hashmap_get(Hashmap *h, const void *key) {
         return internal_hashmap_get(HASHMAP_BASE(h), key);
 }

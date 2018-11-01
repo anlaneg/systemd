@@ -676,12 +676,15 @@ char *cellescape(char *buf, size_t len, const char *s) {
         return buf;
 }
 
+//检查nulstr数组中是否包含needle
 bool nulstr_contains(const char *nulstr, const char *needle) {
         const char *i;
 
+        //null时直接返回false
         if (!nulstr)
                 return false;
 
+        //遍历多个字符串，如果包含needle,则返回true
         NULSTR_FOREACH(i, nulstr)
                 if (streq(i, needle))
                         return true;

@@ -81,6 +81,7 @@ struct ServiceFDStore {
         LIST_FIELDS(ServiceFDStore, fd_store);
 };
 
+//Service类型的Unit(继续自unit)
 struct Service {
         Unit meta;
 

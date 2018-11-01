@@ -54,7 +54,7 @@
 
 //各unit类型
 const UnitVTable * const unit_vtable[_UNIT_TYPE_MAX] = {
-        [UNIT_SERVICE] = &service_vtable,
+        [UNIT_SERVICE] = &service_vtable,//service类型的unit对象
         [UNIT_SOCKET] = &socket_vtable,
         [UNIT_TARGET] = &target_vtable,
         [UNIT_DEVICE] = &device_vtable,
@@ -69,10 +69,12 @@ const UnitVTable * const unit_vtable[_UNIT_TYPE_MAX] = {
 
 static void maybe_warn_about_dependency(Unit *u, const char *other, UnitDependency dependency);
 
+//构造unit
 Unit *unit_new(Manager *m, size_t size) {
         Unit *u;
 
         assert(m);
+        //实际要占用的内存大小一定大于unit
         assert(size >= sizeof(Unit));
 
         u = malloc0(size);
@@ -90,7 +92,7 @@ Unit *unit_new(Manager *m, size_t size) {
         u->unit_file_preset = -1;
         u->on_failure_job_mode = JOB_REPLACE;
         u->cgroup_inotify_wd = -1;
-        u->job_timeout = USEC_INFINITY;
+        u->job_timeout = USEC_INFINITY;//默认超时时间无限
         u->job_running_timeout = USEC_INFINITY;
         u->ref_uid = UID_INVALID;
         u->ref_gid = GID_INVALID;
@@ -136,6 +138,7 @@ bool unit_has_name(Unit *u, const char *name) {
         return set_contains(u->names, (char*) name);
 }
 
+//unit初始化
 static void unit_init(Unit *u) {
         CGroupContext *cc;
         ExecContext *ec;
@@ -177,7 +180,7 @@ static void unit_init(Unit *u) {
         if (kc)
                 kill_context_init(kc);
 
-        //如果有init,调用init
+        //如果unit相应类型有init,调用init
         if (UNIT_VTABLE(u)->init)
                 UNIT_VTABLE(u)->init(u);
 }
@@ -191,8 +194,10 @@ int unit_add_name(Unit *u, const char *text) {
         assert(u);
         assert(text);
 
+        //名称是否为合法的name_template
         if (unit_name_is_valid(text, UNIT_NAME_TEMPLATE)) {
 
+        		//为模板名称时，需要指出实例名
                 if (!u->instance)
                         return -EINVAL;
 
@@ -205,14 +210,19 @@ int unit_add_name(Unit *u, const char *text) {
                         return -ENOMEM;
         }
 
+        //如果已存在，则直接返回０
         if (set_contains(u->names, s))
                 return 0;
+
+        //如果manager中已存在此units，则返回已存在
         if (hashmap_contains(u->manager->units, s))
                 return -EEXIST;
 
+        //检查s是否为合法的plain名称或者实例名称
         if (!unit_name_is_valid(s, UNIT_NAME_PLAIN|UNIT_NAME_INSTANCE))
                 return -EINVAL;
 
+        //检查s必须有合法的unit type
         t = unit_name_to_type(s);
         if (t < 0)
                 return -EINVAL;
@@ -220,10 +230,12 @@ int unit_add_name(Unit *u, const char *text) {
         if (u->type != _UNIT_TYPE_INVALID && t != u->type)
                 return -EINVAL;
 
+        //取unit名称中的instance
         r = unit_name_to_instance(s, &i);
         if (r < 0)
                 return r;
 
+        //如果有instance,但并非容许template的unit,则名称无效
         if (i && !unit_type_may_template(t))
                 return -EINVAL;
 
@@ -236,6 +248,7 @@ int unit_add_name(Unit *u, const char *text) {
         if (!unit_type_may_alias(t) && !set_isempty(u->names))
                 return -EEXIST;
 
+        //unit过多时报错
         if (hashmap_size(u->manager->units) >= MANAGER_MAX_NAMES)
                 return -E2BIG;
 
@@ -251,11 +264,13 @@ int unit_add_name(Unit *u, const char *text) {
                 return r;
         }
 
+        //如果未指出unit类型，则更新unit类型
         if (u->type == _UNIT_TYPE_INVALID) {
                 u->type = t;
                 u->id = s;
                 u->instance = TAKE_PTR(i);
 
+                //挂载节点在相应的type链上
                 LIST_PREPEND(units_by_type, u->manager->units_by_type[t], u);
 
                 //初始化unit

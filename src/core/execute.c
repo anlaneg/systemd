@@ -2864,6 +2864,7 @@ static int exec_child(
                 const char *vc = params->confirm_spawn;
                 _cleanup_free_ char *cmdline = NULL;
 
+                //构造命令行
                 cmdline = exec_command_line(command->argv);
                 if (!cmdline) {
                         *exit_status = EXIT_MEMORY;
@@ -2981,6 +2982,7 @@ static int exec_child(
                 return log_unit_error_errno(unit, r, "Failed to set up standard input: %m");
         }
 
+        //重定向输出
         r = setup_output(unit, context, params, STDOUT_FILENO, socket_fd, named_iofds, basename(command->path), uid, gid, &journal_stream_dev, &journal_stream_ino);
         if (r < 0) {
                 *exit_status = EXIT_STDOUT;
@@ -3527,6 +3529,7 @@ static int exec_child(
                 }
         }
 
+        //执行要启动的命令
         execve(command->path, final_argv, accum_env);
         r = -errno;
 
@@ -3628,6 +3631,7 @@ int exec_spawn(Unit *unit,
         if (pid == 0) {
                 int exit_status = EXIT_SUCCESS;
 
+                //fork后执行命令
                 r = exec_child(unit,
                                command,
                                context,

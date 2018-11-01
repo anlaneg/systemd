@@ -512,6 +512,7 @@ int config_parse_exec_oom_score_adjust(
         return 0;
 }
 
+//解析配置文件行
 int config_parse_exec(
                 const char *unit,
                 const char *filename,
@@ -4361,6 +4362,7 @@ static int merge_by_names(Unit **u, Set *names, const char *id) {
         return 0;
 }
 
+//加载unit对应的配置文件，并填充u中的字段
 static int load_from_path(Unit *u, const char *path) {
         _cleanup_set_free_free_ Set *symlink_names = NULL;
         _cleanup_fclose_ FILE *f = NULL;
@@ -4373,10 +4375,12 @@ static int load_from_path(Unit *u, const char *path) {
         assert(u);
         assert(path);
 
+        //构造set
         symlink_names = set_new(&string_hash_ops);
         if (!symlink_names)
                 return -ENOMEM;
 
+        //绝对路径
         if (path_is_absolute(path)) {
 
                 filename = strdup(path);
@@ -4393,11 +4397,13 @@ static int load_from_path(Unit *u, const char *path) {
         } else  {
                 char **p;
 
+                //遍历search_path
                 STRV_FOREACH(p, u->manager->lookup_paths.search_path) {
 
                         /* Instead of opening the path right away, we manually
                          * follow all symlinks and add their name to our unit
                          * name set while doing so */
+                		//构造文件路径
                         filename = path_make_absolute(path, *p);
                         if (!filename)
                                 return -ENOMEM;
@@ -4456,9 +4462,10 @@ static int load_from_path(Unit *u, const char *path) {
                 u->fragment_mtime = timespec_load(&st.st_mtim);
 
                 /* Now, parse the file contents */
-                r = config_parse(u->id, filename, f,
+                //解析配置文件，并填充u对象
+                r = config_parse(u->id, filename/*配置文件路径*/, f/*配置文件*/,
                                  UNIT_VTABLE(u)->sections,
-                                 config_item_perf_lookup, load_fragment_gperf_lookup,
+                                 config_item_perf_lookup, load_fragment_gperf_lookup/*通过此函数完成配置文件中字段的解析及设置*/,
                                  CONFIG_PARSE_ALLOW_INCLUDE, u);
                 if (r < 0)
                         return r;
@@ -4499,11 +4506,13 @@ int unit_load_fragment(Unit *u) {
 
         /* Try to find an alias we can load this with */
         if (u->load_state == UNIT_STUB) {
+        		//遍历name
                 SET_FOREACH(t, u->names, i) {
 
                         if (t == u->id)
                                 continue;
 
+                        //自path处加载unit
                         r = load_from_path(u, t);
                         if (r < 0)
                                 return r;

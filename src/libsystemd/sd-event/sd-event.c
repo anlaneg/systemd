@@ -1375,6 +1375,7 @@ _public_ int sd_event_add_defer(
         assert_return(e->state != SD_EVENT_FINISHED, -ESTALE);
         assert_return(!event_pid_changed(e), -ECHILD);
 
+        //设置source refer事件
         s = source_new(e, !ret, SOURCE_DEFER);
         if (!s)
                 return -ENOMEM;
@@ -3040,6 +3041,7 @@ static int source_dispatch(sd_event_source *s) {
         }
 
         case SOURCE_DEFER:
+        	    //调用callback
                 r = s->defer.callback(s, s->userdata);
                 break;
 
@@ -3414,9 +3416,11 @@ _public_ int sd_event_dispatch(sd_event *e) {
         assert_return(e->state != SD_EVENT_FINISHED, -ESTALE);
         assert_return(e->state == SD_EVENT_PENDING, -EBUSY);
 
+        //如果事件要求退出
         if (e->exit_requested)
                 return dispatch_exit(e);
 
+        //取一个未绝事件
         p = event_next_pending(e);
         if (p) {
                 _cleanup_(sd_event_unrefp) sd_event *ref = NULL;
@@ -3480,7 +3484,7 @@ _public_ int sd_event_run(sd_event *e, uint64_t timeout) {
 
         if (r > 0) {
                 /* There's something now, then let's dispatch it */
-                r = sd_event_dispatch(e);
+                r = sd_event_dispatch(e);//分发事件
                 if (r < 0)
                         return r;
 

@@ -54,9 +54,13 @@ typedef struct ConfigTableItem {
 /* Wraps information for parsing a specific configuration variable, to
  * be stored in a gperf perfect hashtable */
 typedef struct ConfigPerfItem {
+		//key名称（由section + "." + name获得)
         const char *section_and_lvalue; /* Section + "." + name of the variable */
+        //parse函数
         ConfigParserCallback parse;     /* Function that is called to parse the variable's value */
+        //解析类型
         int ltype;                      /* Distinguish different variables passed to the same callback */
+        //参数的offset
         size_t offset;                  /* Offset where to store data, from the beginning of userdata */
 } ConfigPerfItem;
 

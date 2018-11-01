@@ -106,14 +106,15 @@ struct UnitRef {
 };
 
 typedef struct Unit {
-        Manager *manager;
+        Manager *manager;//unit对应的manager
 
         UnitType type;
         UnitLoadState load_state;
         Unit *merged_into;
 
+        //实例化后的unit名称
         char *id; /* One name is special because we use it for identification. Points to an entry in the names set */
-        char *instance;
+        char *instance;//实例名称
 
         Set *names;
 
@@ -127,6 +128,7 @@ typedef struct Unit {
         char *description;
         char **documentation;
 
+        //unit所在路径
         char *fragment_path; /* if loaded from a config file this is the primary path to it */
         char *source_path; /* if converted, the source file */
         char **dropin_paths;
@@ -416,7 +418,7 @@ typedef struct UnitVTable {
 
         /* Config file sections this unit type understands, separated
          * by NUL chars */
-        const char *sections;
+        const char *sections;/*配置文件中仅容许出现的section*/
 
         /* This should reset all type-specific variables. This should
          * not allocate memory, and is called with zero-initialized
