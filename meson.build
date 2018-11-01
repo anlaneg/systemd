@@ -1092,6 +1092,7 @@ conf.set10('HAVE_XZ', have)
 want_lz4 = get_option('lz4')
 if want_lz4 != 'false' and not fuzzer_build
         liblz4 = dependency('liblz4',
+                            version : '>= 1.3.0',
                             required : want_lz4 == 'true')
         have = liblz4.found()
 else
@@ -2827,10 +2828,10 @@ install_data('LICENSE.GPL2',
              'LICENSE.LGPL2.1',
              'NEWS',
              'README',
-             'docs/CODING_STYLE',
+             'docs/CODING_STYLE.md',
              'docs/DISTRO_PORTING.md',
              'docs/ENVIRONMENT.md',
-             'docs/HACKING',
+             'docs/HACKING.md',
              'docs/TRANSIENT-SETTINGS.md',
              'docs/TRANSLATORS.md',
              'docs/UIDS-GIDS.md',
