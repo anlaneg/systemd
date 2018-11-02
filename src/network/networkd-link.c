@@ -2801,6 +2801,7 @@ static int link_configure(Link *link) {
                         return r;
         }
 
+        //处理link配置了dhcpv4情况
         if (link_dhcp4_enabled(link)) {
                 r = dhcp4_set_promote_secondaries(link);
                 if (r < 0)
@@ -2811,6 +2812,7 @@ static int link_configure(Link *link) {
                         return r;
         }
 
+        //link开启了dhcpv4 server
         if (link_dhcp4_server_enabled(link)) {
                 r = sd_dhcp_server_new(&link->dhcp_server, link->ifindex);
                 if (r < 0)
@@ -2952,6 +2954,7 @@ int get_product_uuid_handler(sd_bus_message *m, void *userdata, sd_bus_error *re
         manager->duids_requesting_uuid = set_free(manager->duids_requesting_uuid);
 
 configure:
+		//配置link上的消息处理
         while ((link = set_steal_first(manager->links_requesting_uuid))) {
                 r = link_configure(link);
                 if (r < 0)

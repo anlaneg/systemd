@@ -149,6 +149,7 @@ int dhcp_option_append(DHCPMessage *message, size_t size, size_t *offset,
         return -ENOBUFS;
 }
 
+//处理dhcp报文中包含的选项
 static int parse_options(const uint8_t options[], size_t buflen, uint8_t *overload,
                          uint8_t *message_type, char **error_message, dhcp_option_callback_t cb,
                          void *userdata) {

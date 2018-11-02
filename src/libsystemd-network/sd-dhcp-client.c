@@ -41,7 +41,7 @@ struct sd_dhcp_client {
         int event_priority;
         sd_event_source *timeout_resend;
         int ifindex;
-        int fd;
+        int fd;//socket,用于发送dhcp报文
         uint16_t port;
         union sockaddr_union link;
         sd_event_source *receive_message;
@@ -84,16 +84,16 @@ struct sd_dhcp_client {
         char *vendor_class_identifier;
         char **user_class;
         uint32_t mtu;
-        uint32_t xid;
+        uint32_t xid;//dhcp请求事务id
         usec_t start_time;
-        unsigned attempt;
+        unsigned attempt;//尝试次数
         usec_t request_sent;
         sd_event_source *timeout_t1;
         sd_event_source *timeout_t2;
         sd_event_source *timeout_expire;
         sd_dhcp_client_callback_t callback;
         void *userdata;
-        sd_dhcp_lease *lease;
+        sd_dhcp_lease *lease;//记录获得的dhcp lease
         usec_t start_delay;
 };
 
@@ -519,6 +519,7 @@ int sd_dhcp_client_set_mtu(sd_dhcp_client *client, uint32_t mtu) {
         return 0;
 }
 
+//获取客户端获得的lease
 int sd_dhcp_client_get_lease(sd_dhcp_client *client, sd_dhcp_lease **ret) {
         assert_return(client, -EINVAL);
 
@@ -576,10 +577,11 @@ static void client_stop(sd_dhcp_client *client, int error) {
         client_initialize(client);
 }
 
+//构造dhcp client消息
 static int client_message_init(
                 sd_dhcp_client *client,
                 DHCPPacket **ret,
-                uint8_t type,
+                uint8_t type/*dhcp消息请求类型*/,
                 size_t *_optlen,
                 size_t *_optoffset) {
 
@@ -604,8 +606,9 @@ static int client_message_init(
         if (!packet)
                 return -ENOMEM;
 
+        //构造dhcp请求消息
         r = dhcp_message_init(&packet->dhcp, BOOTREQUEST, client->xid, type,
-                              client->arp_type, optlen, &optoffset);
+                              client->arp_type/*硬件类型*/, optlen, &optoffset);
         if (r < 0)
                 return r;
 
@@ -767,14 +770,17 @@ static int dhcp_client_send_raw(
                                             packet, len);
 }
 
+//构造并发送discover报文
 static int client_send_discover(sd_dhcp_client *client) {
         _cleanup_free_ DHCPPacket *discover = NULL;
         size_t optoffset, optlen;
         int r;
 
         assert(client);
+        //client当前仅处于init,selecting状态
         assert(IN_SET(client->state, DHCP_STATE_INIT, DHCP_STATE_SELECTING));
 
+        //构造discover报文
         r = client_message_init(client, &discover, DHCP_DISCOVER,
                                 &optlen, &optoffset);
         if (r < 0)
@@ -787,6 +793,7 @@ static int client_send_discover(sd_dhcp_client *client) {
            option to suggest the lease time it would like.
          */
         if (client->last_addr != INADDR_ANY) {
+        		//设置请求设置的地址
                 r = dhcp_option_append(&discover->dhcp, optlen, &optoffset, 0,
                                        SD_DHCP_OPTION_REQUESTED_IP_ADDRESS,
                                        4, &client->last_addr);
@@ -794,6 +801,7 @@ static int client_send_discover(sd_dhcp_client *client) {
                         return r;
         }
 
+        //设置client端hostname
         if (client->hostname) {
                 /* According to RFC 4702 "clients that send the Client FQDN option in
                    their messages MUST NOT also send the Host Name option". Just send
@@ -813,6 +821,7 @@ static int client_send_discover(sd_dhcp_client *client) {
                         return r;
         }
 
+        //设置vendor id
         if (client->vendor_class_identifier) {
                 r = dhcp_option_append(&discover->dhcp, optlen, &optoffset, 0,
                                        SD_DHCP_OPTION_VENDOR_CLASS_IDENTIFIER,
@@ -840,6 +849,7 @@ static int client_send_discover(sd_dhcp_client *client) {
            The client SHOULD wait a random time between one and ten seconds to
            desynchronize the use of DHCP at startup.
          */
+        //向服务端发送discover报文
         r = dhcp_client_send_raw(client, discover, sizeof(DHCPPacket) + optoffset);
         if (r < 0)
                 return r;
@@ -849,6 +859,7 @@ static int client_send_discover(sd_dhcp_client *client) {
         return 0;
 }
 
+//发送dhcp　请求确认offer报文
 static int client_send_request(sd_dhcp_client *client) {
         _cleanup_free_ DHCPPacket *request = NULL;
         size_t optoffset, optlen;
@@ -988,6 +999,7 @@ static int client_send_request(sd_dhcp_client *client) {
 
 static int client_start(sd_dhcp_client *client);
 
+//负责dhcp请求包文发送及消息重发机制
 static int client_timeout_resend(
                 sd_event_source *s,
                 uint64_t usec,
@@ -1065,6 +1077,7 @@ static int client_timeout_resend(
 
         client->timeout_resend = sd_event_source_unref(client->timeout_resend);
 
+        //未收到响应，设置重发定时器
         r = sd_event_add_time(client->event,
                               &client->timeout_resend,
                               clock_boottime_or_monotonic(),
@@ -1084,11 +1097,14 @@ static int client_timeout_resend(
 
         switch (client->state) {
         case DHCP_STATE_INIT:
+        		//当前处于init状态，发送discover报文
                 r = client_send_discover(client);
                 if (r >= 0) {
+                		//进入selecting状态
                         client->state = DHCP_STATE_SELECTING;
                         client->attempt = 1;
                 } else {
+                		//尝试次数过多，进失败流程
                         if (client->attempt >= 64)
                                 goto error;
                 }
@@ -1096,6 +1112,7 @@ static int client_timeout_resend(
                 break;
 
         case DHCP_STATE_SELECTING:
+        		//未收到响应，继续发送discover报文
                 r = client_send_discover(client);
                 if (r < 0 && client->attempt >= 64)
                         goto error;
@@ -1106,6 +1123,7 @@ static int client_timeout_resend(
         case DHCP_STATE_REQUESTING:
         case DHCP_STATE_RENEWING:
         case DHCP_STATE_REBINDING:
+        		//收到用户发送过来的offer,请求确认offer
                 r = client_send_request(client);
                 if (r < 0 && client->attempt >= 64)
                          goto error;
@@ -1119,7 +1137,7 @@ static int client_timeout_resend(
 
         case DHCP_STATE_REBOOTING:
         case DHCP_STATE_BOUND:
-
+        		//处于bound状态时，不处理
                 break;
 
         case DHCP_STATE_STOPPED:
@@ -1146,6 +1164,7 @@ static int client_initialize_io_events(
         assert(client);
         assert(client->event);
 
+        //注册dhcp报文的读事件，读取对方响应
         r = sd_event_add_io(client->event, &client->receive_message,
                             client->fd, EPOLLIN, io_callback,
                             client);
@@ -1235,10 +1254,11 @@ static int client_start_delayed(sd_dhcp_client *client) {
         }
         client->fd = r;
 
+        //设置延迟发送时间
         if (IN_SET(client->state, DHCP_STATE_INIT, DHCP_STATE_INIT_REBOOT))
                 client->start_time = now(clock_boottime_or_monotonic());
 
-        return client_initialize_events(client, client_receive_message_raw);
+        return client_initialize_events(client, client_receive_message_raw/*收取dhcp server消息处理函数*/);
 }
 
 static int client_start(sd_dhcp_client *client) {
@@ -1315,6 +1335,7 @@ static int client_handle_offer(sd_dhcp_client *client, DHCPMessage *offer, size_
                         return r;
         }
 
+        //选项解析
         r = dhcp_option_parse(offer, len, dhcp_lease_parse_options, lease, NULL);
         if (r != DHCP_OFFER) {
                 log_dhcp_client(client, "received message was not an OFFER, ignoring");
@@ -1341,6 +1362,7 @@ static int client_handle_offer(sd_dhcp_client *client, DHCPMessage *offer, size_
                 }
         }
 
+        //记录收到的offer
         sd_dhcp_lease_unref(client->lease);
         client->lease = TAKE_PTR(lease);
 
@@ -1361,6 +1383,7 @@ static int client_handle_forcerenew(sd_dhcp_client *client, DHCPMessage *force, 
         return 0;
 }
 
+//解析ack报文
 static int client_handle_ack(sd_dhcp_client *client, DHCPMessage *ack, size_t len) {
         _cleanup_(sd_dhcp_lease_unrefp) sd_dhcp_lease *lease = NULL;
         _cleanup_free_ char *error_message = NULL;
@@ -1588,6 +1611,7 @@ static int client_set_lease_timeouts(sd_dhcp_client *client) {
         return 0;
 }
 
+//处理收到的dhcp消息（server端回包）
 static int client_handle_message(sd_dhcp_client *client, DHCPMessage *message, int len) {
         DHCP_CLIENT_DONT_DESTROY(client);
         char time_string[FORMAT_TIMESPAN_MAX];
@@ -1599,16 +1623,19 @@ static int client_handle_message(sd_dhcp_client *client, DHCPMessage *message, i
 
         switch (client->state) {
         case DHCP_STATE_SELECTING:
-
+        		//当前处于selecting状态，收到server发送来的offer报文
                 r = client_handle_offer(client, message, len);
                 if (r >= 0) {
 
+                		//停止resend定时器
                         client->timeout_resend =
                                 sd_event_source_unref(client->timeout_resend);
 
+                        //收到offer成功，置状态为requesting状态
                         client->state = DHCP_STATE_REQUESTING;
                         client->attempt = 1;
 
+                        //立即开启resend定时器（状态变更了重新启定时器）
                         r = sd_event_add_time(client->event,
                                               &client->timeout_resend,
                                               clock_boottime_or_monotonic(),
@@ -1635,7 +1662,7 @@ static int client_handle_message(sd_dhcp_client *client, DHCPMessage *message, i
         case DHCP_STATE_REQUESTING:
         case DHCP_STATE_RENEWING:
         case DHCP_STATE_REBINDING:
-
+        		//收到server端发送过来的ack报文
                 r = client_handle_ack(client, message, len);
                 if (r >= 0) {
                         client->start_delay = 0;
@@ -1651,6 +1678,7 @@ static int client_handle_message(sd_dhcp_client *client, DHCPMessage *message, i
                         else if (r != SD_DHCP_CLIENT_EVENT_IP_ACQUIRE)
                                 notify_event = r;
 
+                        //置bound状态
                         client->state = DHCP_STATE_BOUND;
                         client->attempt = 1;
 
@@ -1670,6 +1698,7 @@ static int client_handle_message(sd_dhcp_client *client, DHCPMessage *message, i
 
                         client->fd = r;
 
+                        //重新替换fd的注册函数，用于renew
                         client_initialize_io_events(client, client_receive_message_udp);
 
                         if (notify_event) {
@@ -1818,6 +1847,7 @@ static int client_receive_message_udp(
         return client_handle_message(client, message, len);
 }
 
+//处理dhcp server的响应消息
 static int client_receive_message_raw(
                 sd_event_source *s,
                 int fd,
@@ -1853,6 +1883,7 @@ static int client_receive_message_raw(
         iov.iov_base = packet;
         iov.iov_len = buflen;
 
+        //读取dhcp server响应消息
         len = recvmsg(fd, &msg, 0);
         if (len < 0) {
                 if (IN_SET(errno, EAGAIN, EINTR))
@@ -1874,12 +1905,14 @@ static int client_receive_message_raw(
                 }
         }
 
+        //dhcp消息校验
         r = dhcp_packet_verify_headers(packet, len, checksum, client->port);
         if (r < 0)
                 return 0;
 
         len -= DHCP_IP_UDP_SIZE;
 
+        //处理收到的dhcp消息
         return client_handle_message(client, &packet->dhcp, len);
 }
 

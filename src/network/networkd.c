@@ -10,6 +10,7 @@
 #include "signal-util.h"
 #include "user-util.h"
 
+//systemd-networkd进程入口
 int main(int argc, char *argv[]) {
         _cleanup_(manager_freep) Manager *m = NULL;
         const char *user = "systemd-network";
@@ -23,6 +24,7 @@ int main(int argc, char *argv[]) {
 
         umask(0022);
 
+        //不接受参数
         if (argc != 1) {
                 log_error("This program takes no arguments.");
                 r = -EINVAL;
@@ -117,6 +119,7 @@ int main(int argc, char *argv[]) {
                 goto out;
         }
 
+        //manager启动
         r = manager_start(m);
         if (r < 0) {
                 log_error_errno(r, "Could not start manager: %m");

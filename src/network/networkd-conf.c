@@ -14,6 +14,7 @@
 #include "networkd-network.h"
 #include "string-table.h"
 
+//解析networkd的配置
 int manager_parse_config_file(Manager *m) {
         assert(m);
 

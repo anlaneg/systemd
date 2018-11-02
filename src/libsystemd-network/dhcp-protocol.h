@@ -12,6 +12,7 @@
 #include "macro.h"
 #include "sparse-endian.h"
 
+//dhcp报文格式
 struct DHCPMessage {
         uint8_t op;
         uint8_t htype;
@@ -36,7 +37,7 @@ typedef struct DHCPMessage DHCPMessage;
 struct DHCPPacket {
         struct iphdr ip;
         struct udphdr udp;
-        DHCPMessage dhcp;
+        DHCPMessage dhcp;//dhcp报文
 } _packed_;
 
 typedef struct DHCPPacket DHCPPacket;

@@ -314,6 +314,7 @@ static int dhcp4_address_handler(sd_netlink *rtnl, sd_netlink_message *m,
         } else if (r >= 0)
                 manager_rtnl_process_address(rtnl, m, link->manager);
 
+        //设置link上dhcp路由
         link_set_dhcp_routes(link);
 
         if (link->dhcp4_messages == 0) {
@@ -324,6 +325,7 @@ static int dhcp4_address_handler(sd_netlink *rtnl, sd_netlink_message *m,
         return 1;
 }
 
+//更新link的地址
 static int dhcp4_update_address(Link *link,
                                 struct in_addr *address,
                                 struct in_addr *netmask,
@@ -351,6 +353,7 @@ static int dhcp4_update_address(Link *link,
 
         /* allow reusing an existing address and simply update its lifetime
          * in case it already exists */
+        //为link配置v4地址
         r = address_configure(addr, link, dhcp4_address_handler, true);
         if (r < 0)
                 return r;
@@ -414,10 +417,12 @@ static int dhcp_lease_acquired(sd_dhcp_client *client, Link *link) {
         assert(client);
         assert(link);
 
+        //取client->lease
         r = sd_dhcp_client_get_lease(client, &lease);
         if (r < 0)
                 return log_link_error_errno(link, r, "DHCP error: No lease: %m");
 
+        //取lease提供的address,netmask,gateway,
         r = sd_dhcp_lease_get_address(lease, &address);
         if (r < 0)
                 return log_link_error_errno(link, r, "DHCP error: No address: %m");
@@ -432,6 +437,7 @@ static int dhcp_lease_acquired(sd_dhcp_client *client, Link *link) {
         if (r < 0 && r != -ENODATA)
                 return log_link_error_errno(link, r, "DHCP error: Could not get gateway: %m");
 
+        //显示获得的ip地址
         if (r >= 0)
                 log_struct(LOG_INFO,
                            LOG_LINK_INTERFACE(link),
@@ -451,6 +457,7 @@ static int dhcp_lease_acquired(sd_dhcp_client *client, Link *link) {
                            "ADDRESS=%u.%u.%u.%u", ADDRESS_FMT_VAL(address),
                            "PREFIXLEN=%u", prefixlen);
 
+        //设置link对应的lease，为客户端获得的lease
         link->dhcp_lease = sd_dhcp_lease_ref(lease);
         link_dirty(link);
 
@@ -545,6 +552,7 @@ static void dhcp4_handler(sd_dhcp_client *client, int event, void *userdata) {
                         }
 
                         if (event == SD_DHCP_CLIENT_EVENT_IP_CHANGE) {
+                        		//为link更新地址
                                 r = dhcp_lease_acquired(client, link);
                                 if (r < 0) {
                                         link_enter_failed(link);
@@ -746,6 +754,7 @@ int dhcp4_configure(Link *link) {
         if (r < 0)
                 return log_link_error_errno(link, r, "DHCP4 CLIENT: Failed to set ifindex: %m");
 
+        //注册事件回调，为link处理其上dhcpv4地址
         r = sd_dhcp_client_set_callback(link->dhcp_client, dhcp4_handler, link);
         if (r < 0)
                 return log_link_error_errno(link, r, "DHCP4 CLIENT: Failed to set callback: %m");

@@ -513,6 +513,7 @@ static int lease_parse_classless_routes(
         return 0;
 }
 
+//处理dhcp选项，并填充lease
 int dhcp_lease_parse_options(uint8_t code, uint8_t len, const void *option, void *userdata) {
         sd_dhcp_lease *lease = userdata;
         int r;

@@ -246,6 +246,7 @@ static int network_load_one(Manager *manager, const char *filename) {
 
         dropin_dirname = strjoina(network->name, ".network.d");
 
+        //解析配置文件，填充network
         r = config_parse_many(filename, network_dirs, dropin_dirname,
                               "Match\0"
                               "Link\0"
@@ -558,6 +559,7 @@ bool network_has_static_ipv6_addresses(Network *network) {
         return false;
 }
 
+//解析netdev配置文件
 int config_parse_netdev(const char *unit,
                 const char *filename,
                 unsigned line,

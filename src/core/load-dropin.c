@@ -108,11 +108,13 @@ int unit_load_dropin(Unit *u) {
 
         assert(u);
 
+        //加载wants
         /* Load dependencies from .wants and .requires directories */
         r = process_deps(u, UNIT_WANTS, ".wants");
         if (r < 0)
                 return r;
 
+        //加载requires
         r = process_deps(u, UNIT_REQUIRES, ".requires");
         if (r < 0)
                 return r;
@@ -130,6 +132,7 @@ int unit_load_dropin(Unit *u) {
                         return log_oom();
         }
 
+        //解析配置文件
         STRV_FOREACH(f, u->dropin_paths)
                 (void) config_parse(u->id, *f, NULL,
                                     UNIT_VTABLE(u)->sections,
