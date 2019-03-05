@@ -184,10 +184,9 @@ static ssize_t write_entry(char *buf, size_t size, Uploader *u) {
                         size_t len;
 
                         c = memchr(u->field_data, '=', u->field_length);
-                        if (!c || c == u->field_data) {
-                                log_error("Invalid field.");
-                                return -EINVAL;
-                        }
+                        if (!c || c == u->field_data)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Invalid field.");
 
                         len = c - (const char*)u->field_data;
 
@@ -236,7 +235,7 @@ static ssize_t write_entry(char *buf, size_t size, Uploader *u) {
         assert_not_reached("WTF?");
 }
 
-static inline void check_update_watchdog(Uploader *u) {
+static void check_update_watchdog(Uploader *u) {
         usec_t after;
         usec_t elapsed_time;
 

@@ -12,6 +12,7 @@
 
 #include "alloc-util.h"
 #include "dirent-util.h"
+#include "env-file.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -31,6 +32,7 @@
 #include "stdio-util.h"
 #include "string-util.h"
 #include "syslog-util.h"
+#include "tmpfile-util.h"
 #include "unit-name.h"
 
 #define STDOUT_STREAMS_MAX 4096
@@ -125,7 +127,7 @@ void stdout_stream_free(StdoutStream *s) {
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(StdoutStream*, stdout_stream_free);
 
-static void stdout_stream_destroy(StdoutStream *s) {
+void stdout_stream_destroy(StdoutStream *s) {
         if (!s)
                 return;
 
@@ -534,7 +536,7 @@ terminate:
         return 0;
 }
 
-static int stdout_stream_install(Server *s, int fd, StdoutStream **ret) {
+int stdout_stream_install(Server *s, int fd, StdoutStream **ret) {
         _cleanup_(stdout_stream_freep) StdoutStream *stream = NULL;
         sd_id128_t id;
         int r;
@@ -596,10 +598,10 @@ static int stdout_stream_new(sd_event_source *es, int listen_fd, uint32_t revent
 
         assert(s);
 
-        if (revents != EPOLLIN) {
-                log_error("Got invalid event from epoll for stdout server fd: %"PRIx32, revents);
-                return -EIO;
-        }
+        if (revents != EPOLLIN)
+                return log_error_errno(SYNTHETIC_ERRNO(EIO),
+                                       "Got invalid event from epoll for stdout server fd: %" PRIx32,
+                                       revents);
 
         fd = accept4(s->stdout_fd, NULL, NULL, SOCK_NONBLOCK|SOCK_CLOEXEC);
         if (fd < 0) {
@@ -651,7 +653,7 @@ static int stdout_stream_load(StdoutStream *stream, const char *fname) {
                         return log_oom();
         }
 
-        r = parse_env_file(NULL, stream->state_file, NEWLINE,
+        r = parse_env_file(NULL, stream->state_file,
                            "PRIORITY", &priority,
                            "LEVEL_PREFIX", &level_prefix,
                            "FORWARD_TO_SYSLOG", &forward_to_syslog,
@@ -659,8 +661,7 @@ static int stdout_stream_load(StdoutStream *stream, const char *fname) {
                            "FORWARD_TO_CONSOLE", &forward_to_console,
                            "IDENTIFIER", &stream->identifier,
                            "UNIT", &stream->unit_id,
-                           "STREAM_ID", &stream_id,
-                           NULL);
+                           "STREAM_ID", &stream_id);
         if (r < 0)
                 return log_error_errno(r, "Failed to read: %s", stream->state_file);
 

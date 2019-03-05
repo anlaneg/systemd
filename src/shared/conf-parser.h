@@ -131,6 +131,7 @@ CONFIG_PARSER_PROTOTYPE(config_parse_string);
 CONFIG_PARSER_PROTOTYPE(config_parse_path);
 CONFIG_PARSER_PROTOTYPE(config_parse_strv);
 CONFIG_PARSER_PROTOTYPE(config_parse_sec);
+CONFIG_PARSER_PROTOTYPE(config_parse_sec_def_infinity);
 CONFIG_PARSER_PROTOTYPE(config_parse_nsec);
 CONFIG_PARSER_PROTOTYPE(config_parse_mode);
 CONFIG_PARSER_PROTOTYPE(config_parse_warn_compat);
@@ -141,7 +142,6 @@ CONFIG_PARSER_PROTOTYPE(config_parse_personality);
 CONFIG_PARSER_PROTOTYPE(config_parse_permille);
 CONFIG_PARSER_PROTOTYPE(config_parse_ifname);
 CONFIG_PARSER_PROTOTYPE(config_parse_ip_port);
-CONFIG_PARSER_PROTOTYPE(config_parse_join_controllers);
 CONFIG_PARSER_PROTOTYPE(config_parse_mtu);
 CONFIG_PARSER_PROTOTYPE(config_parse_rlimit);
 

@@ -21,7 +21,7 @@
 #include <linux/fou.h>
 #endif
 
-#if HAVE_VXCAN_INFO_PEER
+#if HAVE_LINUX_CAN_VXCAN_H
 #include <linux/can/vxcan.h>
 #endif
 
@@ -224,6 +224,10 @@ static const NLType rtnl_link_info_data_bond_types[] = {
         [IFLA_BOND_AD_LACP_RATE]        = { .type = NETLINK_TYPE_U8 },
         [IFLA_BOND_AD_SELECT]           = { .type = NETLINK_TYPE_U8 },
         [IFLA_BOND_AD_INFO]             = { .type = NETLINK_TYPE_NESTED },
+        [IFLA_BOND_AD_ACTOR_SYS_PRIO]   = { .type = NETLINK_TYPE_U16 },
+        [IFLA_BOND_AD_USER_PORT_KEY]    = { .type = NETLINK_TYPE_U16 },
+        [IFLA_BOND_AD_ACTOR_SYSTEM]     = { .type = NETLINK_TYPE_ETHER_ADDR },
+        [IFLA_BOND_TLB_DYNAMIC_LB]      = { .type = NETLINK_TYPE_U8 },
 };
 
 static const NLType rtnl_link_info_data_iptun_types[] = {
@@ -262,6 +266,7 @@ static  const NLType rtnl_link_info_data_ipgre_types[] = {
         [IFLA_GRE_ENCAP_FLAGS]  = { .type = NETLINK_TYPE_U16 },
         [IFLA_GRE_ENCAP_SPORT]  = { .type = NETLINK_TYPE_U16 },
         [IFLA_GRE_ENCAP_DPORT]  = { .type = NETLINK_TYPE_U16 },
+        [IFLA_GRE_ERSPAN_INDEX] = { .type = NETLINK_TYPE_U32 },
 };
 
 static const NLType rtnl_link_info_data_ipvti_types[] = {
@@ -318,6 +323,7 @@ static const char* const nl_union_link_info_data_table[] = {
         [NL_UNION_LINK_INFO_DATA_VXLAN] = "vxlan",
         [NL_UNION_LINK_INFO_DATA_IPIP_TUNNEL] = "ipip",
         [NL_UNION_LINK_INFO_DATA_IPGRE_TUNNEL] = "gre",
+        [NL_UNION_LINK_INFO_DATA_ERSPAN] = "erspan",
         [NL_UNION_LINK_INFO_DATA_IPGRETAP_TUNNEL] = "gretap",
         [NL_UNION_LINK_INFO_DATA_IP6GRE_TUNNEL] = "ip6gre",
         [NL_UNION_LINK_INFO_DATA_IP6GRETAP_TUNNEL] = "ip6gretap",
@@ -356,6 +362,8 @@ static const NLTypeSystem rtnl_link_info_data_type_systems[] = {
         [NL_UNION_LINK_INFO_DATA_IPIP_TUNNEL] =      { .count = ELEMENTSOF(rtnl_link_info_data_iptun_types),
                                                        .types = rtnl_link_info_data_iptun_types },
         [NL_UNION_LINK_INFO_DATA_IPGRE_TUNNEL] =     { .count = ELEMENTSOF(rtnl_link_info_data_ipgre_types),
+                                                       .types = rtnl_link_info_data_ipgre_types },
+        [NL_UNION_LINK_INFO_DATA_ERSPAN] =           { .count = ELEMENTSOF(rtnl_link_info_data_ipgre_types),
                                                        .types = rtnl_link_info_data_ipgre_types },
         [NL_UNION_LINK_INFO_DATA_IPGRETAP_TUNNEL] =  { .count = ELEMENTSOF(rtnl_link_info_data_ipgre_types),
                                                        .types = rtnl_link_info_data_ipgre_types },
@@ -405,17 +413,40 @@ static const NLTypeSystem rtnl_link_info_type_system = {
 };
 
 static const struct NLType rtnl_prot_info_bridge_port_types[] = {
-        [IFLA_BRPORT_STATE]             = { .type = NETLINK_TYPE_U8 },
-        [IFLA_BRPORT_COST]              = { .type = NETLINK_TYPE_U32 },
-        [IFLA_BRPORT_PRIORITY]          = { .type = NETLINK_TYPE_U16 },
-        [IFLA_BRPORT_MODE]              = { .type = NETLINK_TYPE_U8 },
-        [IFLA_BRPORT_GUARD]             = { .type = NETLINK_TYPE_U8 },
-        [IFLA_BRPORT_PROTECT]           = { .type = NETLINK_TYPE_U8 },
-        [IFLA_BRPORT_FAST_LEAVE]        = { .type = NETLINK_TYPE_U8 },
-        [IFLA_BRPORT_LEARNING]          = { .type = NETLINK_TYPE_U8 },
-        [IFLA_BRPORT_UNICAST_FLOOD]     = { .type = NETLINK_TYPE_U8 },
-        [IFLA_BRPORT_PROXYARP]          = { .type = NETLINK_TYPE_U8 },
-        [IFLA_BRPORT_LEARNING_SYNC]     = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_STATE]               = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_COST]                = { .type = NETLINK_TYPE_U32 },
+        [IFLA_BRPORT_PRIORITY]            = { .type = NETLINK_TYPE_U16 },
+        [IFLA_BRPORT_MODE]                = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_GUARD]               = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_PROTECT]             = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_FAST_LEAVE]          = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_LEARNING]            = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_UNICAST_FLOOD]       = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_PROXYARP]            = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_LEARNING_SYNC]       = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_PROXYARP_WIFI]       = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_ROOT_ID]             = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_BRIDGE_ID]           = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_DESIGNATED_PORT]     = { .type = NETLINK_TYPE_U16 },
+        [IFLA_BRPORT_DESIGNATED_COST]     = { .type = NETLINK_TYPE_U16 },
+        [IFLA_BRPORT_ID]                  = { .type = NETLINK_TYPE_U16 },
+        [IFLA_BRPORT_NO]                  = { .type = NETLINK_TYPE_U16 },
+        [IFLA_BRPORT_TOPOLOGY_CHANGE_ACK] = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_CONFIG_PENDING]      = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_MESSAGE_AGE_TIMER]   = { .type = NETLINK_TYPE_U64 },
+        [IFLA_BRPORT_FORWARD_DELAY_TIMER] = { .type = NETLINK_TYPE_U64 },
+        [IFLA_BRPORT_HOLD_TIMER]          = { .type = NETLINK_TYPE_U64 },
+        [IFLA_BRPORT_FLUSH]               = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_MULTICAST_ROUTER]    = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_PAD]                 = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_MCAST_FLOOD]         = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_MCAST_TO_UCAST]      = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_VLAN_TUNNEL]         = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_BCAST_FLOOD]         = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_GROUP_FWD_MASK]      = { .type = NETLINK_TYPE_U16 },
+        [IFLA_BRPORT_NEIGH_SUPPRESS]      = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_ISOLATED]            = { .type = NETLINK_TYPE_U8 },
+        [IFLA_BRPORT_BACKUP_PORT]         = { .type = NETLINK_TYPE_U32 },
 };
 
 static const NLTypeSystem rtnl_prot_info_type_systems[] = {
@@ -620,20 +651,23 @@ static const NLType rtnl_routing_policy_rule_types[] = {
         [FRA_DST]                 = { .type = NETLINK_TYPE_IN_ADDR },
         [FRA_SRC]                 = { .type = NETLINK_TYPE_IN_ADDR },
         [FRA_IIFNAME]             = { .type = NETLINK_TYPE_STRING },
-        [RTA_OIF]                 = { .type = NETLINK_TYPE_U32 },
-        [RTA_GATEWAY]             = { .type = NETLINK_TYPE_IN_ADDR },
+        [FRA_GOTO]                = { .type = NETLINK_TYPE_U32 },
         [FRA_PRIORITY]            = { .type = NETLINK_TYPE_U32 },
         [FRA_FWMARK]              = { .type = NETLINK_TYPE_U32 },
         [FRA_FLOW]                = { .type = NETLINK_TYPE_U32 },
-        [FRA_TUN_ID]              = { .type = NETLINK_TYPE_U32 },
+        [FRA_TUN_ID]              = { .type = NETLINK_TYPE_U64 },
         [FRA_SUPPRESS_IFGROUP]    = { .type = NETLINK_TYPE_U32 },
         [FRA_SUPPRESS_PREFIXLEN]  = { .type = NETLINK_TYPE_U32 },
         [FRA_TABLE]               = { .type = NETLINK_TYPE_U32 },
         [FRA_FWMASK]              = { .type = NETLINK_TYPE_U32 },
         [FRA_OIFNAME]             = { .type = NETLINK_TYPE_STRING },
         [FRA_PAD]                 = { .type = NETLINK_TYPE_U32 },
-        [FRA_L3MDEV]              = { .type = NETLINK_TYPE_U64 },
+        [FRA_L3MDEV]              = { .type = NETLINK_TYPE_U8 },
         [FRA_UID_RANGE]           = { .size = sizeof(struct fib_rule_uid_range) },
+        [FRA_PROTOCOL]            = { .type = NETLINK_TYPE_U8 },
+        [FRA_IP_PROTO]            = { .type = NETLINK_TYPE_U8 },
+        [FRA_SPORT_RANGE]         = { .size = sizeof(struct fib_rule_port_range) },
+        [FRA_DPORT_RANGE]         = { .size = sizeof(struct fib_rule_port_range) },
 };
 
 static const NLTypeSystem rtnl_routing_policy_rule_type_system = {
@@ -686,7 +720,7 @@ static const NLType genl_wireguard_peer_types[] = {
         [WGPEER_A_FLAGS] = { .type = NETLINK_TYPE_U32 },
         [WGPEER_A_PRESHARED_KEY] = { .size = WG_KEY_LEN },
         [WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL] = { .type = NETLINK_TYPE_U16 },
-        [WGPEER_A_ENDPOINT] = { /* either size of sockaddr_in or sockaddr_in6 depending on address family */ },
+        [WGPEER_A_ENDPOINT] = { .type = NETLINK_TYPE_SOCKADDR },
         [WGPEER_A_ALLOWEDIPS] = { .type = NETLINK_TYPE_NESTED, .type_system = &genl_wireguard_allowedip_type_system },
 };
 
@@ -697,7 +731,7 @@ static const NLTypeSystem genl_wireguard_peer_type_system = {
 
 static const NLType genl_wireguard_set_device_types[] = {
         [WGDEVICE_A_IFINDEX] = { .type = NETLINK_TYPE_U32 },
-        [WGDEVICE_A_IFNAME] = { .type = NETLINK_TYPE_STRING },
+        [WGDEVICE_A_IFNAME] = { .type = NETLINK_TYPE_STRING, .size = IFNAMSIZ-1 },
         [WGDEVICE_A_FLAGS] = { .type = NETLINK_TYPE_U32 },
         [WGDEVICE_A_PRIVATE_KEY] = { .size = WG_KEY_LEN },
         [WGDEVICE_A_LISTEN_PORT] = { .type = NETLINK_TYPE_U16 },

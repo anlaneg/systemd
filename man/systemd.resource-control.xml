@@ -199,6 +199,25 @@
       </varlistentry>
 
       <varlistentry>
+        <term><varname>CPUQuotaPeriodSec=</varname></term>
+
+        <listitem>
+          <para>Assign the duration over which the CPU time quota specified by <varname>CPUQuota=</varname> is measured.
+          Takes a time duration value in seconds, with an optional suffix such as "ms" for milliseconds (or "s" for seconds.)
+          The default setting is 100ms. The period is clamped to the range supported by the kernel, which is [1ms, 1000ms].
+          Additionally, the period is adjusted up so that the quota interval is also at least 1ms.
+          Setting <varname>CPUQuotaPeriodSec=</varname> to an empty value resets it to the default.</para>
+
+          <para>This controls the second field of <literal>cpu.max</literal> attribute on the unified control group hierarchy
+          and <literal>cpu.cfs_period_us</literal> on legacy. For details about these control group attributes, see
+          <ulink url="https://www.kernel.org/doc/Documentation/cgroup-v2.txt">cgroup-v2.txt</ulink> and
+          <ulink url="https://www.kernel.org/doc/Documentation/scheduler/sched-design-CFS.txt">sched-design-CFS.txt</ulink>.</para>
+
+          <para>Example: <varname>CPUQuotaPeriodSec=10ms</varname> to request that the CPU quota is measured in periods of 10ms.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><varname>MemoryAccounting=</varname></term>
 
         <listitem>
@@ -730,9 +749,33 @@
           specific to the unified hierarchy while others are specific to the legacy hierarchy. Also note that the
           kernel might support further controllers, which aren't covered here yet as delegation is either not supported
           at all for them or not defined cleanly.</para>
+
+          <para>For further details on the delegation model consult <ulink
+          url="https://systemd.io/CGROUP_DELEGATION">Control Group APIs and Delegation</ulink>.</para>
         </listitem>
       </varlistentry>
 
+      <varlistentry>
+        <term><varname>DisableControllers=</varname></term>
+
+        <listitem>
+          <para>Disables controllers from being enabled for a unit's children. If a controller listed is already in use
+          in its subtree, the controller will be removed from the subtree. This can be used to avoid child units being
+          able to implicitly or explicitly enable a controller. Defaults to not disabling any controllers.</para>
+
+          <para>It may not be possible to successfully disable a controller if the unit or any child of the unit in
+          question delegates controllers to its children, as any delegated subtree of the cgroup hierarchy is unmanaged
+          by systemd.</para>
+
+          <para>Multiple controllers may be specified, separated by spaces. You may also pass
+          <varname>DisableControllers=</varname> multiple times, in which case each new instance adds another controller
+          to disable. Passing <varname>DisableControllers=</varname> by itself with no controller name present resets
+          the disabled controller list.</para>
+
+          <para>Valid controllers are <option>cpu</option>, <option>cpuacct</option>, <option>io</option>,
+          <option>blkio</option>, <option>memory</option>, <option>devices</option>, and <option>pids</option>.</para>
+        </listitem>
+      </varlistentry>
     </variablelist>
   </refsect1>
 
@@ -883,6 +926,7 @@
     <title>See Also</title>
     <para>
       <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
+      <citerefentry><refentrytitle>systemd-system.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>systemd.unit</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>systemd.service</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>systemd.slice</refentrytitle><manvolnum>5</manvolnum></citerefentry>,

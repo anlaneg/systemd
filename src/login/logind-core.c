@@ -566,6 +566,17 @@ int manager_spawn_autovt(Manager *m, unsigned vtnr) {
         return 0;
 }
 
+bool manager_is_lid_closed(Manager *m) {
+        Iterator i;
+        Button *b;
+
+        HASHMAP_FOREACH(b, m->buttons, i)
+                if (b->lid_closed)
+                        return true;
+
+        return false;
+}
+
 static bool manager_is_docked(Manager *m) {
         Iterator i;
         Button *b;
@@ -595,9 +606,8 @@ static int manager_count_external_displays(Manager *m) {
                 return r;
 
         FOREACH_DEVICE(e, d) {
+                const char *status, *enabled, *dash, *nn, *subsys;
                 sd_device *p;
-                const char *status, *enabled, *dash, *nn, *i, *subsys;
-                bool external = false;
 
                 if (sd_device_get_parent(d, &p) < 0)
                         continue;
@@ -620,16 +630,10 @@ static int manager_count_external_displays(Manager *m) {
                         continue;
 
                 dash++;
-                FOREACH_STRING(i, "VGA-", "DVI-I-", "DVI-D-", "DVI-A-"
-                               "Composite-", "SVIDEO-", "Component-",
-                               "DIN-", "DP-", "HDMI-A-", "HDMI-B-", "TV-") {
-
-                        if (startswith(dash, i)) {
-                                external = true;
-                                break;
-                        }
-                }
-                if (!external)
+                if (!STARTSWITH_SET(dash,
+                                    "VGA-", "DVI-I-", "DVI-D-", "DVI-A-"
+                                    "Composite-", "SVIDEO-", "Component-",
+                                    "DIN-", "DP-", "HDMI-A-", "HDMI-B-", "TV-"))
                         continue;
 
                 /* Ignore ports that are not enabled */
@@ -670,15 +674,13 @@ bool manager_is_docked_or_external_displays(Manager *m) {
 bool manager_is_on_external_power(void) {
         int r;
 
-        /* For now we only check for AC power, but 'external power' can apply
-         * to anything that isn't an internal battery */
+        /* For now we only check for AC power, but 'external power' can apply to anything that isn't an internal
+         * battery */
         r = on_ac_power();
         if (r < 0)
                 log_warning_errno(r, "Failed to read AC power status: %m");
-        else if (r > 0)
-                return true;
 
-        return false;
+        return r != 0; /* Treat failure as 'on AC' */
 }
 
 bool manager_all_buttons_ignored(Manager *m) {
@@ -778,7 +780,7 @@ int manager_read_utmp(Manager *m) {
         endutxent();
         return r;
 #else
-        return 0
+        return 0;
 #endif
 }
 

@@ -28,7 +28,7 @@ static int sd_netlink_new(sd_netlink **ret) {
                 return -ENOMEM;
 
         *rtnl = (sd_netlink) {
-                .n_ref = REFCNT_INIT,
+                .n_ref = 1,
                 .fd = -1,
                 .sockaddr.nl.nl_family = AF_NETLINK,
                 .original_pid = getpid_cached(),
@@ -182,7 +182,7 @@ static sd_netlink *netlink_free(sd_netlink *rtnl) {
         return mfree(rtnl);
 }
 
-DEFINE_ATOMIC_REF_UNREF_FUNC(sd_netlink, sd_netlink, netlink_free);
+DEFINE_TRIVIAL_REF_UNREF_FUNC(sd_netlink, sd_netlink, netlink_free);
 
 static void rtnl_seal_message(sd_netlink *rtnl, sd_netlink_message *m) {
         assert(rtnl);
@@ -224,10 +224,10 @@ int sd_netlink_send(sd_netlink *nl,
 int rtnl_rqueue_make_room(sd_netlink *rtnl) {
         assert(rtnl);
 
-        if (rtnl->rqueue_size >= RTNL_RQUEUE_MAX) {
-                log_debug("rtnl: exhausted the read queue size (%d)", RTNL_RQUEUE_MAX);
-                return -ENOBUFS;
-        }
+        if (rtnl->rqueue_size >= RTNL_RQUEUE_MAX)
+                return log_debug_errno(SYNTHETIC_ERRNO(ENOBUFS),
+                                       "rtnl: exhausted the read queue size (%d)",
+                                       RTNL_RQUEUE_MAX);
 
         if (!GREEDY_REALLOC(rtnl->rqueue, rtnl->rqueue_allocated, rtnl->rqueue_size + 1))
                 return -ENOMEM;
@@ -238,10 +238,10 @@ int rtnl_rqueue_make_room(sd_netlink *rtnl) {
 int rtnl_rqueue_partial_make_room(sd_netlink *rtnl) {
         assert(rtnl);
 
-        if (rtnl->rqueue_partial_size >= RTNL_RQUEUE_MAX) {
-                log_debug("rtnl: exhausted the partial read queue size (%d)", RTNL_RQUEUE_MAX);
-                return -ENOBUFS;
-        }
+        if (rtnl->rqueue_partial_size >= RTNL_RQUEUE_MAX)
+                return log_debug_errno(SYNTHETIC_ERRNO(ENOBUFS),
+                                       "rtnl: exhausted the partial read queue size (%d)",
+                                       RTNL_RQUEUE_MAX);
 
         if (!GREEDY_REALLOC(rtnl->rqueue_partial, rtnl->rqueue_partial_allocated,
                             rtnl->rqueue_partial_size + 1))
@@ -550,7 +550,7 @@ int sd_netlink_call_async(
                         return r;
         }
 
-        r = netlink_slot_allocate(nl, !ret_slot, NETLINK_REPLY_CALLBACK, sizeof(struct reply_callback), destroy_callback, userdata, description, &slot);
+        r = netlink_slot_allocate(nl, !ret_slot, NETLINK_REPLY_CALLBACK, sizeof(struct reply_callback), userdata, description, &slot);
         if (r < 0)
                 return r;
 
@@ -574,6 +574,9 @@ int sd_netlink_call_async(
                         return r;
                 }
         }
+
+        /* Set this at last. Otherwise, some failures in above call the destroy callback but some do not. */
+        slot->destroy_callback = destroy_callback;
 
         if (ret_slot)
                 *ret_slot = slot;
@@ -840,7 +843,7 @@ int sd_netlink_add_match(
         assert_return(callback, -EINVAL);
         assert_return(!rtnl_pid_changed(rtnl), -ECHILD);
 
-        r = netlink_slot_allocate(rtnl, !ret_slot, NETLINK_MATCH_CALLBACK, sizeof(struct match_callback), destroy_callback, userdata, description, &slot);
+        r = netlink_slot_allocate(rtnl, !ret_slot, NETLINK_MATCH_CALLBACK, sizeof(struct match_callback), userdata, description, &slot);
         if (r < 0)
                 return r;
 
@@ -891,6 +894,9 @@ int sd_netlink_add_match(
         }
 
         LIST_PREPEND(match_callbacks, rtnl->match_callbacks, &slot->match_callback);
+
+        /* Set this at last. Otherwise, some failures in above call the destroy callback but some do not. */
+        slot->destroy_callback = destroy_callback;
 
         if (ret_slot)
                 *ret_slot = slot;

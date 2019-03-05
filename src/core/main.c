@@ -28,6 +28,7 @@
 #include "bus-error.h"
 #include "bus-util.h"
 #include "capability-util.h"
+#include "cgroup-util.h"
 #include "clock-util.h"
 #include "conf-parser.h"
 #include "cpu-set-util.h"
@@ -57,6 +58,7 @@
 #include "pager.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "pretty-print.h"
 #include "proc-cmdline.h"
 #include "process-util.h"
 #include "raw-clone.h"
@@ -81,6 +83,10 @@
 #include "virt.h"
 #include "watchdog.h"
 
+#if HAS_FEATURE_ADDRESS_SANITIZER
+#include <sanitizer/lsan_interface.h>
+#endif
+
 static enum {
         ACTION_RUN,
         ACTION_HELP,
@@ -99,9 +105,8 @@ static bool arg_crash_reboot = false;
 static char *arg_confirm_spawn = NULL;
 static ShowStatus arg_show_status = _SHOW_STATUS_INVALID;
 static bool arg_switched_root = false;
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
 static bool arg_service_watchdogs = true;
-static char ***arg_join_controllers = NULL;
 static ExecOutput arg_default_std_output = EXEC_OUTPUT_JOURNAL;
 static ExecOutput arg_default_std_error = EXEC_OUTPUT_INHERIT;
 static usec_t arg_default_restart_usec = DEFAULT_RESTART_USEC;
@@ -121,7 +126,7 @@ static nsec_t arg_timer_slack_nsec = NSEC_INFINITY;
 static usec_t arg_default_timer_accuracy_usec = 1 * USEC_PER_MINUTE;
 static Set* arg_syscall_archs = NULL;
 static FILE* arg_serialization = NULL;
-static bool arg_default_cpu_accounting = false;
+static int arg_default_cpu_accounting = -1;
 static bool arg_default_io_accounting = false;
 static bool arg_default_ip_accounting = false;
 static bool arg_default_blockio_accounting = false;
@@ -131,7 +136,14 @@ static uint64_t arg_default_tasks_max = UINT64_MAX;
 static sd_id128_t arg_machine_id = {};
 static EmergencyAction arg_cad_burst_action = EMERGENCY_ACTION_REBOOT_FORCE;
 
-_noreturn_ static void freeze_or_reboot(void) {
+_noreturn_ static void freeze_or_exit_or_reboot(void) {
+
+        /* If we are running in a contianer, let's prefer exiting, after all we can propagate an exit code to the
+         * container manager, and thus inform it that something went wrong. */
+        if (detect_container() > 0) {
+                log_emergency("Exiting PID 1...");
+                exit(EXIT_EXCEPTION);
+        }
 
         if (arg_crash_reboot) {
                 log_notice("Rebooting in 10s...");
@@ -186,7 +198,7 @@ _noreturn_ static void crash(int sig) {
                         (void) kill(pid, sig); /* raise() would kill the parent */
 
                         assert_not_reached("We shouldn't be here...");
-                        _exit(EXIT_FAILURE);
+                        _exit(EXIT_EXCEPTION);
                 } else {
                         siginfo_t status;
                         int r;
@@ -229,17 +241,18 @@ _noreturn_ static void crash(int sig) {
                 else if (pid == 0) {
                         (void) setsid();
                         (void) make_console_stdio();
+                        (void) rlimit_nofile_safe();
                         (void) execle("/bin/sh", "/bin/sh", NULL, environ);
 
                         log_emergency_errno(errno, "execle() failed: %m");
-                        _exit(EXIT_FAILURE);
+                        _exit(EXIT_EXCEPTION);
                 } else {
                         log_info("Spawned crash shell as PID "PID_FMT".", pid);
                         (void) wait_for_terminate(pid, NULL);
                 }
         }
 
-        freeze_or_reboot();
+        freeze_or_exit_or_reboot();
 }
 
 static void install_crash_handler(void) {
@@ -670,7 +683,7 @@ static int parse_config_file(void) {
                 { "Manager", "CrashReboot",               config_parse_bool,             0, &arg_crash_reboot                      },
                 { "Manager", "ShowStatus",                config_parse_show_status,      0, &arg_show_status                       },
                 { "Manager", "CPUAffinity",               config_parse_cpu_affinity2,    0, NULL                                   },
-                { "Manager", "JoinControllers",           config_parse_join_controllers, 0, &arg_join_controllers                  },
+                { "Manager", "JoinControllers",           config_parse_warn_compat,      DISABLED_CONFIGURATION, NULL              },
                 { "Manager", "RuntimeWatchdogSec",        config_parse_sec,              0, &arg_runtime_watchdog                  },
                 { "Manager", "ShutdownWatchdogSec",       config_parse_sec,              0, &arg_shutdown_watchdog                 },
                 { "Manager", "WatchdogDevice",            config_parse_path,             0, &arg_watchdog_device                   },
@@ -706,7 +719,7 @@ static int parse_config_file(void) {
                 { "Manager", "DefaultLimitNICE",          config_parse_rlimit,           RLIMIT_NICE, arg_default_rlimit           },
                 { "Manager", "DefaultLimitRTPRIO",        config_parse_rlimit,           RLIMIT_RTPRIO, arg_default_rlimit         },
                 { "Manager", "DefaultLimitRTTIME",        config_parse_rlimit,           RLIMIT_RTTIME, arg_default_rlimit         },
-                { "Manager", "DefaultCPUAccounting",      config_parse_bool,             0, &arg_default_cpu_accounting            },
+                { "Manager", "DefaultCPUAccounting",      config_parse_tristate,         0, &arg_default_cpu_accounting            },
                 { "Manager", "DefaultIOAccounting",       config_parse_bool,             0, &arg_default_io_accounting             },
                 { "Manager", "DefaultIPAccounting",       config_parse_bool,             0, &arg_default_ip_accounting             },
                 { "Manager", "DefaultBlockIOAccounting",  config_parse_bool,             0, &arg_default_blockio_accounting        },
@@ -757,7 +770,14 @@ static void set_manager_defaults(Manager *m) {
         m->default_restart_usec = arg_default_restart_usec;
         m->default_start_limit_interval = arg_default_start_limit_interval;
         m->default_start_limit_burst = arg_default_start_limit_burst;
-        m->default_cpu_accounting = arg_default_cpu_accounting;
+
+        /* On 4.15+ with unified hierarchy, CPU accounting is essentially free as it doesn't require the CPU
+         * controller to be enabled, so the default is to enable it unless we got told otherwise. */
+        if (arg_default_cpu_accounting >= 0)
+                m->default_cpu_accounting = arg_default_cpu_accounting;
+        else
+                m->default_cpu_accounting = cpu_accounting_is_cheap();
+
         m->default_io_accounting = arg_default_io_accounting;
         m->default_ip_accounting = arg_default_ip_accounting;
         m->default_blockio_accounting = arg_default_blockio_accounting;
@@ -765,8 +785,10 @@ static void set_manager_defaults(Manager *m) {
         m->default_tasks_accounting = arg_default_tasks_accounting;
         m->default_tasks_max = arg_default_tasks_max;
 
-        manager_set_default_rlimits(m, arg_default_rlimit);
-        manager_environment_add(m, NULL, arg_default_environment);
+        (void) manager_set_default_rlimits(m, arg_default_rlimit);
+
+        (void) manager_default_environment(m);
+        (void) manager_transient_environment_add(m, arg_default_environment);
 }
 
 static void set_manager_settings(Manager *m) {
@@ -927,7 +949,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case ARG_VERSION:
@@ -1019,10 +1041,10 @@ static int parse_argv(int argc, char *argv[]) {
                         r = safe_atoi(optarg, &fd);
                         if (r < 0)
                                 log_error_errno(r, "Failed to parse deserialize option \"%s\": %m", optarg);
-                        if (fd < 0) {
-                                log_error("Invalid deserialize fd: %d", fd);
-                                return -EINVAL;
-                        }
+                        if (fd < 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Invalid deserialize fd: %d",
+                                                       fd);
 
                         (void) fd_cloexec(fd, true);
 
@@ -1076,8 +1098,8 @@ static int parse_argv(int argc, char *argv[]) {
                 /* Hmm, when we aren't run as init system
                  * let's complain about excess arguments */
 
-                log_error("Excess arguments.");
-                return -EINVAL;
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Excess arguments.");
         }
 
         return 0;
@@ -1252,6 +1274,7 @@ static void bump_file_max_and_nr_open(void) {
 }
 
 static int bump_rlimit_nofile(struct rlimit *saved_rlimit) {
+        struct rlimit new_rlimit;
         int r, nr;
 
         assert(saved_rlimit);
@@ -1286,12 +1309,30 @@ static int bump_rlimit_nofile(struct rlimit *saved_rlimit) {
                 if (arg_system)
                         rl->rlim_max = MIN((rlim_t) nr, MAX(rl->rlim_max, (rlim_t) HIGH_RLIMIT_NOFILE));
 
+                /* If for some reason we were invoked with a soft limit above 1024 (which should never
+                 * happen!, but who knows what we get passed in from pam_limit when invoked as --user
+                 * instance), then lower what we pass on to not confuse our children */
+                rl->rlim_cur = MIN(rl->rlim_cur, (rlim_t) FD_SETSIZE);
+
                 arg_default_rlimit[RLIMIT_NOFILE] = rl;
+        }
+
+        /* Calculate the new limits to use for us. Never lower from what we inherited. */
+        new_rlimit = (struct rlimit) {
+                .rlim_cur = MAX((rlim_t) nr, saved_rlimit->rlim_cur),
+                .rlim_max = MAX((rlim_t) nr, saved_rlimit->rlim_max),
+        };
+
+        /* Shortcut if nothing changes. */
+        if (saved_rlimit->rlim_max >= new_rlimit.rlim_max &&
+            saved_rlimit->rlim_cur >= new_rlimit.rlim_cur) {
+                log_debug("RLIMIT_NOFILE is already as high or higher than we need it, not bumping.");
+                return 0;
         }
 
         /* Bump up the resource limit for ourselves substantially, all the way to the maximum the kernel allows, for
          * both hard and soft. */
-        r = setrlimit_closest(RLIMIT_NOFILE, &RLIMIT_MAKE_CONST(nr));
+        r = setrlimit_closest(RLIMIT_NOFILE, &new_rlimit);
         if (r < 0)
                 return log_warning_errno(r, "Setting RLIMIT_NOFILE failed, ignoring: %m");
 
@@ -1299,6 +1340,7 @@ static int bump_rlimit_nofile(struct rlimit *saved_rlimit) {
 }
 
 static int bump_rlimit_memlock(struct rlimit *saved_rlimit) {
+        struct rlimit new_rlimit;
         int r;
 
         assert(saved_rlimit);
@@ -1310,7 +1352,33 @@ static int bump_rlimit_memlock(struct rlimit *saved_rlimit) {
         if (getrlimit(RLIMIT_MEMLOCK, saved_rlimit) < 0)
                 return log_warning_errno(errno, "Reading RLIMIT_MEMLOCK failed, ignoring: %m");
 
-        r = setrlimit_closest(RLIMIT_MEMLOCK, &RLIMIT_MAKE_CONST(HIGH_RLIMIT_MEMLOCK));
+        /* Pass the original value down to invoked processes */
+        if (!arg_default_rlimit[RLIMIT_MEMLOCK]) {
+                struct rlimit *rl;
+
+                rl = newdup(struct rlimit, saved_rlimit, 1);
+                if (!rl)
+                        return log_oom();
+
+                arg_default_rlimit[RLIMIT_MEMLOCK] = rl;
+        }
+
+        /* Using MAX() on resource limits only is safe if RLIM_INFINITY is > 0. POSIX declares that rlim_t
+         * must be unsigned, hence this is a given, but let's make this clear here. */
+        assert_cc(RLIM_INFINITY > 0);
+
+        new_rlimit = (struct rlimit) {
+                .rlim_cur = MAX(HIGH_RLIMIT_MEMLOCK, saved_rlimit->rlim_cur),
+                .rlim_max = MAX(HIGH_RLIMIT_MEMLOCK, saved_rlimit->rlim_max),
+        };
+
+        if (saved_rlimit->rlim_max >= new_rlimit.rlim_cur &&
+            saved_rlimit->rlim_cur >= new_rlimit.rlim_max) {
+                log_debug("RLIMIT_MEMLOCK is already as high or higher than we need it, not bumping.");
+                return 0;
+        }
+
+        r = setrlimit_closest(RLIMIT_MEMLOCK, &new_rlimit);
         if (r < 0)
                 return log_warning_errno(r, "Setting RLIMIT_MEMLOCK failed, ignoring: %m");
 
@@ -1319,7 +1387,7 @@ static int bump_rlimit_memlock(struct rlimit *saved_rlimit) {
 
 static void test_usr(void) {
 
-        /* Check that /usr is not a separate fs */
+        /* Check that /usr is either on the same file system as / or mounted already. */
 
         if (dir_is_empty("/usr") <= 0)
                 return;
@@ -1359,12 +1427,12 @@ static int status_welcome(void) {
                                "Failed to read os-release file, ignoring: %m");
 
         if (log_get_show_color())
-                return status_printf(NULL, false, false,
+                return status_printf(NULL, 0,
                                      "\nWelcome to \x1B[%sm%s\x1B[0m!\n",
                                      isempty(ansi_color) ? "1" : ansi_color,
                                      isempty(pretty_name) ? "Linux" : pretty_name);
         else
-                return status_printf(NULL, false, false,
+                return status_printf(NULL, 0,
                                      "\nWelcome to %s!\n",
                                      isempty(pretty_name) ? "Linux" : pretty_name);
 }
@@ -1396,7 +1464,7 @@ static int bump_unix_max_dgram_qlen(void) {
 
         r = read_one_line_file("/proc/sys/net/unix/max_dgram_qlen", &qlen);
         if (r < 0)
-                return log_warning_errno(r, "Failed to read AF_UNIX datagram queue length, ignoring: %m");
+                return log_full_errno(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, r, "Failed to read AF_UNIX datagram queue length, ignoring: %m");
 
         r = safe_atolu(qlen, &v);
         if (r < 0)
@@ -1405,7 +1473,7 @@ static int bump_unix_max_dgram_qlen(void) {
         if (v >= DEFAULT_UNIX_MAX_DGRAM_QLEN)
                 return 0;
 
-        r = write_string_filef("/proc/sys/net/unix/max_dgram_qlen", 0, "%lu", DEFAULT_UNIX_MAX_DGRAM_QLEN);
+        r = write_string_filef("/proc/sys/net/unix/max_dgram_qlen", WRITE_STRING_FILE_DISABLE_BUFFER, "%lu", DEFAULT_UNIX_MAX_DGRAM_QLEN);
         if (r < 0)
                 return log_full_errno(IN_SET(r, -EROFS, -EPERM, -EACCES) ? LOG_DEBUG : LOG_WARNING, r,
                                       "Failed to bump AF_UNIX datagram queue length, ignoring: %m");
@@ -1620,7 +1688,7 @@ static void initialize_core_pattern(bool skip_setup) {
         if (getpid_cached() != 1)
                 return;
 
-        r = write_string_file("/proc/sys/kernel/core_pattern", arg_early_core_pattern, 0);
+        r = write_string_file("/proc/sys/kernel/core_pattern", arg_early_core_pattern, WRITE_STRING_FILE_DISABLE_BUFFER);
         if (r < 0)
                 log_warning_errno(r, "Failed to write '%s' to /proc/sys/kernel/core_pattern, ignoring: %m", arg_early_core_pattern);
 }
@@ -1647,12 +1715,11 @@ static void do_reexecute(
          * we do that */
         watchdog_close(true);
 
-        /* Reset the RLIMIT_NOFILE to the kernel default, so that the new systemd can pass the kernel default to its
-         * child processes */
-
-        if (saved_rlimit_nofile->rlim_cur > 0)
+        /* Reset RLIMIT_NOFILE + RLIMIT_MEMLOCK back to the kernel defaults, so that the new systemd can pass
+         * the kernel default to its child processes */
+        if (saved_rlimit_nofile->rlim_cur != 0)
                 (void) setrlimit(RLIMIT_NOFILE, saved_rlimit_nofile);
-        if (saved_rlimit_memlock->rlim_cur != (rlim_t) -1)
+        if (saved_rlimit_memlock->rlim_cur != RLIM_INFINITY)
                 (void) setrlimit(RLIMIT_MEMLOCK, saved_rlimit_memlock);
 
         if (switch_root_dir) {
@@ -1721,6 +1788,7 @@ static void do_reexecute(
         /* Reenable any blocked signals, especially important if we switch from initial ramdisk to init=... */
         (void) reset_all_signal_handlers();
         (void) reset_signal_mask();
+        (void) rlimit_nofile_safe();
 
         if (switch_root_init) {
                 args[0] = switch_root_init;
@@ -1900,7 +1968,7 @@ static void log_execution_mode(bool *ret_first_boot) {
         if (arg_system) {
                 int v;
 
-                log_info(PACKAGE_STRING " running in %ssystem mode. (" SYSTEMD_FEATURES ")",
+                log_info("systemd " GIT_VERSION " running in %ssystem mode. (" SYSTEMD_FEATURES ")",
                          arg_action == ACTION_TEST ? "test " : "" );
 
                 v = detect_virtualization();
@@ -1928,7 +1996,7 @@ static void log_execution_mode(bool *ret_first_boot) {
                         _cleanup_free_ char *t;
 
                         t = uid_to_name(getuid());
-                        log_debug(PACKAGE_STRING " running in %suser mode for user " UID_FMT "/%s. (" SYSTEMD_FEATURES ")",
+                        log_debug("systemd " GIT_VERSION " running in %suser mode for user " UID_FMT "/%s. (" SYSTEMD_FEATURES ")",
                                   arg_action == ACTION_TEST ? " test" : "", getuid(), strna(t));
                 }
 
@@ -1961,7 +2029,7 @@ static int initialize_runtime(
                 install_crash_handler();
 
                 if (!skip_setup) {
-                        r = mount_cgroup_controllers(arg_join_controllers);
+                        r = mount_cgroup_controllers();
                         if (r < 0) {
                                 *ret_error_message = "Failed to mount cgroup hierarchies";
                                 return r;
@@ -2086,7 +2154,6 @@ static void free_arguments(void) {
 
         arg_default_unit = mfree(arg_default_unit);
         arg_confirm_spawn = mfree(arg_confirm_spawn);
-        arg_join_controllers = strv_free_free(arg_join_controllers);
         arg_default_environment = strv_free(arg_default_environment);
         arg_syscall_archs = set_free(arg_syscall_archs);
 }
@@ -2141,50 +2208,43 @@ static int load_configuration(int argc, char **argv, const char **ret_error_mess
 static int safety_checks(void) {
 
         if (getpid_cached() == 1 &&
-            arg_action != ACTION_RUN) {
-                log_error("Unsupported execution mode while PID 1.");
-                return -EPERM;
-        }
+            arg_action != ACTION_RUN)
+                return log_error_errno(SYNTHETIC_ERRNO(EPERM),
+                                       "Unsupported execution mode while PID 1.");
 
         if (getpid_cached() == 1 &&
-            !arg_system) {
-                log_error("Can't run --user mode as PID 1.");
-                return -EPERM;
-        }
+            !arg_system)
+                return log_error_errno(SYNTHETIC_ERRNO(EPERM),
+                                       "Can't run --user mode as PID 1.");
 
         if (arg_action == ACTION_RUN &&
             arg_system &&
-            getpid_cached() != 1) {
-                log_error("Can't run system mode unless PID 1.");
-                return -EPERM;
-        }
+            getpid_cached() != 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EPERM),
+                                       "Can't run system mode unless PID 1.");
 
         if (arg_action == ACTION_TEST &&
-            geteuid() == 0) {
-                log_error("Don't run test mode as root.");
-                return -EPERM;
-        }
+            geteuid() == 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EPERM),
+                                       "Don't run test mode as root.");
 
         if (!arg_system &&
             arg_action == ACTION_RUN &&
-            sd_booted() <= 0) {
-                log_error("Trying to run as user instance, but the system has not been booted with systemd.");
-                return -EOPNOTSUPP;
-        }
+            sd_booted() <= 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                       "Trying to run as user instance, but the system has not been booted with systemd.");
 
         if (!arg_system &&
             arg_action == ACTION_RUN &&
-            !getenv("XDG_RUNTIME_DIR")) {
-                log_error("Trying to run as user instance, but $XDG_RUNTIME_DIR is not set.");
-                return -EUNATCH;
-        }
+            !getenv("XDG_RUNTIME_DIR"))
+                return log_error_errno(SYNTHETIC_ERRNO(EUNATCH),
+                                       "Trying to run as user instance, but $XDG_RUNTIME_DIR is not set.");
 
         if (arg_system &&
             arg_action == ACTION_RUN &&
-            running_in_chroot() > 0) {
-                log_error("Cannot be run in a chroot() environment.");
-                return -EOPNOTSUPP;
-        }
+            running_in_chroot() > 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                       "Cannot be run in a chroot() environment.");
 
         return 0;
 }
@@ -2295,7 +2355,11 @@ int main(int argc, char *argv[]) {
 
         dual_timestamp initrd_timestamp = DUAL_TIMESTAMP_NULL, userspace_timestamp = DUAL_TIMESTAMP_NULL, kernel_timestamp = DUAL_TIMESTAMP_NULL,
                 security_start_timestamp = DUAL_TIMESTAMP_NULL, security_finish_timestamp = DUAL_TIMESTAMP_NULL;
-        struct rlimit saved_rlimit_nofile = RLIMIT_MAKE_CONST(0), saved_rlimit_memlock = RLIMIT_MAKE_CONST((rlim_t) -1);
+        struct rlimit saved_rlimit_nofile = RLIMIT_MAKE_CONST(0),
+                saved_rlimit_memlock = RLIMIT_MAKE_CONST(RLIM_INFINITY); /* The original rlimits we passed
+                                                                          * in. Note we use different values
+                                                                          * for the two that indicate whether
+                                                                          * these fields are initialized! */
         bool skip_setup, loaded_policy = false, queue_default_job = false, first_boot = false, reexecute = false;
         char *switch_root_dir = NULL, *switch_root_init = NULL;
         usec_t before_startup, after_startup;
@@ -2456,7 +2520,7 @@ int main(int argc, char *argv[]) {
                 goto finish;
 
         if (IN_SET(arg_action, ACTION_TEST, ACTION_HELP, ACTION_DUMP_CONFIGURATION_ITEMS, ACTION_DUMP_BUS_PROPERTIES))
-                (void) pager_open(arg_no_pager, false);
+                (void) pager_open(arg_pager_flags);
 
         if (arg_action != ACTION_RUN)
                 skip_setup = true;
@@ -2610,6 +2674,10 @@ finish:
         }
 #endif
 
+#if HAS_FEATURE_ADDRESS_SANITIZER
+        __lsan_do_leak_check();
+#endif
+
         if (shutdown_verb) {
                 r = become_shutdown(shutdown_verb, retval);
                 log_error_errno(r, "Failed to execute shutdown binary, %s: %m", getpid_cached() == 1 ? "freezing" : "quitting");
@@ -2623,8 +2691,8 @@ finish:
                 if (error_message)
                         manager_status_printf(NULL, STATUS_TYPE_EMERGENCY,
                                               ANSI_HIGHLIGHT_RED "!!!!!!" ANSI_NORMAL,
-                                              "%s, freezing.", error_message);
-                freeze_or_reboot();
+                                              "%s.", error_message);
+                freeze_or_exit_or_reboot();
         }
 
         return retval;

@@ -5,6 +5,11 @@ fuzzers += [
          [libshared],
          []],
 
+        [['src/fuzz/fuzz-catalog.c'],
+         [libjournal_core,
+          libshared],
+         []],
+
         [['src/fuzz/fuzz-dns-packet.c',
           dns_type_headers],
          [libsystemd_resolve_core,
@@ -51,7 +56,31 @@ fuzzers += [
           libshared],
          [libmount]],
 
+        [['src/fuzz/fuzz-journald-audit.c',
+          'src/fuzz/fuzz-journald.c'],
+         [libjournal_core,
+          libshared],
+         [libselinux]],
+
+        [['src/fuzz/fuzz-journald-kmsg.c',
+          'src/fuzz/fuzz-journald.c'],
+         [libjournal_core,
+          libshared],
+         [libselinux]],
+
         [['src/fuzz/fuzz-journald-native.c',
+          'src/fuzz/fuzz-journald.c'],
+         [libjournal_core,
+          libshared],
+         [libselinux]],
+
+        [['src/fuzz/fuzz-journald-native-fd.c',
+          'src/fuzz/fuzz-journald.c'],
+         [libjournal_core,
+          libshared],
+         [libselinux]],
+
+        [['src/fuzz/fuzz-journald-stream.c',
           'src/fuzz/fuzz-journald.c'],
          [libjournal_core,
           libshared],
@@ -67,6 +96,18 @@ fuzzers += [
          [libsystemd_journal_remote,
           libshared],
          []],
+
+        [['src/fuzz/fuzz-udev-database.c'],
+         [libshared],
+         []],
+
+        [['src/fuzz/fuzz-udev-rules.c'],
+         [libudev_core,
+          libudev_static,
+          libsystemd_network,
+          libshared],
+         [threads,
+          libacl]],
 
         [['src/fuzz/fuzz-compress.c'],
          [libshared],

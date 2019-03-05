@@ -15,7 +15,7 @@
 #include "machine-id-setup.h"
 #include "macro.h"
 #include "mkdir.h"
-#include "mount-util.h"
+#include "mountpoint-util.h"
 #include "path-util.h"
 #include "process-util.h"
 #include "stat-util.h"
@@ -200,10 +200,10 @@ int machine_id_commit(const char *root) {
         r = fd_is_temporary_fs(fd);
         if (r < 0)
                 return log_error_errno(r, "Failed to determine whether %s is on a temporary file system: %m", etc_machine_id);
-        if (r == 0) {
-                log_error("%s is not on a temporary file system.", etc_machine_id);
-                return -EROFS;
-        }
+        if (r == 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EROFS),
+                                       "%s is not on a temporary file system.",
+                                       etc_machine_id);
 
         r = id128_read_fd(fd, ID128_PLAIN, &id);
         if (r < 0)

@@ -9,11 +9,11 @@
 #include "alloc-util.h"
 #include "fd-util.h"
 #include "format-util.h"
+#include "io-util.h"
 #include "missing.h"
 #include "netlink-internal.h"
 #include "netlink-types.h"
 #include "netlink-util.h"
-#include "refcnt.h"
 #include "socket-util.h"
 #include "util.h"
 
@@ -334,8 +334,7 @@ int socket_read_message(sd_netlink *rtnl) {
                             len, sizeof(uint8_t)))
                 return -ENOMEM;
 
-        iov.iov_base = rtnl->rbuffer;
-        iov.iov_len = rtnl->rbuffer_allocated;
+        iov = IOVEC_MAKE(rtnl->rbuffer, rtnl->rbuffer_allocated);
 
         /* read the pending message */
         r = socket_recv_message(rtnl->fd, &iov, &group, false);

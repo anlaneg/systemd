@@ -54,6 +54,7 @@
 #include "pager.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "pretty-print.h"
 #include "rlimit-util.h"
 #include "set.h"
 #include "sigbus.h"
@@ -61,6 +62,7 @@
 #include "strv.h"
 #include "syslog-util.h"
 #include "terminal-util.h"
+#include "tmpfile-util.h"
 #include "unit-name.h"
 #include "user-util.h"
 
@@ -84,10 +86,9 @@ static int pattern_compile(const char *pattern, unsigned flags, pcre2_code **out
 
                 r = pcre2_get_error_message(errorcode, buf, sizeof buf);
 
-                log_error("Bad pattern \"%s\": %s",
-                          pattern,
-                          r < 0 ? "unknown error" : (char*) buf);
-                return -EINVAL;
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Bad pattern \"%s\": %s", pattern,
+                                       r < 0 ? "unknown error" : (char *)buf);
         }
 
         *out = p;
@@ -104,11 +105,10 @@ enum {
 
 static OutputMode arg_output = OUTPUT_SHORT;
 static bool arg_utc = false;
-static bool arg_pager_end = false;
 static bool arg_follow = false;
 static bool arg_full = true;
 static bool arg_all = false;
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
 static int arg_lines = ARG_LINES_DEFAULT;
 static bool arg_no_tail = false;
 static bool arg_quiet = false;
@@ -119,6 +119,7 @@ static int arg_boot_offset = 0;
 static bool arg_dmesg = false;
 static bool arg_no_hostname = false;
 static const char *arg_cursor = NULL;
+static const char *arg_cursor_file = NULL;
 static const char *arg_after_cursor = NULL;
 static bool arg_show_cursor = false;
 static const char *arg_directory = NULL;
@@ -298,7 +299,7 @@ static int help(void) {
         _cleanup_free_ char *link = NULL;
         int r;
 
-        (void) pager_open(arg_no_pager, arg_pager_end);
+        (void) pager_open(arg_pager_flags);
 
         r = terminal_urlify_man("journalctl", "1", &link);
         if (r < 0)
@@ -315,6 +316,7 @@ static int help(void) {
                "  -c --cursor=CURSOR         Show entries starting at the specified cursor\n"
                "     --after-cursor=CURSOR   Show entries after the specified cursor\n"
                "     --show-cursor           Print the cursor after all the entries\n"
+               "     --cursor-file=FILE      Show entries after cursor in FILE and update FILE\n"
                "  -b --boot[=ID]             Show current boot or the specified boot\n"
                "     --list-boots            Show terse information about recorded boots\n"
                "  -k --dmesg                 Show kernel message log from the current boot\n"
@@ -396,6 +398,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_VERIFY_KEY,
                 ARG_DISK_USAGE,
                 ARG_AFTER_CURSOR,
+                ARG_CURSOR_FILE,
                 ARG_SHOW_CURSOR,
                 ARG_USER_UNIT,
                 ARG_LIST_CATALOG,
@@ -450,6 +453,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "verify-key",     required_argument, NULL, ARG_VERIFY_KEY     },
                 { "disk-usage",     no_argument,       NULL, ARG_DISK_USAGE     },
                 { "cursor",         required_argument, NULL, 'c'                },
+                { "cursor-file",    required_argument, NULL, ARG_CURSOR_FILE    },
                 { "after-cursor",   required_argument, NULL, ARG_AFTER_CURSOR   },
                 { "show-cursor",    no_argument,       NULL, ARG_SHOW_CURSOR    },
                 { "since",          required_argument, NULL, 'S'                },
@@ -492,11 +496,11 @@ static int parse_argv(int argc, char *argv[]) {
                         return version();
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case 'e':
-                        arg_pager_end = true;
+                        arg_pager_flags |= PAGER_JUMP_TO_END;
 
                         if (arg_lines == ARG_LINES_DEFAULT)
                                 arg_lines = 1000;
@@ -659,6 +663,10 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case 'c':
                         arg_cursor = optarg;
+                        break;
+
+                case ARG_CURSOR_FILE:
+                        arg_cursor_file = optarg;
                         break;
 
                 case ARG_AFTER_CURSOR:
@@ -1070,10 +1078,10 @@ static int add_matches(sd_journal *j, char **args) {
                                 r = add_matches_for_device(j, p);
                                 if (r < 0)
                                         return r;
-                        } else {
-                                log_error("File is neither a device node, nor regular file, nor executable: %s", *i);
-                                return -EINVAL;
-                        }
+                        } else
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "File is neither a device node, nor regular file, nor executable: %s",
+                                                       *i);
 
                         have_term = true;
                 } else {
@@ -1085,10 +1093,9 @@ static int add_matches(sd_journal *j, char **args) {
                         return log_error_errno(r, "Failed to add match '%s': %m", *i);
         }
 
-        if (!strv_isempty(args) && !have_term) {
-                log_error("\"+\" can only be used between terms");
-                return -EINVAL;
-        }
+        if (!strv_isempty(args) && !have_term)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "\"+\" can only be used between terms");
 
         return 0;
 }
@@ -1179,10 +1186,9 @@ static int discover_next_boot(sd_journal *j,
                 r = sd_journal_previous(j);
         if (r < 0)
                 return r;
-        else if (r == 0) {
-                log_debug("Whoopsie! We found a boot ID but can't read its last entry.");
-                return -ENODATA; /* This shouldn't happen. We just came from this very boot ID. */
-        }
+        else if (r == 0)
+                return log_debug_errno(SYNTHETIC_ERRNO(ENODATA),
+                                       "Whoopsie! We found a boot ID but can't read its last entry."); /* This shouldn't happen. We just came from this very boot ID. */
 
         r = sd_journal_get_realtime_usec(j, &next_boot->last);
         if (r < 0)
@@ -1326,7 +1332,7 @@ static int list_boots(sd_journal *j) {
         if (count == 0)
                 return count;
 
-        (void) pager_open(arg_no_pager, arg_pager_end);
+        (void) pager_open(arg_pager_flags);
 
         /* numbers are one less, but we need an extra char for the sign */
         w = DECIMAL_STR_WIDTH(count - 1) + 1;
@@ -1833,8 +1839,8 @@ finish:
 
         return r;
 #else
-        log_error("Forward-secure sealing not available.");
-        return -EOPNOTSUPP;
+        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                               "Forward-secure sealing not available.");
 #endif
 }
 
@@ -2058,13 +2064,17 @@ static int wait_for_change(sd_journal *j, int poll_fd) {
         if (r < 0)
                 return log_error_errno(r, "Failed to determine journal waiting time: %m");
 
-        if (ppoll(pollfds, ELEMENTSOF(pollfds), timeout == USEC_INFINITY ? NULL : timespec_store(&ts, timeout), NULL) < 0)
-                return log_error_errno(errno, "Couldn't wait for journal event: %m");
+        if (ppoll(pollfds, ELEMENTSOF(pollfds),
+                  timeout == USEC_INFINITY ? NULL : timespec_store(&ts, timeout), NULL) < 0) {
+                if (errno == EINTR)
+                        return 0;
 
-        if (pollfds[1].revents & (POLLHUP|POLLERR)) { /* STDOUT has been closed? */
-                log_debug("Standard output has been closed.");
-                return -ECANCELED;
+                return log_error_errno(errno, "Couldn't wait for journal event: %m");
         }
+
+        if (pollfds[1].revents & (POLLHUP|POLLERR)) /* STDOUT has been closed? */
+                return log_debug_errno(SYNTHETIC_ERRNO(ECANCELED),
+                                       "Standard output has been closed.");
 
         r = sd_journal_process(j);
         if (r < 0)
@@ -2075,6 +2085,7 @@ static int wait_for_change(sd_journal *j, int poll_fd) {
 
 int main(int argc, char *argv[]) {
         bool previous_boot_id_valid = false, first_line = true, ellipsized = false, need_seek = false;
+        bool use_cursor = false, after_cursor = false;
         _cleanup_(sd_journal_closep) sd_journal *j = NULL;
         sd_id128_t previous_boot_id;
         int n_shown = 0, r, poll_fd = -1;
@@ -2109,7 +2120,7 @@ int main(int argc, char *argv[]) {
         case ACTION_UPDATE_CATALOG: {
                 _cleanup_free_ char *database;
 
-                database = path_join(arg_root, CATALOG_DATABASE, NULL);
+                database = path_join(arg_root, CATALOG_DATABASE);
                 if (!database) {
                         r = log_oom();
                         goto finish;
@@ -2122,7 +2133,7 @@ int main(int argc, char *argv[]) {
                 } else {
                         bool oneline = arg_action == ACTION_LIST_CATALOG;
 
-                        (void) pager_open(arg_no_pager, arg_pager_end);
+                        (void) pager_open(arg_pager_flags);
 
                         if (optind < argc)
                                 r = catalog_list_items(stdout, database, oneline, argv + optind);
@@ -2418,19 +2429,41 @@ int main(int argc, char *argv[]) {
                 }
         }
 
-        if (arg_cursor || arg_after_cursor) {
-                r = sd_journal_seek_cursor(j, arg_cursor ?: arg_after_cursor);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to seek to cursor: %m");
-                        goto finish;
+        if (arg_cursor || arg_after_cursor || arg_cursor_file) {
+                _cleanup_free_ char *cursor_from_file = NULL;
+                const char *cursor = arg_cursor ?: arg_after_cursor;
+
+                if (arg_cursor_file) {
+                        r = read_one_line_file(arg_cursor_file, &cursor_from_file);
+                        if (r < 0 && r != -ENOENT) {
+                                log_error_errno(r, "Failed to read cursor file %s: %m", arg_cursor_file);
+                                goto finish;
+                        }
+
+                        if (r > 0) {
+                                cursor = cursor_from_file;
+                                after_cursor = true;
+                        }
+                } else
+                        after_cursor = !!arg_after_cursor;
+
+                if (cursor) {
+                        r = sd_journal_seek_cursor(j, cursor);
+                        if (r < 0) {
+                                log_error_errno(r, "Failed to seek to cursor: %m");
+                                goto finish;
+                        }
+                        use_cursor = true;
                 }
+        }
 
+        if (use_cursor) {
                 if (!arg_reverse)
-                        r = sd_journal_next_skip(j, 1 + !!arg_after_cursor);
+                        r = sd_journal_next_skip(j, 1 + after_cursor);
                 else
-                        r = sd_journal_previous_skip(j, 1 + !!arg_after_cursor);
+                        r = sd_journal_previous_skip(j, 1 + after_cursor);
 
-                if (arg_after_cursor && r < 2) {
+                if (after_cursor && r < 2) {
                         /* We couldn't find the next entry after the cursor. */
                         if (arg_follow)
                                 need_seek = true;
@@ -2490,7 +2523,7 @@ int main(int argc, char *argv[]) {
                 need_seek = true;
 
         if (!arg_follow)
-                (void) pager_open(arg_no_pager, arg_pager_end);
+                (void) pager_open(arg_pager_flags);
 
         if (!arg_quiet && (arg_lines != 0 || arg_follow)) {
                 usec_t start, end;
@@ -2659,14 +2692,26 @@ int main(int argc, char *argv[]) {
                         if (n_shown == 0 && !arg_quiet)
                                 printf("-- No entries --\n");
 
-                        if (arg_show_cursor) {
+                        if (arg_show_cursor || arg_cursor_file) {
                                 _cleanup_free_ char *cursor = NULL;
 
                                 r = sd_journal_get_cursor(j, &cursor);
                                 if (r < 0 && r != -EADDRNOTAVAIL)
                                         log_error_errno(r, "Failed to get cursor: %m");
-                                else if (r >= 0)
-                                        printf("-- cursor: %s\n", cursor);
+                                else if (r >= 0) {
+                                        if (arg_show_cursor)
+                                                printf("-- cursor: %s\n", cursor);
+
+                                        if (arg_cursor_file) {
+                                                r = write_string_file(arg_cursor_file, cursor,
+                                                                      WRITE_STRING_FILE_CREATE |
+                                                                      WRITE_STRING_FILE_ATOMIC);
+                                                if (r < 0)
+                                                        log_error_errno(r,
+                                                                        "Failed to write new cursor to %s: %m",
+                                                                        arg_cursor_file);
+                                        }
+                                }
                         }
 
                         break;

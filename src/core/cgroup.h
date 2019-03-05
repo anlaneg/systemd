@@ -83,6 +83,7 @@ struct CGroupContext {
         uint64_t cpu_weight;
         uint64_t startup_cpu_weight;
         usec_t cpu_quota_per_sec_usec;
+        usec_t cpu_quota_period_usec;
 
         uint64_t io_weight;
         uint64_t startup_io_weight;
@@ -118,6 +119,8 @@ struct CGroupContext {
 
         bool delegate;
         CGroupMask delegate_controllers;
+
+        CGroupMask disable_controllers;
 };
 
 /* Used when querying IP accounting data */
@@ -133,11 +136,11 @@ typedef enum CGroupIPAccountingMetric {
 typedef struct Unit Unit;
 typedef struct Manager Manager;
 
+usec_t cgroup_cpu_adjust_period(usec_t period, usec_t quota, usec_t resolution, usec_t max_period);
+
 void cgroup_context_init(CGroupContext *c);
 void cgroup_context_done(CGroupContext *c);
 void cgroup_context_dump(CGroupContext *c, FILE* f, const char *prefix);
-
-CGroupMask cgroup_context_get_mask(CGroupContext *c);
 
 void cgroup_context_free_device_allow(CGroupContext *c, CGroupDeviceAllow *a);
 void cgroup_context_free_io_device_weight(CGroupContext *c, CGroupIODeviceWeight *w);
@@ -153,17 +156,18 @@ CGroupMask unit_get_delegate_mask(Unit *u);
 CGroupMask unit_get_members_mask(Unit *u);
 CGroupMask unit_get_siblings_mask(Unit *u);
 CGroupMask unit_get_subtree_mask(Unit *u);
+CGroupMask unit_get_disable_mask(Unit *u);
+CGroupMask unit_get_ancestor_disable_mask(Unit *u);
 
 CGroupMask unit_get_target_mask(Unit *u);
 CGroupMask unit_get_enable_mask(Unit *u);
 
-bool unit_get_needs_bpf_firewall(Unit *u);
-CGroupMask unit_get_bpf_mask(Unit *u);
+void unit_invalidate_cgroup_members_masks(Unit *u);
 
-void unit_update_cgroup_members_masks(Unit *u);
+void unit_add_to_cgroup_realize_queue(Unit *u);
 
 const char *unit_get_realized_cgroup_path(Unit *u, CGroupMask mask);
-char *unit_default_cgroup_path(Unit *u);
+char *unit_default_cgroup_path(const Unit *u);
 int unit_set_cgroup_path(Unit *u, const char *path);
 int unit_pick_cgroup_path(Unit *u);
 
@@ -204,8 +208,8 @@ int unit_reset_ip_accounting(Unit *u);
         cc ? cc->name : false;                          \
         })
 
-bool manager_owns_root_cgroup(Manager *m);
-bool unit_has_root_cgroup(Unit *u);
+bool manager_owns_host_root_cgroup(Manager *m);
+bool unit_has_host_root_cgroup(Unit *u);
 
 int manager_notify_cgroup_empty(Manager *m, const char *group);
 

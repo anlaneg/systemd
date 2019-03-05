@@ -14,15 +14,16 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "log.h"
+#include "main-func.h"
 #include "pager.h"
 #include "path-util.h"
+#include "pretty-print.h"
 #include "string-util.h"
 #include "strv.h"
-#include "terminal-util.h"
 #include "util.h"
 
 static bool arg_cat_config = false;
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
 
 static int delete_rule(const char *rule) {
         _cleanup_free_ char *x = NULL, *fn = NULL;
@@ -38,16 +39,15 @@ static int delete_rule(const char *rule) {
         e = strchrnul(x+1, x[0]);
         *e = 0;
 
-        if (!filename_is_valid(x + 1)) {
-                log_error("Rule file name '%s' is not valid, refusing.", x+1);
-                return -EINVAL;
-        }
+        if (!filename_is_valid(x + 1))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Rule file name '%s' is not valid, refusing.", x + 1);
 
         fn = strappend("/proc/sys/fs/binfmt_misc/", x+1);
         if (!fn)
                 return log_oom();
 
-        return write_string_file(fn, "-1", 0);
+        return write_string_file(fn, "-1", WRITE_STRING_FILE_DISABLE_BUFFER);
 }
 
 static int apply_rule(const char *rule) {
@@ -55,7 +55,7 @@ static int apply_rule(const char *rule) {
 
         (void) delete_rule(rule);
 
-        r = write_string_file("/proc/sys/fs/binfmt_misc/register", rule, 0);
+        r = write_string_file("/proc/sys/fs/binfmt_misc/register", rule, WRITE_STRING_FILE_DISABLE_BUFFER);
         if (r < 0)
                 return log_error_errno(r, "Failed to add binary format: %m");
 
@@ -125,7 +125,6 @@ static int help(void) {
 }
 
 static int parse_argv(int argc, char *argv[]) {
-
         enum {
                 ARG_VERSION = 0x100,
                 ARG_CAT_CONFIG,
@@ -160,7 +159,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case '?':
@@ -170,24 +169,21 @@ static int parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        if (arg_cat_config && argc > optind) {
-                log_error("Positional arguments are not allowed with --cat-config");
-                return -EINVAL;
-        }
+        if (arg_cat_config && argc > optind)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Positional arguments are not allowed with --cat-config");
 
         return 1;
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         int r, k;
 
         r = parse_argv(argc, argv);
         if (r <= 0)
                 return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        log_setup_service();
 
         umask(0022);
 
@@ -206,20 +202,17 @@ int main(int argc, char *argv[]) {
                 char **f;
 
                 r = conf_files_list_strv(&files, ".conf", NULL, 0, (const char**) CONF_PATHS_STRV("binfmt.d"));
-                if (r < 0) {
-                        log_error_errno(r, "Failed to enumerate binfmt.d files: %m");
-                        goto finish;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Failed to enumerate binfmt.d files: %m");
 
                 if (arg_cat_config) {
-                        (void) pager_open(arg_no_pager, false);
+                        (void) pager_open(arg_pager_flags);
 
-                        r = cat_files(NULL, files, 0);
-                        goto finish;
+                        return cat_files(NULL, files, 0);
                 }
 
                 /* Flush out all rules */
-                write_string_file("/proc/sys/fs/binfmt_misc/status", "-1", 0);
+                write_string_file("/proc/sys/fs/binfmt_misc/status", "-1", WRITE_STRING_FILE_DISABLE_BUFFER);
 
                 STRV_FOREACH(f, files) {
                         k = apply_file(*f, true);
@@ -228,8 +221,7 @@ int main(int argc, char *argv[]) {
                 }
         }
 
-finish:
-        pager_close();
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return r;
 }
+
+DEFINE_MAIN_FUNCTION(run);

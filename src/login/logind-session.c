@@ -16,6 +16,7 @@
 #include "audit-util.h"
 #include "bus-error.h"
 #include "bus-util.h"
+#include "env-file.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -30,12 +31,14 @@
 #include "string-table.h"
 #include "strv.h"
 #include "terminal-util.h"
+#include "tmpfile-util.h"
 #include "user-util.h"
 #include "util.h"
 
 #define RELEASE_USEC (20*USEC_PER_SEC)
 
 static void session_remove_fifo(Session *s);
+static void session_restore_vt(Session *s);
 
 int session_new(Session **ret, Manager *m, const char *id) {
         _cleanup_(session_freep) Session *s = NULL;
@@ -406,7 +409,7 @@ int session_load(Session *s) {
 
         assert(s);
 
-        r = parse_env_file(NULL, s->state_file, NEWLINE,
+        r = parse_env_file(NULL, s->state_file,
                            "REMOTE",         &remote,
                            "SCOPE",          &s->scope,
                            "SCOPE_JOB",      &s->scope_job,
@@ -431,8 +434,7 @@ int session_load(Session *s) {
                            "CONTROLLER",     &controller,
                            "ACTIVE",         &active,
                            "DEVICES",        &devices,
-                           "IS_DISPLAY",     &is_display,
-                           NULL);
+                           "IS_DISPLAY",     &is_display);
 
         if (r < 0)
                 return log_error_errno(r, "Failed to read %s: %m", s->state_file);
@@ -441,10 +443,10 @@ int session_load(Session *s) {
                 uid_t u;
                 User *user;
 
-                if (!uid) {
-                        log_error("UID not specified for session %s", s->id);
-                        return -ENOENT;
-                }
+                if (!uid)
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOENT),
+                                               "UID not specified for session %s",
+                                               s->id);
 
                 r = parse_uid(uid, &u);
                 if (r < 0)  {
@@ -453,10 +455,10 @@ int session_load(Session *s) {
                 }
 
                 user = hashmap_get(s->manager->users, UID_TO_PTR(u));
-                if (!user) {
-                        log_error("User of session %s not known.", s->id);
-                        return -ENOENT;
-                }
+                if (!user)
+                        return log_error_errno(SYNTHETIC_ERRNO(ENOENT),
+                                               "User of session %s not known.",
+                                               s->id);
 
                 session_set_user(s, user);
         }
@@ -1224,13 +1226,8 @@ error:
         return r;
 }
 
-void session_restore_vt(Session *s) {
-
-        static const struct vt_mode mode = {
-                .mode = VT_AUTO,
-        };
-
-        int vt, old_fd;
+static void session_restore_vt(Session *s) {
+        int r, vt, old_fd;
 
         /* We need to get a fresh handle to the virtual terminal,
          * since the old file-descriptor is potentially in a hung-up
@@ -1246,12 +1243,9 @@ void session_restore_vt(Session *s) {
         if (vt < 0)
                 return;
 
-        (void) ioctl(vt, KDSETMODE, KD_TEXT);
-
-        (void) vt_reset_keyboard(vt);
-
-        (void) ioctl(vt, VT_SETMODE, &mode);
-        (void) fchown(vt, 0, (gid_t) -1);
+        r = vt_restore(vt);
+        if (r < 0)
+                log_warning_errno(r, "Failed to restore VT, ignoring: %m");
 
         s->vtfd = safe_close(s->vtfd);
 }
@@ -1276,9 +1270,9 @@ void session_leave_vt(Session *s) {
                 return;
 
         session_device_pause_all(s);
-        r = ioctl(s->vtfd, VT_RELDISP, 1);
+        r = vt_release(s->vtfd, false);
         if (r < 0)
-                log_debug_errno(errno, "Cannot release VT of session %s: %m", s->id);
+                log_debug_errno(r, "Cannot release VT of session %s: %m", s->id);
 }
 
 bool session_is_controller(Session *s, const char *sender) {

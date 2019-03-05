@@ -74,6 +74,7 @@ enum {
         CHASE_TRAIL_SLASH = 1 << 5, /* If set, any trailing slash will be preserved */
         CHASE_STEP        = 1 << 6, /* If set, just execute a single step of the normalization */
         CHASE_NOFOLLOW    = 1 << 7, /* Only valid with CHASE_OPEN: when the path's right-most component refers to symlink return O_PATH fd of the symlink, rather than following it. */
+        CHASE_WARN        = 1 << 8, /* Emit an appropriate warning when an error is encountered */
 };
 
 /* How many iterations to execute before returning -ELOOP */
@@ -106,5 +107,7 @@ int unlinkat_deallocate(int fd, const char *name, int flags);
 
 int fsync_directory_of_file(int fd);
 int fsync_path_at(int at_fd, const char *path);
+
+int syncfs_path(int atfd, const char *path);
 
 int open_parent(const char *path, int flags, mode_t mode);

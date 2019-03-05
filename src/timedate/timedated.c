@@ -15,9 +15,12 @@
 #include "clock-util.h"
 #include "def.h"
 #include "fileio-label.h"
+#include "fileio.h"
 #include "fs-util.h"
 #include "hashmap.h"
 #include "list.h"
+#include "main-func.h"
+#include "missing_capability.h"
 #include "path-util.h"
 #include "selinux-util.h"
 #include "signal-util.h"
@@ -69,7 +72,7 @@ static void unit_status_info_free(UnitStatusInfo *p) {
         free(p);
 }
 
-static void context_free(Context *c) {
+static void context_clear(Context *c) {
         UnitStatusInfo *p;
 
         assert(c);
@@ -157,7 +160,7 @@ static int context_ntp_service_is_active(Context *c) {
         /* Call context_update_ntp_status() to update UnitStatusInfo before calling this. */
 
         LIST_FOREACH(units, info, c->units)
-                count += streq_ptr(info->active_state, "active");
+                count += !STRPTR_IN_SET(info->active_state, "inactive", "failed");
 
         return count;
 }
@@ -171,7 +174,7 @@ static int context_ntp_service_is_enabled(Context *c) {
         /* Call context_update_ntp_status() to update UnitStatusInfo before calling this. */
 
         LIST_FOREACH(units, info, c->units)
-                count += STRPTR_IN_SET(info->unit_file_state, "enabled", "enabled-runtime");
+                count += !STRPTR_IN_SET(info->unit_file_state, "masked", "masked-runtime", "disabled", "bad");
 
         return count;
 }
@@ -520,6 +523,10 @@ static int property_get_can_ntp(
         assert(reply);
         assert(error);
 
+        if (c->slot_job_removed)
+                /* When the previous request is not finished, then assume NTP is enabled. */
+                return sd_bus_message_append(reply, "b", true);
+
         r = context_update_ntp_status(c, bus, reply);
         if (r < 0)
                 return r;
@@ -544,6 +551,10 @@ static int property_get_ntp(
         assert(property);
         assert(reply);
         assert(error);
+
+        if (c->slot_job_removed)
+                /* When the previous request is not finished, then assume NTP is active. */
+                return sd_bus_message_append(reply, "b", true);
 
         r = context_update_ntp_status(c, bus, reply);
         if (r < 0)
@@ -732,6 +743,9 @@ static int method_set_time(sd_bus_message *m, void *userdata, sd_bus_error *erro
         assert(m);
         assert(c);
 
+        if (c->slot_job_removed)
+                return sd_bus_error_set(error, BUS_ERROR_AUTOMATIC_TIME_SYNC_ENABLED, "Previous request is not finished, refusing.");
+
         r = context_update_ntp_status(c, bus, m);
         if (r < 0)
                 return sd_bus_error_set_errnof(error, r, "Failed to update context: %m");
@@ -913,6 +927,28 @@ static int method_set_ntp(sd_bus_message *m, void *userdata, sd_bus_error *error
         return sd_bus_reply_method_return(m, NULL);
 }
 
+static int method_list_timezones(sd_bus_message *m, void *userdata, sd_bus_error *error) {
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        _cleanup_strv_free_ char **zones = NULL;
+        int r;
+
+        assert(m);
+
+        r = get_timezones(&zones);
+        if (r < 0)
+                return sd_bus_error_set_errnof(error, r, "Failed to read list of time zones: %m");
+
+        r = sd_bus_message_new_method_return(m, &reply);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_append_strv(reply, zones);
+        if (r < 0)
+                return r;
+
+        return sd_bus_send(NULL, reply, NULL);
+}
+
 static const sd_bus_vtable timedate_vtable[] = {
         SD_BUS_VTABLE_START(0),
         SD_BUS_PROPERTY("Timezone", "s", NULL, offsetof(Context, zone), SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
@@ -926,6 +962,7 @@ static const sd_bus_vtable timedate_vtable[] = {
         SD_BUS_METHOD("SetTimezone", "sb", NULL, method_set_timezone, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("SetLocalRTC", "bbb", NULL, method_set_local_rtc, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("SetNTP", "bb", NULL, method_set_ntp, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("ListTimezones", NULL, "as", method_list_timezones, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_VTABLE_END,
 };
 
@@ -958,66 +995,54 @@ static int connect_bus(Context *c, sd_event *event, sd_bus **_bus) {
         return 0;
 }
 
-int main(int argc, char *argv[]) {
-        Context context = {};
+static int run(int argc, char *argv[]) {
+        _cleanup_(context_clear) Context context = {};
         _cleanup_(sd_event_unrefp) sd_event *event = NULL;
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         int r;
 
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        log_setup_service();
 
         umask(0022);
 
-        if (argc != 1) {
-                log_error("This program takes no arguments.");
-                r = -EINVAL;
-                goto finish;
-        }
+        if (argc != 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "This program takes no arguments.");
 
         assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGTERM, SIGINT, -1) >= 0);
 
         r = sd_event_default(&event);
-        if (r < 0) {
-                log_error_errno(r, "Failed to allocate event loop: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to allocate event loop: %m");
 
         (void) sd_event_set_watchdog(event, true);
 
         r = sd_event_add_signal(event, NULL, SIGINT, NULL, NULL);
         if (r < 0)
-                return r;
+                return log_error_errno(r, "Failed to install SIGINT handler: %m");
 
         r = sd_event_add_signal(event, NULL, SIGTERM, NULL, NULL);
         if (r < 0)
-                return r;
+                return log_error_errno(r, "Failed to install SIGTERM handler: %m");
 
         r = connect_bus(&context, event, &bus);
         if (r < 0)
-                goto finish;
+                return r;
 
         (void) sd_bus_negotiate_timestamp(bus, true);
 
         r = context_read_data(&context);
-        if (r < 0) {
-                log_error_errno(r, "Failed to read time zone data: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to read time zone data: %m");
 
         r = context_parse_ntp_services(&context);
         if (r < 0)
-                goto finish;
+                return r;
 
         r = bus_event_loop_with_idle(event, bus, "org.freedesktop.timedate1", DEFAULT_EXIT_USEC, NULL, NULL);
-        if (r < 0) {
-                log_error_errno(r, "Failed to run event loop: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to run event loop: %m");
 
-finish:
-        context_free(&context);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return 0;
 }
+
+DEFINE_MAIN_FUNCTION(run);

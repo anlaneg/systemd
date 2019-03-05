@@ -32,7 +32,6 @@
 #include "io-util.h"
 #include "log.h"
 #include "macro.h"
-#include "pager.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "proc-cmdline.h"
@@ -97,7 +96,7 @@ int read_one_char(FILE *f, char *ret, usec_t t, bool *need_nl) {
                 new_termios.c_cc[VTIME] = 0;
 
                 if (tcsetattr(fileno(f), TCSADRAIN, &new_termios) >= 0) {
-                        int c;
+                        char c;
 
                         if (t != USEC_INFINITY) {
                                 if (fd_wait_for_event(fileno(f), POLLIN, t) <= 0) {
@@ -106,17 +105,12 @@ int read_one_char(FILE *f, char *ret, usec_t t, bool *need_nl) {
                                 }
                         }
 
-                        errno = 0;
-                        c = fgetc(f);
-                        if (c == EOF)
-                                r = ferror(f) && errno > 0 ? -errno : -EIO;
-                        else
-                                r = 0;
-
+                        r = safe_fgetc(f, &c);
                         (void) tcsetattr(fileno(f), TCSADRAIN, &old_termios);
-
                         if (r < 0)
                                 return r;
+                        if (r == 0)
+                                return -EIO;
 
                         if (need_nl)
                                 *need_nl = c != '\n';
@@ -980,56 +974,56 @@ int get_ctty_devnr(pid_t pid, dev_t *d) {
         return 0;
 }
 
-int get_ctty(pid_t pid, dev_t *_devnr, char **r) {
-        char fn[STRLEN("/dev/char/") + 2*DECIMAL_STR_MAX(unsigned) + 1 + 1], *b = NULL;
-        _cleanup_free_ char *s = NULL;
-        const char *p;
+int get_ctty(pid_t pid, dev_t *ret_devnr, char **ret) {
+        _cleanup_free_ char *fn = NULL, *b = NULL;
         dev_t devnr;
-        int k;
+        int r;
 
-        assert(r);
+        r = get_ctty_devnr(pid, &devnr);
+        if (r < 0)
+                return r;
 
-        k = get_ctty_devnr(pid, &devnr);
-        if (k < 0)
-                return k;
+        r = device_path_make_canonical(S_IFCHR, devnr, &fn);
+        if (r < 0) {
+                if (r != -ENOENT) /* No symlink for this in /dev/char/? */
+                        return r;
 
-        sprintf(fn, "/dev/char/%u:%u", major(devnr), minor(devnr));
-
-        k = readlink_malloc(fn, &s);
-        if (k < 0) {
-
-                if (k != -ENOENT)
-                        return k;
-
-                /* This is an ugly hack */
                 if (major(devnr) == 136) {
+                        /* This is an ugly hack: PTY devices are not listed in /dev/char/, as they don't follow the
+                         * Linux device model. This means we have no nice way to match them up against their actual
+                         * device node. Let's hence do the check by the fixed, assigned major number. Normally we try
+                         * to avoid such fixed major/minor matches, but there appears to nother nice way to handle
+                         * this. */
+
                         if (asprintf(&b, "pts/%u", minor(devnr)) < 0)
                                 return -ENOMEM;
                 } else {
-                        /* Probably something like the ptys which have no
-                         * symlink in /dev/char. Let's return something
-                         * vaguely useful. */
+                        /* Probably something similar to the ptys which have no symlink in /dev/char/. Let's return
+                         * something vaguely useful. */
 
-                        b = strdup(fn + 5);
-                        if (!b)
-                                return -ENOMEM;
+                        r = device_path_make_major_minor(S_IFCHR, devnr, &fn);
+                        if (r < 0)
+                                return r;
                 }
-        } else {
-                if (startswith(s, "/dev/"))
-                        p = s + 5;
-                else if (startswith(s, "../"))
-                        p = s + 3;
-                else
-                        p = s;
-
-                b = strdup(p);
-                if (!b)
-                        return -ENOMEM;
         }
 
-        *r = b;
-        if (_devnr)
-                *_devnr = devnr;
+        if (!b) {
+                const char *w;
+
+                w = path_startswith(fn, "/dev/");
+                if (w) {
+                        b = strdup(w);
+                        if (!b)
+                                return -ENOMEM;
+                } else
+                        b = TAKE_PTR(fn);
+        }
+
+        if (ret)
+                *ret = TAKE_PTR(b);
+
+        if (ret_devnr)
+                *ret_devnr = devnr;
 
         return 0;
 }
@@ -1095,17 +1089,14 @@ int openpt_in_namespace(pid_t pid, int flags) {
         if (socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) < 0)
                 return -errno;
 
-        r = safe_fork("(sd-openpt)", FORK_RESET_SIGNALS|FORK_DEATHSIG, &child);
+        r = namespace_fork("(sd-openptns)", "(sd-openpt)", NULL, 0, FORK_RESET_SIGNALS|FORK_DEATHSIG,
+                           pidnsfd, mntnsfd, -1, usernsfd, rootfd, &child);
         if (r < 0)
                 return r;
         if (r == 0) {
                 int master;
 
                 pair[0] = safe_close(pair[0]);
-
-                r = namespace_enter(pidnsfd, mntnsfd, -1, usernsfd, rootfd);
-                if (r < 0)
-                        _exit(EXIT_FAILURE);
 
                 master = posix_openpt(flags|O_NOCTTY|O_CLOEXEC);
                 if (master < 0)
@@ -1122,7 +1113,7 @@ int openpt_in_namespace(pid_t pid, int flags) {
 
         pair[1] = safe_close(pair[1]);
 
-        r = wait_for_terminate_and_check("(sd-openpt)", child, 0);
+        r = wait_for_terminate_and_check("(sd-openptns)", child, 0);
         if (r < 0)
                 return r;
         if (r != EXIT_SUCCESS)
@@ -1144,17 +1135,14 @@ int open_terminal_in_namespace(pid_t pid, const char *name, int mode) {
         if (socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) < 0)
                 return -errno;
 
-        r = safe_fork("(sd-terminal)", FORK_RESET_SIGNALS|FORK_DEATHSIG, &child);
+        r = namespace_fork("(sd-terminalns)", "(sd-terminal)", NULL, 0, FORK_RESET_SIGNALS|FORK_DEATHSIG,
+                           pidnsfd, mntnsfd, -1, usernsfd, rootfd, &child);
         if (r < 0)
                 return r;
         if (r == 0) {
                 int master;
 
                 pair[0] = safe_close(pair[0]);
-
-                r = namespace_enter(pidnsfd, mntnsfd, -1, usernsfd, rootfd);
-                if (r < 0)
-                        _exit(EXIT_FAILURE);
 
                 master = open_terminal(name, mode|O_NOCTTY|O_CLOEXEC);
                 if (master < 0)
@@ -1168,7 +1156,7 @@ int open_terminal_in_namespace(pid_t pid, const char *name, int mode) {
 
         pair[1] = safe_close(pair[1]);
 
-        r = wait_for_terminate_and_check("(sd-terminal)", child, 0);
+        r = wait_for_terminate_and_check("(sd-terminalns)", child, 0);
         if (r < 0)
                 return r;
         if (r != EXIT_SUCCESS)
@@ -1279,183 +1267,52 @@ int vt_reset_keyboard(int fd) {
         return 0;
 }
 
-static bool urlify_enabled(void) {
-        static int cached_urlify_enabled = -1;
+int vt_restore(int fd) {
+        static const struct vt_mode mode = {
+                .mode = VT_AUTO,
+        };
+        int r, q = 0;
 
-        /* Unfortunately 'less' doesn't support links like this yet 😭, hence let's disable this as long as there's a
-         * pager in effect. Let's drop this check as soon as less got fixed a and enough time passed so that it's safe
-         * to assume that a link-enabled 'less' version has hit most installations. */
-
-        if (cached_urlify_enabled < 0) {
-                int val;
-
-                val = getenv_bool("SYSTEMD_URLIFY");
-                if (val >= 0)
-                        cached_urlify_enabled = val;
-                else
-                        cached_urlify_enabled = colors_enabled() && !pager_have();
-        }
-
-        return cached_urlify_enabled;
-}
-
-int terminal_urlify(const char *url, const char *text, char **ret) {
-        char *n;
-
-        assert(url);
-
-        /* Takes an URL and a pretty string and formats it as clickable link for the terminal. See
-         * https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda for details. */
-
-        if (isempty(text))
-                text = url;
-
-        if (urlify_enabled())
-                n = strjoin("\x1B]8;;", url, "\a", text, "\x1B]8;;\a");
-        else
-                n = strdup(text);
-        if (!n)
-                return -ENOMEM;
-
-        *ret = n;
-        return 0;
-}
-
-int terminal_urlify_path(const char *path, const char *text, char **ret) {
-        _cleanup_free_ char *absolute = NULL;
-        struct utsname u;
-        const char *url;
-        int r;
-
-        assert(path);
-
-        /* Much like terminal_urlify() above, but takes a file system path as input
-         * and turns it into a proper file:// URL first. */
-
-        if (isempty(path))
-                return -EINVAL;
-
-        if (isempty(text))
-                text = path;
-
-        if (!urlify_enabled()) {
-                char *n;
-
-                n = strdup(text);
-                if (!n)
-                        return -ENOMEM;
-
-                *ret = n;
-                return 0;
-        }
-
-        if (uname(&u) < 0)
-                return -errno;
-
-        if (!path_is_absolute(path)) {
-                r = path_make_absolute_cwd(path, &absolute);
-                if (r < 0)
-                        return r;
-
-                path = absolute;
-        }
-
-        /* As suggested by https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda, let's include the local
-         * hostname here. Note that we don't use gethostname_malloc() or gethostname_strict() since we are interested
-         * in the raw string the kernel has set, whatever it may be, under the assumption that terminals are not overly
-         * careful with validating the strings either. */
-
-        url = strjoina("file://", u.nodename, path);
-
-        return terminal_urlify(url, text, ret);
-}
-
-int terminal_urlify_man(const char *page, const char *section, char **ret) {
-        const char *url, *text;
-
-        url = strjoina("man:", page, "(", section, ")");
-        text = strjoina(page, "(", section, ") man page");
-
-        return terminal_urlify(url, text, ret);
-}
-
-static int cat_file(const char *filename, bool newline) {
-        _cleanup_fclose_ FILE *f = NULL;
-        _cleanup_free_ char *urlified = NULL;
-        int r;
-
-        f = fopen(filename, "re");
-        if (!f)
-                return -errno;
-
-        r = terminal_urlify_path(filename, NULL, &urlified);
+        r = ioctl(fd, KDSETMODE, KD_TEXT);
         if (r < 0)
-                return r;
+                q = log_debug_errno(errno, "Failed to set VT in text mode, ignoring: %m");
 
-        printf("%s%s# %s%s\n",
-               newline ? "\n" : "",
-               ansi_highlight_blue(),
-               urlified,
-               ansi_normal());
-        fflush(stdout);
-
-        for (;;) {
-                _cleanup_free_ char *line = NULL;
-
-                r = read_line(f, LONG_LINE_MAX, &line);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to read \"%s\": %m", filename);
-                if (r == 0)
-                        break;
-
-                puts(line);
+        r = vt_reset_keyboard(fd);
+        if (r < 0) {
+                log_debug_errno(r, "Failed to reset keyboard mode, ignoring: %m");
+                if (q >= 0)
+                        q = r;
         }
 
-        return 0;
+        r = ioctl(fd, VT_SETMODE, &mode);
+        if (r < 0) {
+                log_debug_errno(errno, "Failed to set VT_AUTO mode, ignoring: %m");
+                if (q >= 0)
+                        q = -errno;
+        }
+
+        r = fchown(fd, 0, (gid_t) -1);
+        if (r < 0) {
+                log_debug_errno(errno, "Failed to chown VT, ignoring: %m");
+                if (q >= 0)
+                        q = -errno;
+        }
+
+        return q;
 }
 
-int cat_files(const char *file, char **dropins, CatFlags flags) {
-        char **path;
-        int r;
+int vt_release(int fd, bool restore) {
+        assert(fd >= 0);
 
-        if (file) {
-                r = cat_file(file, false);
-                if (r == -ENOENT && (flags & CAT_FLAGS_MAIN_FILE_OPTIONAL))
-                        printf("%s# config file %s not found%s\n",
-                               ansi_highlight_magenta(),
-                               file,
-                               ansi_normal());
-                else if (r < 0)
-                        return log_warning_errno(r, "Failed to cat %s: %m", file);
-        }
+        /* This function releases the VT by acknowledging the VT-switch signal
+         * sent by the kernel and optionally reset the VT in text and auto
+         * VT-switching modes. */
 
-        STRV_FOREACH(path, dropins) {
-                r = cat_file(*path, file || path != dropins);
-                if (r < 0)
-                        return log_warning_errno(r, "Failed to cat %s: %m", *path);
-        }
+        if (ioctl(fd, VT_RELDISP, 1) < 0)
+                return -errno;
+
+        if (restore)
+                return vt_restore(fd);
 
         return 0;
-}
-
-void print_separator(void) {
-
-        /* Outputs a separator line that resolves to whitespace when copied from the terminal. We do that by outputting
-         * one line filled with spaces with ANSI underline set, followed by a second (empty) line. */
-
-        if (underline_enabled()) {
-                size_t i, c;
-
-                c = columns();
-
-                flockfile(stdout);
-                fputs_unlocked(ANSI_UNDERLINE, stdout);
-
-                for (i = 0; i < c; i++)
-                        fputc_unlocked(' ', stdout);
-
-                fputs_unlocked(ANSI_NORMAL "\n\n", stdout);
-                funlockfile(stdout);
-        } else
-                fputs("\n\n", stdout);
 }

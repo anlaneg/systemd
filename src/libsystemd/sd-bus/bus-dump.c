@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
+#include <sys/time.h>
+
 #include "alloc-util.h"
 #include "bus-dump.h"
 #include "bus-internal.h"
@@ -58,7 +60,7 @@ int bus_message_dump(sd_bus_message *m, FILE *f, unsigned flags) {
                         m->header->type == SD_BUS_MESSAGE_METHOD_ERROR ? ansi_highlight_red() :
                         m->header->type == SD_BUS_MESSAGE_METHOD_RETURN ? ansi_highlight_green() :
                         m->header->type != SD_BUS_MESSAGE_SIGNAL ? ansi_highlight() : "",
-                        special_glyph(TRIANGULAR_BULLET),
+                        special_glyph(SPECIAL_GLYPH_TRIANGULAR_BULLET),
                         ansi_normal(),
 
                         ansi_highlight(),

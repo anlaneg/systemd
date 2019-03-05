@@ -14,9 +14,10 @@
 #include "dirent-util.h"
 #include "dns-domain.h"
 #include "fd-util.h"
-#include "fileio-label.h"
+#include "fileio.h"
 #include "hostname-util.h"
 #include "io-util.h"
+#include "missing_network.h"
 #include "netlink-util.h"
 #include "network-internal.h"
 #include "ordered-set.h"
@@ -24,8 +25,8 @@
 #include "random-util.h"
 #include "resolved-bus.h"
 #include "resolved-conf.h"
-#include "resolved-dnssd.h"
 #include "resolved-dns-stub.h"
+#include "resolved-dnssd.h"
 #include "resolved-etc-hosts.h"
 #include "resolved-llmnr.h"
 #include "resolved-manager.h"
@@ -333,13 +334,12 @@ static int determine_hostname(char **full_hostname, char **llmnr_hostname, char 
                 return log_debug_errno(r, "Can't determine system hostname: %m");
 
         p = h;
-        r = dns_label_unescape(&p, label, sizeof label);
+        r = dns_label_unescape(&p, label, sizeof label, 0);
         if (r < 0)
                 return log_error_errno(r, "Failed to unescape host name: %m");
-        if (r == 0) {
-                log_error("Couldn't find a single label in hostname.");
-                return -EINVAL;
-        }
+        if (r == 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Couldn't find a single label in hostname.");
 
 #if HAVE_LIBIDN2
         r = idn2_to_unicode_8z8z(label, &utf8, 0);
@@ -356,10 +356,9 @@ static int determine_hostname(char **full_hostname, char **llmnr_hostname, char 
         if (k > 0)
                 r = k;
 
-        if (!utf8_is_valid(label)) {
-                log_error("System hostname is not UTF-8 clean.");
-                return -EINVAL;
-        }
+        if (!utf8_is_valid(label))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "System hostname is not UTF-8 clean.");
         decoded = label;
 #else
         decoded = label; /* no decoding */
@@ -369,12 +368,11 @@ static int determine_hostname(char **full_hostname, char **llmnr_hostname, char 
         if (r < 0)
                 return log_error_errno(r, "Failed to escape host name: %m");
 
-        if (is_localhost(n)) {
-                log_debug("System hostname is 'localhost', ignoring.");
-                return -EINVAL;
-        }
+        if (is_localhost(n))
+                return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "System hostname is 'localhost', ignoring.");
 
-        r = dns_name_concat(n, "local", mdns_hostname);
+        r = dns_name_concat(n, "local", 0, mdns_hostname);
         if (r < 0)
                 return log_error_errno(r, "Failed to determine mDNS hostname: %m");
 
@@ -406,7 +404,7 @@ static int make_fallback_hostnames(char **full_hostname, char **llmnr_hostname, 
         assert(mdns_hostname);
 
         p = fallback_hostname();
-        r = dns_label_unescape(&p, label, sizeof(label));
+        r = dns_label_unescape(&p, label, sizeof label, 0);
         if (r < 0)
                 return log_error_errno(r, "Failed to unescape fallback host name: %m");
 
@@ -416,7 +414,7 @@ static int make_fallback_hostnames(char **full_hostname, char **llmnr_hostname, 
         if (r < 0)
                 return log_error_errno(r, "Failed to escape fallback hostname: %m");
 
-        r = dns_name_concat(n, "local", &m);
+        r = dns_name_concat(n, "local", 0, &m);
         if (r < 0)
                 return log_error_errno(r, "Failed to concatenate mDNS hostname: %m");
 
@@ -582,7 +580,7 @@ int manager_new(Manager **ret) {
                 .dnssec_mode = DEFAULT_DNSSEC_MODE,
                 .dns_over_tls_mode = DEFAULT_DNS_OVER_TLS_MODE,
                 .enable_cache = true,
-                .dns_stub_listener_mode = DNS_STUB_LISTENER_UDP,
+                .dns_stub_listener_mode = DNS_STUB_LISTENER_YES,
                 .read_resolv_conf = true,
                 .need_builtin_fallbacks = true,
                 .etc_hosts_last = USEC_INFINITY,
@@ -691,7 +689,7 @@ Manager *manager_free(Manager *m) {
         manager_mdns_stop(m);
         manager_dns_stub_stop(m);
 
-        sd_bus_unref(m->bus);
+        sd_bus_flush_close_unref(m->bus);
 
         sd_event_source_unref(m->sigusr1_event_source);
         sd_event_source_unref(m->sigusr2_event_source);
@@ -755,20 +753,17 @@ int manager_recv(Manager *m, int fd, DnsProtocol protocol, DnsPacket **ret) {
         if (r < 0)
                 return r;
 
-        iov = (struct iovec) {
-                .iov_base = DNS_PACKET_DATA(p),
-                iov.iov_len = p->allocated,
-        };
+        iov = IOVEC_MAKE(DNS_PACKET_DATA(p), p->allocated);
 
         l = recvmsg(fd, &mh, 0);
-        if (l == 0)
-                return 0;
         if (l < 0) {
                 if (IN_SET(errno, EAGAIN, EINTR))
                         return 0;
 
                 return -errno;
         }
+        if (l == 0)
+                return 0;
 
         assert(!(mh.msg_flags & MSG_CTRUNC));
         assert(!(mh.msg_flags & MSG_TRUNC));
@@ -937,10 +932,7 @@ static int manager_ipv4_send(
         assert(port > 0);
         assert(p);
 
-        iov = (struct iovec) {
-                .iov_base = DNS_PACKET_DATA(p),
-                .iov_len = p->size,
-        };
+        iov = IOVEC_MAKE(DNS_PACKET_DATA(p), p->size);
 
         sa = (union sockaddr_union) {
                 .in.sin_family = AF_INET,
@@ -998,10 +990,7 @@ static int manager_ipv6_send(
         assert(port > 0);
         assert(p);
 
-        iov = (struct iovec) {
-                .iov_base = DNS_PACKET_DATA(p),
-                .iov_len = p->size,
-        };
+        iov = IOVEC_MAKE(DNS_PACKET_DATA(p), p->size);
 
         sa = (union sockaddr_union) {
                 .in6.sin6_family = AF_INET6,
@@ -1159,7 +1148,7 @@ int manager_next_hostname(Manager *m) {
         if (r < 0)
                 return r;
 
-        r = dns_name_concat(h, "local", &k);
+        r = dns_name_concat(h, "local", 0, &k);
         if (r < 0)
                 return r;
 

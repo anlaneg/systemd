@@ -6,6 +6,7 @@
 #include "alloc-util.h"
 #include "bus-error.h"
 #include "dbus-device.h"
+#include "dbus-unit.h"
 #include "device-private.h"
 #include "device-util.h"
 #include "device.h"
@@ -111,9 +112,30 @@ static void device_done(Unit *u) {
         d->wants_property = strv_free(d->wants_property);
 }
 
+static int device_load(Unit *u) {
+        int r;
+
+        r = unit_load_fragment_and_dropin_optional(u);
+        if (r < 0)
+                return r;
+
+        if (!u->description) {
+                /* Generate a description based on the path, to be used until the
+                   device is initialized properly */
+                r = unit_name_to_path(u->id, &u->description);
+                if (r < 0)
+                        log_unit_debug_errno(u, r, "Failed to unescape name: %m");
+        }
+
+        return 0;
+}
+
 static void device_set_state(Device *d, DeviceState state) {
         DeviceState old_state;
         assert(d);
+
+        if (d->state != state)
+                bus_unit_send_pending_change_signal(UNIT(d), false);
 
         old_state = d->state;
         d->state = state;
@@ -301,32 +323,32 @@ _pure_ static const char *device_sub_state_to_string(Unit *u) {
 }
 
 static int device_update_description(Unit *u, sd_device *dev, const char *path) {
-        const char *model, *label;
+        _cleanup_free_ char *j = NULL;
+        const char *model, *label, *desc;
         int r;
 
         assert(u);
-        assert(dev);
         assert(path);
 
-        if (sd_device_get_property_value(dev, "ID_MODEL_FROM_DATABASE", &model) >= 0 ||
-            sd_device_get_property_value(dev, "ID_MODEL", &model) >= 0) {
+        desc = path;
+
+        if (dev &&
+            (sd_device_get_property_value(dev, "ID_MODEL_FROM_DATABASE", &model) >= 0 ||
+             sd_device_get_property_value(dev, "ID_MODEL", &model) >= 0)) {
+                desc = model;
 
                 /* Try to concatenate the device model string with a label, if there is one */
                 if (sd_device_get_property_value(dev, "ID_FS_LABEL", &label) >= 0 ||
                     sd_device_get_property_value(dev, "ID_PART_ENTRY_NAME", &label) >= 0 ||
                     sd_device_get_property_value(dev, "ID_PART_ENTRY_NUMBER", &label) >= 0) {
 
-                        _cleanup_free_ char *j;
-
-                        j = strjoin(model, " ", label);
+                        desc = j = strjoin(model, " ", label);
                         if (!j)
                                 return log_oom();
+                }
+        }
 
-                        r = unit_set_description(u, j);
-                } else
-                        r = unit_set_description(u, model);
-        } else
-                r = unit_set_description(u, path);
+        r = unit_set_description(u, desc);
         if (r < 0)
                 return log_unit_error_errno(u, r, "Failed to set device description: %m");
 
@@ -526,12 +548,12 @@ static int device_setup_unit(Manager *m, sd_device *dev, const char *path, bool 
                         goto fail;
                 }
 
-                (void) device_update_description(u, dev, path);
-
                 /* The additional systemd udev properties we only interpret for the main object */
                 if (main)
                         (void) device_add_udev_wants(u, dev);
         }
+
+        (void) device_update_description(u, dev, path);
 
         /* So the user wants the mount units to be bound to the device but a mount unit might has been seen by systemd
          * before the device appears on its radar. In this case the device unit is partially initialized and includes
@@ -609,7 +631,7 @@ static int device_process_new(Manager *m, sd_device *dev) {
                 if (r == -ENOMEM)
                         return log_oom();
                 if (r < 0)
-                        return log_device_warning_errno(dev, r, "Failed to add parse SYSTEMD_ALIAS property: %m");
+                        return log_device_warning_errno(dev, r, "Failed to parse SYSTEMD_ALIAS property: %m");
 
                 if (!path_is_absolute(word))
                         log_device_warning(dev, "SYSTEMD_ALIAS is not an absolute path, ignoring: %s", word);
@@ -723,11 +745,11 @@ static Unit *device_following(Unit *u) {
                 return NULL;
 
         /* Make everybody follow the unit that's named after the sysfs path */
-        for (other = d->same_sysfs_next; other; other = other->same_sysfs_next)
+        LIST_FOREACH_AFTER(same_sysfs, other, d)
                 if (startswith(UNIT(other)->id, "sys-"))
                         return UNIT(other);
 
-        for (other = d->same_sysfs_prev; other; other = other->same_sysfs_prev) {
+        LIST_FOREACH_BEFORE(same_sysfs, other, d) {
                 if (startswith(UNIT(other)->id, "sys-"))
                         return UNIT(other);
 
@@ -802,13 +824,13 @@ static void device_enumerate(Manager *m) {
                         goto fail;
                 }
 
-                r = sd_device_monitor_attach_event(m->device_monitor, m->event, 0);
+                r = sd_device_monitor_attach_event(m->device_monitor, m->event);
                 if (r < 0) {
                         log_error_errno(r, "Failed to attach event to device monitor: %m");
                         goto fail;
                 }
 
-                r = sd_device_monitor_start(m->device_monitor, device_dispatch_io, m, "systemd-device-monitor");
+                r = sd_device_monitor_start(m->device_monitor, device_dispatch_io, m);
                 if (r < 0) {
                         log_error_errno(r, "Failed to start device monitor: %m");
                         goto fail;
@@ -817,7 +839,7 @@ static void device_enumerate(Manager *m) {
 
         r = sd_device_enumerator_new(&e);
         if (r < 0) {
-                log_error_errno(r, "Failed to alloacte device enumerator: %m");
+                log_error_errno(r, "Failed to allocate device enumerator: %m");
                 goto fail;
         }
 
@@ -1037,7 +1059,7 @@ const UnitVTable device_vtable = {
 
         .init = device_init,
         .done = device_done,
-        .load = unit_load_fragment_and_dropin_optional,
+        .load = device_load,
 
         .coldplug = device_coldplug,
         .catchup = device_catchup,

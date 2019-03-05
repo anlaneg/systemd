@@ -118,8 +118,8 @@
 
       <para>When outputting to a tty, lines are colored according to
       priority: lines of level ERROR and higher are colored red; lines
-      of level NOTICE and higher are highlighted; other lines are
-      displayed normally.</para>
+      of level NOTICE and higher are highlighted; lines of level DEBUG
+      are colored lighter grey; other lines are displayed normally.</para>
     </refsect1>
 
     <refsect1>
@@ -616,6 +616,17 @@
 
         <listitem><para>Start showing entries from the location in the
         journal specified by the passed cursor.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--cursor-file=<replaceable>FILE</replaceable></option></term>
+
+        <listitem><para>If <replaceable>FILE</replaceable> exists and contains a
+        cursor, start showing entries <emphasis>after</emphasis> this location.
+        Otherwise the show entries according the other given options. At the end,
+        write the cursor of the last entry to <replaceable>FILE</replaceable>. Use
+        this option to continually read the journal by sequentially calling
+        <command>journalctl</command>.</para></listitem>
       </varlistentry>
 
       <varlistentry>

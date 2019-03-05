@@ -14,7 +14,6 @@
 #include <string.h>
 
 #include "alloc-util.h"
-#include "def.h"
 #include "dirent-util.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -73,7 +72,7 @@ static int write_access2_rules(const char* srcdir) {
                         continue;
                 }
 
-                policy = fdopen(fd, "re");
+                policy = fdopen(fd, "r");
                 if (!policy) {
                         if (r == 0)
                                 r = -errno;
@@ -155,7 +154,7 @@ static int write_cipso2_rules(const char* srcdir) {
                         continue;
                 }
 
-                policy = fdopen(fd, "re");
+                policy = fdopen(fd, "r");
                 if (!policy) {
                         if (r == 0)
                                 r = -errno;
@@ -228,7 +227,7 @@ static int write_netlabel_rules(const char* srcdir) {
                         continue;
                 }
 
-                policy = fdopen(fd, "re");
+                policy = fdopen(fd, "r");
                 if (!policy) {
                         if (r == 0)
                                 r = -errno;
@@ -351,17 +350,17 @@ int mac_smack_setup(bool *loaded_policy) {
         }
 
 #ifdef SMACK_RUN_LABEL
-        r = write_string_file("/proc/self/attr/current", SMACK_RUN_LABEL, 0);
+        r = write_string_file("/proc/self/attr/current", SMACK_RUN_LABEL, WRITE_STRING_FILE_DISABLE_BUFFER);
         if (r < 0)
                 log_warning_errno(r, "Failed to set SMACK label \"" SMACK_RUN_LABEL "\" on self: %m");
-        r = write_string_file("/sys/fs/smackfs/ambient", SMACK_RUN_LABEL, 0);
+        r = write_string_file("/sys/fs/smackfs/ambient", SMACK_RUN_LABEL, WRITE_STRING_FILE_DISABLE_BUFFER);
         if (r < 0)
                 log_warning_errno(r, "Failed to set SMACK ambient label \"" SMACK_RUN_LABEL "\": %m");
         r = write_string_file("/sys/fs/smackfs/netlabel",
-                              "0.0.0.0/0 " SMACK_RUN_LABEL, 0);
+                              "0.0.0.0/0 " SMACK_RUN_LABEL, WRITE_STRING_FILE_DISABLE_BUFFER);
         if (r < 0)
                 log_warning_errno(r, "Failed to set SMACK netlabel rule \"0.0.0.0/0 " SMACK_RUN_LABEL "\": %m");
-        r = write_string_file("/sys/fs/smackfs/netlabel", "127.0.0.1 -CIPSO", 0);
+        r = write_string_file("/sys/fs/smackfs/netlabel", "127.0.0.1 -CIPSO", WRITE_STRING_FILE_DISABLE_BUFFER);
         if (r < 0)
                 log_warning_errno(r, "Failed to set SMACK netlabel rule \"127.0.0.1 -CIPSO\": %m");
 #endif

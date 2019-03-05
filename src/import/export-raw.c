@@ -15,13 +15,13 @@
 #include "copy.h"
 #include "export-raw.h"
 #include "fd-util.h"
-#include "fileio.h"
 #include "fs-util.h"
 #include "import-common.h"
 #include "missing.h"
 #include "ratelimit.h"
 #include "stat-util.h"
 #include "string-util.h"
+#include "tmpfile-util.h"
 #include "util.h"
 
 #define COPY_BUFFER_SIZE (16*1024)
@@ -86,16 +86,19 @@ int raw_export_new(
 
         assert(ret);
 
-        e = new0(RawExport, 1);
+        e = new(RawExport, 1);
         if (!e)
                 return -ENOMEM;
 
-        e->output_fd = e->input_fd = -1;
-        e->on_finished = on_finished;
-        e->userdata = userdata;
+        *e = (RawExport) {
+                .output_fd = -1,
+                .input_fd = -1,
+                .on_finished = on_finished,
+                .userdata = userdata,
+                .last_percent = (unsigned) -1,
+        };
 
         RATELIMIT_INIT(e->progress_rate_limit, 100 * USEC_PER_MSEC, 1);
-        e->last_percent = (unsigned) -1;
 
         if (event)
                 e->event = sd_event_ref(event);
@@ -220,7 +223,7 @@ static int raw_export_process(RawExport *e) {
 
 finish:
         if (r >= 0) {
-                (void) copy_times(e->input_fd, e->output_fd);
+                (void) copy_times(e->input_fd, e->output_fd, COPY_CRTIME);
                 (void) copy_xattr(e->input_fd, e->output_fd);
         }
 

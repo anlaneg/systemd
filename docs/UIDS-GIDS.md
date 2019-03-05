@@ -1,4 +1,8 @@
-# Users, Groups, UIDs and GIDs on `systemd` systems
+---
+title: Users, Groups, UIDs and GIDs on `systemd` Systems
+---
+
+# Users, Groups, UIDs and GIDs on `systemd` Systems
 
 Here's a summary of the requirements `systemd` (and Linux) make on UID/GID
 assignments and their ranges.

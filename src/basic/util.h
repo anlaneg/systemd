@@ -25,7 +25,6 @@
 
 #include "format-util.h"
 #include "macro.h"
-#include "missing.h"
 #include "time-util.h"
 
 size_t page_size(void) _pure_;
@@ -148,6 +147,12 @@ static inline int memcmp_safe(const void *s1, const void *s2, size_t n) {
         return memcmp(s1, s2, n);
 }
 
+/* Compare s1 (length n1) with s2 (length n2) in lexicographic order. */
+static inline int memcmp_nn(const void *s1, size_t n1, const void *s2, size_t n2) {
+        return memcmp_safe(s1, s2, MIN(n1, n2))
+            ?: CMP(n1, n2);
+}
+
 int on_ac_power(void);
 
 #define memzero(x,l)                                            \
@@ -159,16 +164,30 @@ int on_ac_power(void);
 
 #define zero(x) (memzero(&(x), sizeof(x)))
 
+bool memeqzero(const void *data, size_t length);
+
+#define eqzero(x) memeqzero(x, sizeof(x))
+
 static inline void *mempset(void *s, int c, size_t n) {
         memset(s, c, n);
         return (uint8_t*)s + n;
 }
 
 static inline void _reset_errno_(int *saved_errno) {
+        if (*saved_errno < 0) /* Invalidated by UNPROTECT_ERRNO? */
+                return;
+
         errno = *saved_errno;
 }
 
-#define PROTECT_ERRNO _cleanup_(_reset_errno_) __attribute__((unused)) int _saved_errno_ = errno
+#define PROTECT_ERRNO                                                   \
+        _cleanup_(_reset_errno_) _unused_ int _saved_errno_ = errno
+
+#define UNPROTECT_ERRNO                         \
+        do {                                    \
+                errno = _saved_errno_;          \
+                _saved_errno_ = -1;             \
+        } while (false)
 
 static inline int negative_errno(void) {
         /* This helper should be used to shut up gcc if you know 'errno' is
@@ -189,7 +208,7 @@ static inline unsigned u64log2(uint64_t n) {
 
 static inline unsigned u32ctz(uint32_t n) {
 #if __SIZEOF_INT__ == 4
-        return __builtin_ctz(n);
+        return n != 0 ? __builtin_ctz(n) : 32;
 #else
 #error "Wut?"
 #endif

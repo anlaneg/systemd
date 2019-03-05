@@ -27,7 +27,7 @@
 #include "ioprio.h"
 #include "journal-util.h"
 #include "missing.h"
-#include "mount-util.h"
+#include "mountpoint-util.h"
 #include "namespace.h"
 #include "parse-util.h"
 #include "path-util.h"
@@ -777,6 +777,7 @@ const sd_bus_vtable bus_exec_vtable[] = {
         SD_BUS_PROPERTY("TemporaryFileSystem", "a(ss)", property_get_temporary_filesystems, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("MountAPIVFS", "b", bus_property_get_bool, offsetof(ExecContext, mount_apivfs), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("KeyringMode", "s", property_get_exec_keyring_mode, offsetof(ExecContext, keyring_mode), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("ProtectHostname", "b", bus_property_get_bool, offsetof(ExecContext, protect_hostname), SD_BUS_VTABLE_PROPERTY_CONST),
 
         /* Obsolete/redundant properties: */
         SD_BUS_PROPERTY("Capabilities", "s", property_get_empty_string, 0, SD_BUS_VTABLE_PROPERTY_CONST|SD_BUS_VTABLE_HIDDEN),
@@ -1153,6 +1154,9 @@ int bus_exec_context_set_transient_property(
         if (streq(name, "LockPersonality"))
                 return bus_set_transient_bool(u, name, &c->lock_personality, message, flags, error);
 
+        if (streq(name, "ProtectHostname"))
+                return bus_set_transient_bool(u, name, &c->protect_hostname, message, flags, error);
+
         if (streq(name, "UtmpIdentifier"))
                 return bus_set_transient_string(u, name, &c->utmp_id, message, flags, error);
 
@@ -1517,8 +1521,8 @@ int bus_exec_context_set_transient_property(
                                 int af;
 
                                 af = af_from_name(*s);
-                                if (af <= 0)
-                                        return -EINVAL;
+                                if (af < 0)
+                                        return af;
 
                                 if (!invert == c->address_families_whitelist) {
                                         r = set_put(c->address_families, INT_TO_PTR(af));
@@ -1795,8 +1799,8 @@ int bus_exec_context_set_transient_property(
 
         } else if (STR_IN_SET(name,
                               "StandardInputFile",
-                              "StandardOutputFile", "StandardOutputFileToCreate", "StandardOutputFileToAppend",
-                              "StandardErrorFile", "StandardErrorFileToCreate", "StandardErrorFileToAppend")) {
+                              "StandardOutputFile", "StandardOutputFileToAppend",
+                              "StandardErrorFile", "StandardErrorFileToAppend")) {
                 const char *s;
 
                 r = sd_bus_message_read(message, "s", &s);
@@ -1842,11 +1846,11 @@ int bus_exec_context_set_transient_property(
 
                                 if (streq(name, "StandardErrorFile")) {
                                         c->std_error = EXEC_OUTPUT_FILE;
-                                        unit_write_settingf(u, flags|UNIT_ESCAPE_SPECIFIERS, name, "StandardOutput=file:%s", s);
+                                        unit_write_settingf(u, flags|UNIT_ESCAPE_SPECIFIERS, name, "StandardError=file:%s", s);
                                 } else {
-                                      assert(streq(name, "StandardErrorFileToAppend"));
-                                      c->std_error = EXEC_OUTPUT_FILE_APPEND;
-                                      unit_write_settingf(u, flags|UNIT_ESCAPE_SPECIFIERS, name, "StandardOutput=append:%s", s);
+                                        assert(streq(name, "StandardErrorFileToAppend"));
+                                        c->std_error = EXEC_OUTPUT_FILE_APPEND;
+                                        unit_write_settingf(u, flags|UNIT_ESCAPE_SPECIFIERS, name, "StandardError=append:%s", s);
                                 }
                         }
                 }

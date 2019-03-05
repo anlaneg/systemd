@@ -106,7 +106,9 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
+#include "naming-scheme.h"
 #include "parse-util.h"
+#include "proc-cmdline.h"
 #include "stdio-util.h"
 #include "string-util.h"
 #include "strv.h"
@@ -255,6 +257,8 @@ static int dev_pci_onboard(sd_device *dev, struct netnames *names) {
         r = safe_atolu(attr, &idx);
         if (r < 0)
                 return r;
+        if (idx == 0 && !naming_scheme_has(NAMING_ZERO_ACPI_INDEX))
+                return -EINVAL;
 
         /* Some BIOSes report rubbish indexes that are excessively high (2^24-1 is an index VMware likes to report for
          * example). Let's define a cut-off where we don't consider the index reliable anymore. We pick some arbitrary
@@ -335,7 +339,8 @@ static int dev_pci_slot(sd_device *dev, struct netnames *names) {
         if (sscanf(sysname, "%x:%x:%x.%u", &domain, &bus, &slot, &func) != 4)
                 return -ENOENT;
 
-        if (is_pci_ari_enabled(names->pcidev))
+        if (naming_scheme_has(NAMING_NPAR_ARI) &&
+            is_pci_ari_enabled(names->pcidev))
                 /* ARI devices support up to 256 functions on a single device ("slot"), and interpret the
                  * traditional 5-bit slot and 3-bit function number as a single 8-bit function number,
                  * where the slot makes up the upper 5 bits. */
@@ -358,7 +363,7 @@ static int dev_pci_slot(sd_device *dev, struct netnames *names) {
                 }
         }
 
-        /* kernel provided front panel port name for multiple port PCI device */
+        /* kernel provided front panel port name for multi-port PCI device */
         (void) sd_device_get_sysattr_value(dev, "phys_port_name", &port_name);
 
         /* compose a name based on the raw kernel's PCI bus, slot numbers */
@@ -376,7 +381,7 @@ static int dev_pci_slot(sd_device *dev, struct netnames *names) {
         if (l == 0)
                 names->pci_path[0] = '\0';
 
-        /* ACPI _SUN  — slot user number */
+        /* ACPI _SUN — slot user number */
         r = sd_device_new_from_subsystem_sysname(&pci, "subsystem", "pci");
         if (r < 0)
                 return r;
@@ -565,7 +570,8 @@ static int names_pci(sd_device *dev, struct netnames *names) {
                         return r;
         }
 
-        if (get_virtfn_info(dev, names, &vf_info) >= 0) {
+        if (naming_scheme_has(NAMING_SR_IOV_V) &&
+            get_virtfn_info(dev, names, &vf_info) >= 0) {
                 /* If this is an SR-IOV virtual device, get base name using physical device and add virtfn suffix. */
                 vf_names.pcidev = vf_info.physfn_pcidev;
                 dev_pci_onboard(dev, &vf_names);
@@ -821,7 +827,10 @@ static int builtin_net_id(sd_device *dev, int argc, char *argv[], bool test) {
                 prefix = "en";
                 break;
         case ARPHRD_INFINIBAND:
-                prefix = "ib";
+                if (naming_scheme_has(NAMING_INFINIBAND))
+                        prefix = "ib";
+                else
+                        return 0;
                 break;
         case ARPHRD_SLIP:
                 prefix = "sl";
@@ -846,6 +855,8 @@ static int builtin_net_id(sd_device *dev, int argc, char *argv[], bool test) {
                 else if (streq("wwan", devtype))
                         prefix = "ww";
         }
+
+        udev_builtin_add_property(dev, test, "ID_NET_NAMING_SCHEME", naming_scheme()->name);
 
         r = names_mac(dev, &names);
         if (r >= 0 && names.mac_valid) {

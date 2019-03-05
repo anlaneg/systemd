@@ -9,10 +9,16 @@
 #include "bus-common-errors.h"
 #include "bus-util.h"
 #include "def.h"
+#include "env-file-label.h"
+#include "env-file.h"
 #include "env-util.h"
 #include "fileio-label.h"
+#include "fileio.h"
 #include "hostname-util.h"
 #include "id128-util.h"
+#include "main-func.h"
+#include "missing_capability.h"
+#include "nscd-flush.h"
 #include "os-util.h"
 #include "parse-util.h"
 #include "path-util.h"
@@ -58,7 +64,7 @@ static void context_reset(Context *c) {
                 c->data[p] = mfree(c->data[p]);
 }
 
-static void context_free(Context *c) {
+static void context_clear(Context *c) {
         assert(c);
 
         context_reset(c);
@@ -89,13 +95,12 @@ static int context_read_data(Context *c) {
         if (r < 0 && r != -ENOENT)
                 return r;
 
-        r = parse_env_file(NULL, "/etc/machine-info", NEWLINE,
+        r = parse_env_file(NULL, "/etc/machine-info",
                            "PRETTY_HOSTNAME", &c->data[PROP_PRETTY_HOSTNAME],
                            "ICON_NAME", &c->data[PROP_ICON_NAME],
                            "CHASSIS", &c->data[PROP_CHASSIS],
                            "DEPLOYMENT", &c->data[PROP_DEPLOYMENT],
-                           "LOCATION", &c->data[PROP_LOCATION],
-                           NULL);
+                           "LOCATION", &c->data[PROP_LOCATION]);
         if (r < 0 && r != -ENOENT)
                 return r;
 
@@ -109,8 +114,12 @@ static int context_read_data(Context *c) {
 
         r = id128_read("/sys/class/dmi/id/product_uuid", ID128_UUID, &c->uuid);
         if (r < 0)
-                log_info_errno(r, "Failed to read product UUID, ignoring: %m");
-        c->has_uuid = (r >= 0);
+                log_full_errno(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, r,
+                               "Failed to read product UUID, ignoring: %m");
+        else if (sd_id128_is_null(c->uuid) || sd_id128_is_allf(c->uuid))
+                log_debug("DMI product UUID " SD_ID128_FORMAT_STR " is all 0x00 or all 0xFF, ignoring.", SD_ID128_FORMAT_VAL(c->uuid));
+        else
+                c->has_uuid = true;
 
         return 0;
 }
@@ -282,6 +291,8 @@ static int context_update_kernel_hostname(Context *c) {
         if (sethostname_idempotent(hn) < 0)
                 return -errno;
 
+        (void) nscd_flush_cache(STRV_MAKE("hosts"));
+
         return 0;
 }
 
@@ -314,7 +325,7 @@ static int context_write_data_machine_info(Context *c) {
 
         assert(c);
 
-        r = load_env_file(NULL, "/etc/machine-info", NULL, &l);
+        r = load_env_file(NULL, "/etc/machine-info", &l);
         if (r < 0 && r != -ENOENT)
                 return r;
 
@@ -702,61 +713,51 @@ static int connect_bus(Context *c, sd_event *event, sd_bus **_bus) {
         return 0;
 }
 
-int main(int argc, char *argv[]) {
-        Context context = {};
+static int run(int argc, char *argv[]) {
+        _cleanup_(context_clear) Context context = {};
         _cleanup_(sd_event_unrefp) sd_event *event = NULL;
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         int r;
 
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        log_setup_service();
 
         umask(0022);
         mac_selinux_init();
 
         if (argc != 1) {
                 log_error("This program takes no arguments.");
-                r = -EINVAL;
-                goto finish;
+                return -EINVAL;
         }
 
         assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGTERM, SIGINT, -1) >= 0);
 
         r = sd_event_default(&event);
-        if (r < 0) {
-                log_error_errno(r, "Failed to allocate event loop: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to allocate event loop: %m");
 
         (void) sd_event_set_watchdog(event, true);
 
         r = sd_event_add_signal(event, NULL, SIGINT, NULL, NULL);
         if (r < 0)
-                return r;
+                return log_error_errno(r, "Failed to install SIGINT handler: %m");
 
         r = sd_event_add_signal(event, NULL, SIGTERM, NULL, NULL);
         if (r < 0)
-                return r;
+                return log_error_errno(r, "Failed to install SIGTERM handler: %m");
 
         r = connect_bus(&context, event, &bus);
         if (r < 0)
-                goto finish;
+                return r;
 
         r = context_read_data(&context);
-        if (r < 0) {
-                log_error_errno(r, "Failed to read hostname and machine information: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to read hostname and machine information: %m");
 
         r = bus_event_loop_with_idle(event, bus, "org.freedesktop.hostname1", DEFAULT_EXIT_USEC, NULL, NULL);
-        if (r < 0) {
-                log_error_errno(r, "Failed to run event loop: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to run event loop: %m");
 
-finish:
-        context_free(&context);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return 0;
 }
+
+DEFINE_MAIN_FUNCTION(run);

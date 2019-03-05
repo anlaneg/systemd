@@ -19,6 +19,7 @@
 #include "alloc-util.h"
 #include "fd-util.h"
 #include "fs-util.h"
+#include "io-util.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
@@ -447,9 +448,7 @@ _public_ int sd_pid_notify_with_fds(
                 unsigned n_fds) {
 
         union sockaddr_union sockaddr = {};
-        struct iovec iovec = {
-                .iov_base = (char*) state,
-        };
+        struct iovec iovec;
         struct msghdr msghdr = {
                 .msg_iov = &iovec,
                 .msg_iovlen = 1,
@@ -489,7 +488,7 @@ _public_ int sd_pid_notify_with_fds(
 
         (void) fd_inc_sndbuf(fd, SNDBUF_SIZE);
 
-        iovec.iov_len = strlen(state);
+        iovec = IOVEC_MAKE_STRING(state);
         msghdr.msg_namelen = salen;
 
         send_ucred =
@@ -607,7 +606,13 @@ _public_ int sd_booted(void) {
          * created. This takes place in mount-setup.c, so is
          * guaranteed to happen very early during boot. */
 
-        return laccess("/run/systemd/system/", F_OK) >= 0;
+        if (laccess("/run/systemd/system/", F_OK) >= 0)
+                return true;
+
+        if (errno == ENOENT)
+                return false;
+
+        return -errno;
 }
 
 _public_ int sd_watchdog_enabled(int unset_environment, uint64_t *usec) {

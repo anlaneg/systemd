@@ -43,16 +43,18 @@ int dns_server_new(
                         return -E2BIG;
         }
 
-        s = new0(DnsServer, 1);
+        s = new(DnsServer, 1);
         if (!s)
                 return -ENOMEM;
 
-        s->n_ref = 1;
-        s->manager = m;
-        s->type = type;
-        s->family = family;
-        s->address = *in_addr;
-        s->ifindex = ifindex;
+        *s = (DnsServer) {
+                .n_ref = 1,
+                .manager = m,
+                .type = type,
+                .family = family,
+                .address = *in_addr,
+                .ifindex = ifindex,
+        };
 
         dns_server_reset_features(s);
 
@@ -101,7 +103,7 @@ int dns_server_new(
 static DnsServer* dns_server_free(DnsServer *s)  {
         assert(s);
 
-        dns_stream_unref(s->stream);
+        dns_server_unref_stream(s);
 
 #if ENABLE_DNS_OVER_TLS
         dnstls_server_free(s);
@@ -155,6 +157,9 @@ void dns_server_unlink(DnsServer *s) {
 
         if (s->manager->current_dns_server == s)
                 manager_set_dns_server(s->manager, NULL);
+
+        /* No need to keep a default stream around anymore */
+        dns_server_unref_stream(s);
 
         dns_server_unref(s);
 }
@@ -575,29 +580,7 @@ void dns_server_warn_downgrade(DnsServer *server) {
         server->warned_downgrade = true;
 }
 
-bool dns_server_limited_domains(DnsServer *server) {
-        DnsSearchDomain *domain;
-        bool domain_restricted = false;
-
-        /* Check if the server has route-only domains without ~., i. e. whether
-         * it should only be used for particular domains */
-        if (!server->link)
-                return false;
-
-        LIST_FOREACH(domains, domain, server->link->search_domains)
-                if (domain->route_only) {
-                        domain_restricted = true;
-                        /* ~. means "any domain", thus it is a global server */
-                        if (dns_name_is_root(DNS_SEARCH_DOMAIN_NAME(domain)))
-                                return false;
-                }
-
-        return domain_restricted;
-}
-
-static void dns_server_hash_func(const void *p, struct siphash *state) {
-        const DnsServer *s = p;
-
+static void dns_server_hash_func(const DnsServer *s, struct siphash *state) {
         assert(s);
 
         siphash24_compress(&s->family, sizeof(s->family), state);
@@ -605,8 +588,7 @@ static void dns_server_hash_func(const void *p, struct siphash *state) {
         siphash24_compress(&s->ifindex, sizeof(s->ifindex), state);
 }
 
-static int dns_server_compare_func(const void *a, const void *b) {
-        const DnsServer *x = a, *y = b;
+static int dns_server_compare_func(const DnsServer *x, const DnsServer *y) {
         int r;
 
         r = CMP(x->family, y->family);
@@ -624,10 +606,7 @@ static int dns_server_compare_func(const void *a, const void *b) {
         return 0;
 }
 
-const struct hash_ops dns_server_hash_ops = {
-        .hash = dns_server_hash_func,
-        .compare = dns_server_compare_func
-};
+DEFINE_HASH_OPS(dns_server_hash_ops, DnsServer, dns_server_hash_func, dns_server_compare_func);
 
 void dns_server_unlink_all(DnsServer *first) {
         DnsServer *next;
@@ -830,6 +809,9 @@ void dns_server_reset_features(DnsServer *s) {
         s->warned_downgrade = false;
 
         dns_server_reset_counters(s);
+
+        /* Let's close the default stream, so that we reprobe with the new features */
+        dns_server_unref_stream(s);
 }
 
 void dns_server_reset_features_all(DnsServer *s) {
@@ -888,6 +870,30 @@ void dns_server_dump(DnsServer *s, FILE *f) {
                 yes_no(s->packet_truncated),
                 yes_no(s->packet_bad_opt),
                 yes_no(s->packet_rrsig_missing));
+}
+
+void dns_server_unref_stream(DnsServer *s) {
+        DnsStream *ref;
+
+        assert(s);
+
+        /* Detaches the default stream of this server. Some special care needs to be taken here, as that stream and
+         * this server reference each other. First, take the stream out of the server. It's destructor will check if it
+         * is registered with us, hence let's invalidate this separatly, so that it is already unregistered. */
+        ref = TAKE_PTR(s->stream);
+
+        /* And then, unref it */
+        dns_stream_unref(ref);
+}
+
+DnsScope *dns_server_scope(DnsServer *s) {
+        assert(s);
+        assert((s->type == DNS_SERVER_LINK) == !!s->link);
+
+        if (s->link)
+                return s->link->unicast_scope;
+
+        return s->manager->unicast_scope;
 }
 
 static const char* const dns_server_type_table[_DNS_SERVER_TYPE_MAX] = {

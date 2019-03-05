@@ -10,8 +10,9 @@
 #include "networkd-link.h"
 #include "networkd-manager.h"
 #include "networkd-network.h"
-#include "string-util.h"
 #include "socket-util.h"
+#include "string-util.h"
+#include "sysctl-util.h"
 
 static bool ipv6_proxy_ndp_is_needed(Link *link) {
         assert(link);
@@ -32,8 +33,8 @@ static bool ipv6_proxy_ndp_is_needed(Link *link) {
 }
 
 static int ipv6_proxy_ndp_set(Link *link) {
-        const char *p = NULL;
-        int r, v;
+        bool v;
+        int r;
 
         assert(link);
 
@@ -41,9 +42,8 @@ static int ipv6_proxy_ndp_set(Link *link) {
                 return 0;
 
         v = ipv6_proxy_ndp_is_needed(link);
-        p = strjoina("/proc/sys/net/ipv6/conf/", link->ifname, "/proxy_ndp");
 
-        r = write_string_file(p, one_zero(v), WRITE_STRING_FILE_VERIFY_ON_FAILURE);
+        r = sysctl_write_ip_property_boolean(AF_INET6, link->ifname, "proxy_ndp", v);
         if (r < 0)
                 log_link_warning_errno(link, r, "Cannot configure proxy NDP for interface: %m");
 
@@ -57,17 +57,18 @@ int ipv6_proxy_ndp_address_new_static(Network *network, IPv6ProxyNDPAddress **re
         assert(ret);
 
         /* allocate space for IPv6ProxyNDPAddress entry */
-        ipv6_proxy_ndp_address = new0(IPv6ProxyNDPAddress, 1);
+        ipv6_proxy_ndp_address = new(IPv6ProxyNDPAddress, 1);
         if (!ipv6_proxy_ndp_address)
                 return -ENOMEM;
 
-        ipv6_proxy_ndp_address->network = network;
+        *ipv6_proxy_ndp_address = (IPv6ProxyNDPAddress) {
+                .network = network,
+        };
 
         LIST_PREPEND(ipv6_proxy_ndp_addresses, network->ipv6_proxy_ndp_addresses, ipv6_proxy_ndp_address);
         network->n_ipv6_proxy_ndp_addresses++;
 
-        *ret = ipv6_proxy_ndp_address;
-        ipv6_proxy_ndp_address = NULL;
+        *ret = TAKE_PTR(ipv6_proxy_ndp_address);
 
         return 0;
 }
@@ -88,16 +89,16 @@ void ipv6_proxy_ndp_address_free(IPv6ProxyNDPAddress *ipv6_proxy_ndp_address) {
 }
 
 int config_parse_ipv6_proxy_ndp_address(
-        const char *unit,
-        const char *filename,
-        unsigned line,
-        const char *section,
-        unsigned section_line,
-        const char *lvalue,
-        int ltype,
-        const char *rvalue,
-        void *data,
-        void *userdata) {
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
 
         Network *network = userdata;
         _cleanup_(ipv6_proxy_ndp_address_freep) IPv6ProxyNDPAddress *ipv6_proxy_ndp_address = NULL;
@@ -121,9 +122,8 @@ int config_parse_ipv6_proxy_ndp_address(
                 return 0;
         }
 
-        r = in_addr_is_null(AF_INET6, &buffer);
-        if (r != 0) {
-                log_syntax(unit, LOG_ERR, filename, line, r,
+        if (in_addr_is_null(AF_INET6, &buffer)) {
+                log_syntax(unit, LOG_ERR, filename, line, 0,
                            "IPv6 proxy NDP address cannot be the ANY address, ignoring: %s", rvalue);
                 return 0;
         }
@@ -134,8 +134,7 @@ int config_parse_ipv6_proxy_ndp_address(
         return 0;
 }
 
-static int set_ipv6_proxy_ndp_address_handler(sd_netlink *rtnl, sd_netlink_message *m, void *userdata) {
-        Link *link = userdata;
+static int set_ipv6_proxy_ndp_address_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
         int r;
 
         assert(link);
@@ -173,8 +172,8 @@ int ipv6_proxy_ndp_address_configure(Link *link, IPv6ProxyNDPAddress *ipv6_proxy
         if (r < 0)
                 return rtnl_log_create_error(r);
 
-        r = sd_netlink_call_async(rtnl, NULL, req, set_ipv6_proxy_ndp_address_handler,
-                                  link_netlink_destroy_callback, link, 0, __func__);
+        r = netlink_call_async(rtnl, NULL, req, set_ipv6_proxy_ndp_address_handler,
+                               link_netlink_destroy_callback, link);
         if (r < 0)
                 return log_link_error_errno(link, r, "Could not send rtnetlink message: %m");
 

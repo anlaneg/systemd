@@ -37,6 +37,7 @@ uint64_t device_get_properties_generation(sd_device *device);
 uint64_t device_get_tags_generation(sd_device *device);
 uint64_t device_get_devlinks_generation(sd_device *device);
 
+int device_properties_prepare(sd_device *device);
 int device_get_properties_nulstr(sd_device *device, const uint8_t **nulstr, size_t *len);
 int device_get_properties_strv(sd_device *device, char ***strv);
 
@@ -49,4 +50,8 @@ int device_new_from_synthetic_event(sd_device **new_device, const char *syspath,
 int device_tag_index(sd_device *dev, sd_device *dev_old, bool add);
 int device_update_db(sd_device *device);
 int device_delete_db(sd_device *device);
-int device_read_db_force(sd_device *device);
+int device_read_db_internal_filename(sd_device *device, const char *filename); /* For fuzzer */
+int device_read_db_internal(sd_device *device, bool force);
+static inline int device_read_db(sd_device *device) {
+        return device_read_db_internal(device, false);
+}

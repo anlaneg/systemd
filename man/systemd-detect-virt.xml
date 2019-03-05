@@ -126,6 +126,11 @@
           </row>
 
           <row>
+            <entry><varname>acrn</varname></entry>
+            <entry><ulink url="https://projectacrn.org">ACRN hypervisor</ulink></entry>
+          </row>
+
+          <row>
             <entry valign="top" morerows="5">Container</entry>
             <entry><varname>openvz</varname></entry>
             <entry>OpenVZ/Virtuozzo</entry>
@@ -184,7 +189,7 @@
         <term><option>-v</option></term>
         <term><option>--vm</option></term>
 
-        <listitem><para>Only detects hardware virtualization).</para></listitem>
+        <listitem><para>Only detects hardware virtualization.</para></listitem>
       </varlistentry>
 
       <varlistentry>

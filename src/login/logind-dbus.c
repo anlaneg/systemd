@@ -14,24 +14,27 @@
 #include "bus-error.h"
 #include "bus-unit-util.h"
 #include "bus-util.h"
+#include "cgroup-util.h"
 #include "device-util.h"
 #include "dirent-util.h"
 #include "efivars.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio-label.h"
+#include "fileio.h"
 #include "format-util.h"
 #include "fs-util.h"
 #include "logind.h"
+#include "missing_capability.h"
 #include "mkdir.h"
 #include "path-util.h"
 #include "process-util.h"
-#include "cgroup-util.h"
 #include "selinux-util.h"
 #include "sleep-config.h"
 #include "special.h"
 #include "strv.h"
 #include "terminal-util.h"
+#include "tmpfile-util.h"
 #include "unit-name.h"
 #include "user-util.h"
 #include "utmp-wtmp.h"
@@ -274,6 +277,8 @@ static int property_get_scheduled_shutdown(
 
 static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_handle_action, handle_action, HandleAction);
 static BUS_DEFINE_PROPERTY_GET(property_get_docked, "b", Manager, manager_is_docked_or_external_displays);
+static BUS_DEFINE_PROPERTY_GET(property_get_lid_closed, "b", Manager, manager_is_lid_closed);
+static BUS_DEFINE_PROPERTY_GET_GLOBAL(property_get_on_external_power, "b", manager_is_on_external_power);
 static BUS_DEFINE_PROPERTY_GET_GLOBAL(property_get_compat_user_tasks_max, "t", CGROUP_LIMIT_MAX);
 static BUS_DEFINE_PROPERTY_GET_REF(property_get_hashmap_size, "t", Hashmap *, (uint64_t) hashmap_size);
 
@@ -785,7 +790,9 @@ static int method_create_session(sd_bus_message *message, void *userdata, sd_bus
                 goto fail;
 
         session_set_user(session, user);
-        session_set_leader(session, leader);
+        r = session_set_leader(session, leader);
+        if (r < 0)
+                goto fail;
 
         session->type = t;
         session->class = c;
@@ -1226,7 +1233,7 @@ static int trigger_device(Manager *m, sd_device *d) {
                 if (!t)
                         return -ENOMEM;
 
-                (void) write_string_file(t, "change", 0);
+                (void) write_string_file(t, "change", WRITE_STRING_FILE_DISABLE_BUFFER);
         }
 
         return 0;
@@ -1469,23 +1476,15 @@ int manager_set_lid_switch_ignore(Manager *m, usec_t until) {
 }
 
 static int send_prepare_for(Manager *m, InhibitWhat w, bool _active) {
-
-        static const char * const signal_name[_INHIBIT_WHAT_MAX] = {
-                [INHIBIT_SHUTDOWN] = "PrepareForShutdown",
-                [INHIBIT_SLEEP] = "PrepareForSleep"
-        };
-
         int active = _active;
 
         assert(m);
-        assert(w >= 0);
-        assert(w < _INHIBIT_WHAT_MAX);
-        assert(signal_name[w]);
+        assert(IN_SET(w, INHIBIT_SHUTDOWN, INHIBIT_SLEEP));
 
         return sd_bus_emit_signal(m->bus,
                                   "/org/freedesktop/login1",
                                   "org.freedesktop.login1.Manager",
-                                  signal_name[w],
+                                  w == INHIBIT_SHUTDOWN ? "PrepareForShutdown" : "PrepareForSleep",
                                   "b",
                                   active);
 }
@@ -1497,7 +1496,6 @@ static int execute_shutdown_or_sleep(
                 sd_bus_error *error) {
 
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
-        char *c = NULL;
         const char *p;
         int r;
 
@@ -1525,15 +1523,11 @@ static int execute_shutdown_or_sleep(
         if (r < 0)
                 goto error;
 
-        c = strdup(p);
-        if (!c) {
-                r = -ENOMEM;
+        r = free_and_strdup(&m->action_job, p);
+        if (r < 0)
                 goto error;
-        }
 
         m->action_unit = unit_name;
-        free(m->action_job);
-        m->action_job = c;
         m->action_what = w;
 
         /* Make sure the lid switch is ignored for a while */
@@ -1651,17 +1645,17 @@ int bus_manager_shutdown_or_sleep_now_or_later(
         assert(m);
         assert(unit_name);
         assert(w > 0);
-        assert(w <= _INHIBIT_WHAT_MAX);
+        assert(w < _INHIBIT_WHAT_MAX);
         assert(!m->action_job);
 
         r = unit_load_state(m->bus, unit_name, &load_state);
         if (r < 0)
                 return r;
 
-        if (!streq(load_state, "loaded")) {
-                log_notice("Unit %s is %s, refusing operation.", unit_name, load_state);
-                return -EACCES;
-        }
+        if (!streq(load_state, "loaded"))
+                return log_notice_errno(SYNTHETIC_ERRNO(EACCES),
+                                        "Unit %s is %s, refusing operation.",
+                                        unit_name, load_state);
 
         /* Tell everybody to prepare for shutdown/sleep */
         (void) send_prepare_for(m, w, true);
@@ -1768,19 +1762,17 @@ static int method_do_shutdown_or_sleep(
                 return r;
 
         /* Don't allow multiple jobs being executed at the same time */
-        if (m->action_what)
+        if (m->action_what > 0)
                 return sd_bus_error_setf(error, BUS_ERROR_OPERATION_IN_PROGRESS, "There's already a shutdown or sleep operation in progress");
 
         if (sleep_verb) {
                 r = can_sleep(sleep_verb);
                 if (r == -ENOSPC)
-                        return sd_bus_error_set(error, BUS_ERROR_SLEEP_VERB_NOT_SUPPORTED, "Not enough swap space for hibernation");
-                if (r == -ENOMEDIUM)
-                        return sd_bus_error_set(error, BUS_ERROR_SLEEP_VERB_NOT_SUPPORTED, "Kernel image has been removed, can't hibernate");
-                if (r == -EADV)
-                        return sd_bus_error_set(error, BUS_ERROR_SLEEP_VERB_NOT_SUPPORTED, "Resume not configured, can't hibernate");
+                        return sd_bus_error_set(error, BUS_ERROR_SLEEP_VERB_NOT_SUPPORTED,
+                                                "Not enough swap space for hibernation");
                 if (r == 0)
-                        return sd_bus_error_setf(error, BUS_ERROR_SLEEP_VERB_NOT_SUPPORTED, "Sleep verb \"%s\" not supported", sleep_verb);
+                        return sd_bus_error_setf(error, BUS_ERROR_SLEEP_VERB_NOT_SUPPORTED,
+                                                 "Sleep verb \"%s\" not supported", sleep_verb);
                 if (r < 0)
                         return r;
         }
@@ -2009,7 +2001,7 @@ static int manager_scheduled_shutdown_handler(
                 assert_not_reached("unexpected shutdown type");
 
         /* Don't allow multiple jobs being executed at the same time */
-        if (m->action_what) {
+        if (m->action_what > 0) {
                 r = -EALREADY;
                 log_error("Scheduled shutdown to %s failed: shutdown or sleep operation already in progress", target);
                 goto error;
@@ -2207,7 +2199,7 @@ static int method_can_shutdown_or_sleep(
 
         if (sleep_verb) {
                 r = can_sleep(sleep_verb);
-                if (IN_SET(r,  0, -ENOSPC, -ENOMEDIUM, -EADV))
+                if (IN_SET(r,  0, -ENOSPC))
                         return sd_bus_reply_method_return(message, "s", "na");
                 if (r < 0)
                         return r;
@@ -2265,11 +2257,13 @@ static int method_can_shutdown_or_sleep(
                 if (r < 0)
                         return r;
 
-                if (r > 0 && !result)
-                        result = "yes";
-                else if (challenge && (!result || streq(result, "yes")))
-                        result = "challenge";
-                else
+                if (r > 0) {
+                        if (!result)
+                                result = "yes";
+                } else if (challenge) {
+                        if (!result || streq(result, "yes"))
+                                result = "challenge";
+                } else
                         result = "no";
         }
 
@@ -2456,7 +2450,7 @@ static int method_can_reboot_to_firmware_setup(
         r = efi_reboot_to_firmware_supported();
         if (r < 0) {
                 if (r != -EOPNOTSUPP)
-                        log_warning_errno(errno, "Failed to determine whether reboot to firmware is supported: %m");
+                        log_warning_errno(r, "Failed to determine whether reboot to firmware is supported: %m");
 
                 return sd_bus_reply_method_return(message, "s", "na");
         }
@@ -2645,7 +2639,7 @@ const sd_bus_vtable manager_vtable[] = {
         SD_BUS_PROPERTY("KillOnlyUsers", "as", NULL, offsetof(Manager, kill_only_users), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("KillExcludeUsers", "as", NULL, offsetof(Manager, kill_exclude_users), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("KillUserProcesses", "b", NULL, offsetof(Manager, kill_user_processes), SD_BUS_VTABLE_PROPERTY_CONST),
-        SD_BUS_PROPERTY("RebootToFirmwareSetup", "b", property_get_reboot_to_firmware_setup, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("RebootToFirmwareSetup", "b", property_get_reboot_to_firmware_setup, 0, 0),
         SD_BUS_PROPERTY("IdleHint", "b", property_get_idle_hint, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
         SD_BUS_PROPERTY("IdleSinceHint", "t", property_get_idle_since_hint, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
         SD_BUS_PROPERTY("IdleSinceHintMonotonic", "t", property_get_idle_since_hint, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
@@ -2666,6 +2660,8 @@ const sd_bus_vtable manager_vtable[] = {
         SD_BUS_PROPERTY("PreparingForSleep", "b", property_get_preparing, 0, 0),
         SD_BUS_PROPERTY("ScheduledShutdown", "(st)", property_get_scheduled_shutdown, 0, 0),
         SD_BUS_PROPERTY("Docked", "b", property_get_docked, 0, 0),
+        SD_BUS_PROPERTY("LidClosed", "b", property_get_lid_closed, 0, 0),
+        SD_BUS_PROPERTY("OnExternalPower", "b", property_get_on_external_power, 0, 0),
         SD_BUS_PROPERTY("RemoveIPC", "b", bus_property_get_bool, offsetof(Manager, remove_ipc), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("RuntimeDirectorySize", "t", NULL, offsetof(Manager, runtime_dir_size), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("InhibitorsMax", "t", NULL, offsetof(Manager, inhibitors_max), SD_BUS_VTABLE_PROPERTY_CONST),

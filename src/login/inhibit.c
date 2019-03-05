@@ -14,11 +14,12 @@
 #include "fd-util.h"
 #include "format-table.h"
 #include "format-util.h"
+#include "main-func.h"
 #include "pager.h"
+#include "pretty-print.h"
 #include "process-util.h"
 #include "signal-util.h"
 #include "strv.h"
-#include "terminal-util.h"
 #include "user-util.h"
 #include "util.h"
 
@@ -26,7 +27,7 @@ static const char* arg_what = "idle:sleep:shutdown";
 static const char* arg_who = NULL;
 static const char* arg_why = "Unknown reason";
 static const char* arg_mode = NULL;
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
 static bool arg_legend = true;
 
 static enum {
@@ -68,7 +69,7 @@ static int print_inhibitors(sd_bus *bus) {
         _cleanup_(table_unrefp) Table *table = NULL;
         int r;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         r = sd_bus_call_method(
                         bus,
@@ -82,7 +83,7 @@ static int print_inhibitors(sd_bus *bus) {
         if (r < 0)
                 return log_error_errno(r, "Could not get active inhibitors: %s", bus_error_message(&error, r));
 
-        table = table_new("WHO", "UID", "USER", "PID", "COMM", "WHAT", "WHY", "MODE");
+        table = table_new("who", "uid", "user", "pid", "comm", "what", "why", "mode");
         if (!table)
                 return log_oom();
 
@@ -241,7 +242,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case ARG_NO_LEGEND:
@@ -258,15 +259,14 @@ static int parse_argv(int argc, char *argv[]) {
         if (arg_action == ACTION_INHIBIT && optind == argc)
                 arg_action = ACTION_LIST;
 
-        else if (arg_action == ACTION_INHIBIT && optind >= argc) {
-                log_error("Missing command line to execute.");
-                return -EINVAL;
-        }
+        else if (arg_action == ACTION_INHIBIT && optind >= argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Missing command line to execute.");
 
         return 1;
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         int r;
 
@@ -274,25 +274,17 @@ int main(int argc, char *argv[]) {
         log_open();
 
         r = parse_argv(argc, argv);
-        if (r < 0)
-                return EXIT_FAILURE;
-        if (r == 0)
-                return EXIT_SUCCESS;
+        if (r <= 0)
+                return r;
 
         r = sd_bus_default_system(&bus);
-        if (r < 0) {
-                log_error_errno(r, "Failed to connect to bus: %m");
-                return EXIT_FAILURE;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to connect to bus: %m");
 
-        if (arg_action == ACTION_LIST) {
+        if (arg_action == ACTION_LIST)
+                return print_inhibitors(bus);
 
-                r = print_inhibitors(bus);
-                pager_close();
-                if (r < 0)
-                        return EXIT_FAILURE;
-
-        } else {
+        else {
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
                 _cleanup_close_ int fd = -1;
                 _cleanup_free_ char *w = NULL;
@@ -308,14 +300,12 @@ int main(int argc, char *argv[]) {
                         arg_mode = "block";
 
                 fd = inhibit(bus, &error);
-                if (fd < 0) {
-                        log_error("Failed to inhibit: %s", bus_error_message(&error, fd));
-                        return EXIT_FAILURE;
-                }
+                if (fd < 0)
+                        return log_error_errno(fd, "Failed to inhibit: %s", bus_error_message(&error, fd));
 
-                r = safe_fork("(inhibit)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_CLOSE_ALL_FDS|FORK_LOG, &pid);
+                r = safe_fork("(inhibit)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_CLOSE_ALL_FDS|FORK_RLIMIT_NOFILE_SAFE|FORK_LOG, &pid);
                 if (r < 0)
-                        return EXIT_FAILURE;
+                        return r;
                 if (r == 0) {
                         /* Child */
                         execvp(argv[optind], argv + optind);
@@ -324,9 +314,8 @@ int main(int argc, char *argv[]) {
                         _exit(EXIT_FAILURE);
                 }
 
-                r = wait_for_terminate_and_check(argv[optind], pid, WAIT_LOG);
-                return r < 0 ? EXIT_FAILURE : r;
+                return wait_for_terminate_and_check(argv[optind], pid, WAIT_LOG);
         }
-
-        return EXIT_SUCCESS;
 }
+
+DEFINE_MAIN_FUNCTION_WITH_POSITIVE_FAILURE(run);

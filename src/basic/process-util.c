@@ -25,7 +25,6 @@
 
 #include "alloc-util.h"
 #include "architecture.h"
-#include "def.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -36,6 +35,7 @@
 #include "missing.h"
 #include "process-util.h"
 #include "raw-clone.h"
+#include "rlimit-util.h"
 #include "signal-util.h"
 #include "stat-util.h"
 #include "string-table.h"
@@ -102,7 +102,8 @@ int get_process_comm(pid_t pid, char **ret) {
 int get_process_cmdline(pid_t pid, size_t max_length, bool comm_fallback, char **line) {
         _cleanup_fclose_ FILE *f = NULL;
         bool space = false;
-        char *k, *ans = NULL;
+        char *k;
+        _cleanup_free_ char *ans = NULL;
         const char *p;
         int c;
 
@@ -129,6 +130,13 @@ int get_process_cmdline(pid_t pid, size_t max_length, bool comm_fallback, char *
 
         (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
+        if (max_length == 0) {
+                /* This is supposed to be a safety guard against runaway command lines. */
+                long l = sysconf(_SC_ARG_MAX);
+                assert(l > 0);
+                max_length = l;
+        }
+
         if (max_length == 1) {
 
                 /* If there's only room for one byte, return the empty string */
@@ -136,34 +144,8 @@ int get_process_cmdline(pid_t pid, size_t max_length, bool comm_fallback, char *
                 if (!ans)
                         return -ENOMEM;
 
-                *line = ans;
+                *line = TAKE_PTR(ans);
                 return 0;
-
-        } else if (max_length == 0) {
-                size_t len = 0, allocated = 0;
-
-                while ((c = getc(f)) != EOF) {
-
-                        if (!GREEDY_REALLOC(ans, allocated, len+3)) {
-                                free(ans);
-                                return -ENOMEM;
-                        }
-
-                        if (isprint(c)) {
-                                if (space) {
-                                        ans[len++] = ' ';
-                                        space = false;
-                                }
-
-                                ans[len++] = c;
-                        } else if (len > 0)
-                                space = true;
-               }
-
-                if (len > 0)
-                        ans[len] = '\0';
-                else
-                        ans = mfree(ans);
 
         } else {
                 bool dotdotdot = false;
@@ -227,7 +209,7 @@ int get_process_cmdline(pid_t pid, size_t max_length, bool comm_fallback, char *
                 _cleanup_free_ char *t = NULL;
                 int h;
 
-                free(ans);
+                ans = mfree(ans);
 
                 if (!comm_fallback)
                         return -ENOENT;
@@ -236,37 +218,42 @@ int get_process_cmdline(pid_t pid, size_t max_length, bool comm_fallback, char *
                 if (h < 0)
                         return h;
 
-                if (max_length == 0)
+                size_t l = strlen(t);
+
+                if (l + 3 <= max_length) {
                         ans = strjoin("[", t, "]");
-                else {
-                        size_t l;
+                        if (!ans)
+                                return -ENOMEM;
 
-                        l = strlen(t);
+                } else if (max_length <= 6) {
+                        ans = new(char, max_length);
+                        if (!ans)
+                                return -ENOMEM;
 
-                        if (l + 3 <= max_length)
-                                ans = strjoin("[", t, "]");
-                        else if (max_length <= 6) {
+                        memcpy(ans, "[...]", max_length-1);
+                        ans[max_length-1] = 0;
+                } else {
+                        t[max_length - 6] = 0;
 
-                                ans = new(char, max_length);
-                                if (!ans)
-                                        return -ENOMEM;
+                        /* Chop off final spaces */
+                        delete_trailing_chars(t, WHITESPACE);
 
-                                memcpy(ans, "[...]", max_length-1);
-                                ans[max_length-1] = 0;
-                        } else {
-                                t[max_length - 6] = 0;
-
-                                /* Chop off final spaces */
-                                delete_trailing_chars(t, WHITESPACE);
-
-                                ans = strjoin("[", t, "...]");
-                        }
+                        ans = strjoin("[", t, "...]");
+                        if (!ans)
+                                return -ENOMEM;
                 }
-                if (!ans)
-                        return -ENOMEM;
+
+                *line = TAKE_PTR(ans);
+                return 0;
         }
 
-        *line = ans;
+        k = realloc(ans, strlen(ans) + 1);
+        if (!k)
+                return -ENOMEM;
+
+        ans = NULL;
+        *line = k;
+
         return 0;
 }
 
@@ -600,12 +587,14 @@ int get_process_root(pid_t pid, char **root) {
         return get_process_link_contents(p, root);
 }
 
+#define ENVIRONMENT_BLOCK_MAX (5U*1024U*1024U)
+
 int get_process_environ(pid_t pid, char **env) {
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_free_ char *outcome = NULL;
-        int c;
-        const char *p;
         size_t allocated = 0, sz = 0;
+        const char *p;
+        int r;
 
         assert(pid >= 0);
         assert(env);
@@ -621,9 +610,20 @@ int get_process_environ(pid_t pid, char **env) {
 
         (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
-        while ((c = fgetc(f)) != EOF) {
+        for (;;) {
+                char c;
+
+                if (sz >= ENVIRONMENT_BLOCK_MAX)
+                        return -ENOBUFS;
+
                 if (!GREEDY_REALLOC(outcome, allocated, sz + 5))
                         return -ENOMEM;
+
+                r = safe_fgetc(f, &c);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        break;
 
                 if (c == '\0')
                         outcome[sz++] = '\n';
@@ -631,13 +631,7 @@ int get_process_environ(pid_t pid, char **env) {
                         sz += cescape_char(c, outcome + sz);
         }
 
-        if (!outcome) {
-                outcome = strdup("");
-                if (!outcome)
-                        return -ENOMEM;
-        } else
-                outcome[sz] = '\0';
-
+        outcome[sz] = '\0';
         *env = TAKE_PTR(outcome);
 
         return 0;
@@ -832,7 +826,7 @@ int wait_for_terminate_with_timeout(pid_t pid, usec_t timeout) {
 void sigkill_wait(pid_t pid) {
         assert(pid > 1);
 
-        if (kill(pid, SIGKILL) > 0)
+        if (kill(pid, SIGKILL) >= 0)
                 (void) wait_for_terminate(pid, NULL);
 }
 
@@ -850,7 +844,7 @@ void sigkill_waitp(pid_t *pid) {
 void sigterm_wait(pid_t pid) {
         assert(pid > 1);
 
-        if (kill_and_sigcont(pid, SIGTERM) > 0)
+        if (kill_and_sigcont(pid, SIGTERM) >= 0)
                 (void) wait_for_terminate(pid, NULL);
 }
 
@@ -870,9 +864,9 @@ int kill_and_sigcont(pid_t pid, int sig) {
 int getenv_for_pid(pid_t pid, const char *field, char **ret) {
         _cleanup_fclose_ FILE *f = NULL;
         char *value = NULL;
-        bool done = false;
         const char *path;
-        size_t l;
+        size_t l, sum = 0;
+        int r;
 
         assert(pid >= 0);
         assert(field);
@@ -895,6 +889,9 @@ int getenv_for_pid(pid_t pid, const char *field, char **ret) {
                 return 1;
         }
 
+        if (!pid_is_valid(pid))
+                return -EINVAL;
+
         path = procfs_file_alloca(pid, "environ");
 
         f = fopen(path, "re");
@@ -908,24 +905,19 @@ int getenv_for_pid(pid_t pid, const char *field, char **ret) {
         (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
         l = strlen(field);
+        for (;;) {
+                _cleanup_free_ char *line = NULL;
 
-        do {
-                char line[LINE_MAX];
-                size_t i;
+                if (sum > ENVIRONMENT_BLOCK_MAX) /* Give up searching eventually */
+                        return -ENOBUFS;
 
-                for (i = 0; i < sizeof(line)-1; i++) {
-                        int c;
+                r = read_nul_string(f, LONG_LINE_MAX, &line);
+                if (r < 0)
+                        return r;
+                if (r == 0)  /* EOF */
+                        break;
 
-                        c = getc(f);
-                        if (_unlikely_(c == EOF)) {
-                                done = true;
-                                break;
-                        } else if (c == 0)
-                                break;
-
-                        line[i] = c;
-                }
-                line[i] = 0;
+                sum += r;
 
                 if (strneq(line, field, l) && line[l] == '=') {
                         value = strdup(line + l + 1);
@@ -935,8 +927,7 @@ int getenv_for_pid(pid_t pid, const char *field, char **ret) {
                         *ret = value;
                         return 1;
                 }
-
-        } while (!done);
+        }
 
         *ret = NULL;
         return 0;
@@ -1173,7 +1164,7 @@ void reset_cached_pid(void) {
  * headers. __register_atfork() is mostly equivalent to pthread_atfork(), but doesn't require us to link against
  * libpthread, as it is part of glibc anyway. */
 extern int __register_atfork(void (*prepare) (void), void (*parent) (void), void (*child) (void), void *dso_handle);
-extern void* __dso_handle __attribute__ ((__weak__));
+extern void* __dso_handle _weak_;
 
 pid_t getpid_cached(void) {
         static bool installed = false;
@@ -1228,8 +1219,7 @@ int must_be_root(void) {
         if (geteuid() == 0)
                 return 0;
 
-        log_error("Need to be root.");
-        return -EPERM;
+        return log_error_errno(SYNTHETIC_ERRNO(EPERM), "Need to be root.");
 }
 
 int safe_fork_full(
@@ -1252,25 +1242,17 @@ int safe_fork_full(
         original_pid = getpid_cached();
 
         if (flags & (FORK_RESET_SIGNALS|FORK_DEATHSIG)) {
-
                 /* We temporarily block all signals, so that the new child has them blocked initially. This way, we can
                  * be sure that SIGTERMs are not lost we might send to the child. */
 
-                if (sigfillset(&ss) < 0)
-                        return log_full_errno(prio, errno, "Failed to reset signal set: %m");
-
+                assert_se(sigfillset(&ss) >= 0);
                 block_signals = true;
 
         } else if (flags & FORK_WAIT) {
-
                 /* Let's block SIGCHLD at least, so that we can safely watch for the child process */
 
-                if (sigemptyset(&ss) < 0)
-                        return log_full_errno(prio, errno, "Failed to clear signal set: %m");
-
-                if (sigaddset(&ss, SIGCHLD) < 0)
-                        return log_full_errno(prio, errno, "Failed to add SIGCHLD to signal set: %m");
-
+                assert_se(sigemptyset(&ss) >= 0);
+                assert_se(sigaddset(&ss, SIGCHLD) >= 0);
                 block_signals = true;
         }
 
@@ -1403,10 +1385,72 @@ int safe_fork_full(
                 }
         }
 
+        if (flags & FORK_RLIMIT_NOFILE_SAFE) {
+                r = rlimit_nofile_safe();
+                if (r < 0) {
+                        log_full_errno(prio, r, "Failed to lower RLIMIT_NOFILE's soft limit to 1K: %m");
+                        _exit(EXIT_FAILURE);
+                }
+        }
+
         if (ret_pid)
                 *ret_pid = getpid_cached();
 
         return 0;
+}
+
+int namespace_fork(
+                const char *outer_name,
+                const char *inner_name,
+                const int except_fds[],
+                size_t n_except_fds,
+                ForkFlags flags,
+                int pidns_fd,
+                int mntns_fd,
+                int netns_fd,
+                int userns_fd,
+                int root_fd,
+                pid_t *ret_pid) {
+
+        int r;
+
+        /* This is much like safe_fork(), but forks twice, and joins the specified namespaces in the middle
+         * process. This ensures that we are fully a member of the destination namespace, with pidns an all, so that
+         * /proc/self/fd works correctly. */
+
+        r = safe_fork_full(outer_name, except_fds, n_except_fds, (flags|FORK_DEATHSIG) & ~(FORK_REOPEN_LOG|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE), ret_pid);
+        if (r < 0)
+                return r;
+        if (r == 0) {
+                pid_t pid;
+
+                /* Child */
+
+                r = namespace_enter(pidns_fd, mntns_fd, netns_fd, userns_fd, root_fd);
+                if (r < 0) {
+                        log_full_errno(FLAGS_SET(flags, FORK_LOG) ? LOG_ERR : LOG_DEBUG, r, "Failed to join namespace: %m");
+                        _exit(EXIT_FAILURE);
+                }
+
+                /* We mask a few flags here that either make no sense for the grandchild, or that we don't have to do again */
+                r = safe_fork_full(inner_name, except_fds, n_except_fds, flags & ~(FORK_WAIT|FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_NULL_STDIO), &pid);
+                if (r < 0)
+                        _exit(EXIT_FAILURE);
+                if (r == 0) {
+                        /* Child */
+                        if (ret_pid)
+                                *ret_pid = pid;
+                        return 0;
+                }
+
+                r = wait_for_terminate_and_check(inner_name, pid, FLAGS_SET(flags, FORK_LOG) ? WAIT_LOG : 0);
+                if (r < 0)
+                        _exit(EXIT_FAILURE);
+
+                _exit(r);
+        }
+
+        return 1;
 }
 
 int fork_agent(const char *name, const int except[], size_t n_except, pid_t *ret_pid, const char *path, ...) {
@@ -1459,6 +1503,8 @@ int fork_agent(const char *name, const int except[], size_t n_except, pid_t *ret
 
                 safe_close_above_stdio(fd);
         }
+
+        (void) rlimit_nofile_safe();
 
         /* Count arguments */
         va_start(ap, path);

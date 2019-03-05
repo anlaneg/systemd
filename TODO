@@ -6,6 +6,8 @@ Bugfixes:
   manager or system manager can be always set. It would be better to reject
   them when parsing config.
 
+* Clarify what IPAddress* matches (source, destination, both?)
+
 External:
 
 * Fedora: add an rpmlint check that verifies that all unit files in the RPM are listed in %systemd_post macros.
@@ -21,16 +23,43 @@ Janitorial Clean-ups:
 
 Features:
 
-* bootctl: implement Type #2 boot loader entry discovery
+* make MAINPID= message reception checks even stricter: if service uses User=,
+  then check sending UID and ignore message if it doesn't match the user or
+  root.
+
+* maybe trigger a uevent "change" on a device if "systemctl reload xyz.device"
+  is issued.
+
+* when importing an fs tree with machined, optionally apply userns-rec-chown
+
+* when importing an fs tree with machined, complain if image is not an OS
+
+* Maybe introduce a helper safe_exec() or so, which is to execve() which
+  safe_fork() is to fork(). And then make revert the RLIMIT_NOFILE soft limit
+  to 1K implicitly, unless explicitly opted-out.
+
+* rework seccomp/nnp logic that that even if User= is used in combination with
+  a seccomp option we don't have to set NNP. For that, change uid first whil
+  keeping CAP_SYS_ADMIN, then apply seccomp, the drop cap.
+
+* add a concept for automatically loading per-unit secrets off disk and
+  inserting them into the kernel keyring. Maybe SecretsDirectory= similar to
+  ConfigurationDirectory=.
+
+* when no locale is configured, default to UEFI's PlatformLang variable
+
+* When logind.conf contains HandleLidSwitch=suspend-then-hibernate and we can't
+  hibernate because the swap partition isn't large enough, still suspend
 
 * bootctl,sd-boot: actually honour the "architecture" key
 
-* consider splitting out all temporary file creation APIs (we have so many in
-  fileio.h and elsewhere!) into a new util file of its own.
+* when a socket unit is spawned with an AF_UNIX path in /var/run, complain and
+  patch it to use /run instead
 
-* set memory.oom.group in cgroupsv2 for all leaf cgroups
+* set memory.oom.group in cgroup v2 for all leaf cgroups (kernel v4.19+)
 
-* drop umask() calls and suchlike from our generators, pid1 should set things up correctly anyway
+* add a new syscall group "@esoteric" for more esoteric stuff such as bpf() and
+  usefaultd() and make systemd-analyze check for it.
 
 * paranoia: whenever we process passwords, call mlock() on the memory
   first. i.e. look for all places we use string_erase()/string_free_erase() and
@@ -42,6 +71,9 @@ Features:
 
 * support the bind/connect/sendmsg cgroup stuff for sandboxing, and possibly
   patching around
+
+* maybe implicitly attach monotonic+realtime timestamps to outgoing messages in
+  log.c and sd-journal-send
 
 * chown() tty a service is attached to after the service goes down
 
@@ -56,14 +88,10 @@ Features:
   show state of these flags, and optionally trigger such a factory reset on
   next boot by setting the flag.
 
-* sd-boot: search drop-ins in $BOOT, too
-
 * sd-boot: add "oneshot boot timeout" variable support
 
 * sd-boot: automatically load EFI modules from some drop-in dir, so that people
   can add in file system drivers and such
-
-* esp generator: also mount $BOOT if found
 
 * sd-boot: optionally, show boot menu when previous default boot item has
   non-zero "tries done" count
@@ -71,7 +99,28 @@ Features:
 * logind: add "boot into bootmenu" API, and possibly even "boot into windows"
   and "boot into macos".
 
-* bootspec.c: also enumerate EFI unified kernel images.
+* maybe set a special xattr on cgroups that have delegate=yes set, to make it
+  easy to mark cut points
+
+* introduce an option (or replacement) for "systemctl show" that outputs all
+  properties as JSON, similar to busctl's new JSON output. In contrast to that
+  it should skip the variant type string though.
+
+* augment CODE_FILE=, CODE_LINE= with something like CODE_BASE= or so which
+  contains some identifier for the project, which allows us to include
+  clickable links to source files generating these log messages. The identifier
+  could be some abberviated URL prefix or so (taking inspiration from Go
+  imports). For example, for systemd we could use
+  CODE_BASE=github.com/systemd/systemd/blob/98b0b1123cc or so which is
+  sufficient to build a link by prefixing "http://" and suffixing the
+  CODE_FILE.
+
+* when outputting log data with journalctl and the log data includes references
+  to configuration files (CONFIG_FILE=), create a clickable link for it.
+
+* Augment MESSAGE_ID with MESSAGE_BASE, in a similar fashion so that we can
+  make clickable links from log messages carrying a MESSAGE_ID, that lead to
+  some explanatory text online.
 
 * maybe extend .path units to expose fanotify() per-mount change events
 
@@ -97,13 +146,6 @@ Features:
   schedule events based on time and timezone changes.
 
 * nspawn: greater control over selinux label?
-
-* cgroups: figure out if we can somehow communicate in a cleaner way whether a
-  systemd instance not running in the cgroup root shall or shall not manage the
-  attributes of its top-level cgroup. Currently it assumes it manages all, but
-  then might get EPERM due to permission porblems/userns, which is OK, but this
-  should be revisited to make clearer and also work if the payload systemd runs
-  with full privs and without userns.
 
 * hibernate/s2h: make this robust and safe to enable in Fedora by default.
   Specifically:
@@ -210,14 +252,13 @@ Features:
 
 * taint systemd if there are fewer than 65536 users assigned (userns) to the system.
 
-* deprecate PermissionsStartOnly= and RootDirectoryStartOnly= in favour of the ExecStart= prefix chars
+* deprecate RootDirectoryStartOnly= in favour of a new ExecStart= prefix char
 
 * add a new RuntimeDirectoryPreserve= mode that defines a similar lifecycle for
   the runtime dir as we maintain for the fdstore: i.e. keep it around as long
   as the unit is running or has a job queued.
 
-* support projid-based quota in machinectl for containers, and then drop
-  implicit btrfs loopback magic in machined
+* support projid-based quota in machinectl for containers
 
 * Add NetworkNamespacePath= to specify a path to a network namespace
 
@@ -246,9 +287,6 @@ Features:
 * beef up pam_systemd to take unit file settings such as cgroups properties as
   parameters
 
-* a new "systemd-analyze security" tool outputting a checklist of security
-  features a service does and does not implement
-
 * maybe hook of xfs/ext4 quotactl() with services? i.e. automatically manage
   the quota of a the user indicated in User= via unit file settings, like the
   other resource management concepts. Would mix nicely with DynamicUser=1. Or
@@ -256,11 +294,6 @@ Features:
   running as root. Quota should probably cover all the special dirs such as
   StateDirectory=, LogsDirectory=, CacheDirectory=, as well as RootDirectory= if it
   is set, plus the whole disk space any image configured with RootImage=.
-
-* Introduce "exit" as an EmergencyAction value, and allow to configure a
-  per-unit success/failure exit code to configure. This would be useful for
-  running commands inside of services inside of containers, which could then
-  propagate their failure state all the way up.
 
 * In DynamicUser= mode: before selecting a UID, use disk quota APIs on relevant
   disks to see if the UID is already in use.
@@ -278,7 +311,7 @@ Features:
 * show whether a service has out-of-date configuration in "systemctl status" by
   using mtime data of ConfigurationDirectory=.
 
-* replace all uses of fgets() + LINE_MAX by read_line()
+* replace all remaining uses of fgets() + LINE_MAX by read_line()
 
 * Add AddUser= setting to unit files, similar to DynamicUser=1 which however
   creates a static, persistent user rather than a dynamic, transient user. We
@@ -376,8 +409,6 @@ Features:
   on PID 1 with the relevant signals, and makes relevant files in /sys and
   /proc (such as the sysrq stuff) unavailable
 
-* DeviceAllow= should also generate seccomp filters for mknod()
-
 * make sure the ratelimit object can deal with USEC_INFINITY as way to turn off things
 
 * journalctl: make sure -f ends when the container indicated by -M terminates
@@ -445,9 +476,6 @@ Features:
   running units. Use this in timedated to manage the NTP service
   state.
   http://lists.freedesktop.org/archives/systemd-devel/2015-April/030229.html
-
-* Maybe add support for the equivalent of "ethtool advertise" to .link files?
-  http://lists.freedesktop.org/archives/systemd-devel/2015-April/030112.html
 
 * The udev blkid built-in should expose a property that reflects
   whether media was sensed in USB CF/SD card readers. This should then
@@ -574,7 +602,6 @@ Features:
 
 * cgroups:
   - implement per-slice CPUFairScheduling=1 switch
-  - handle jointly mounted controllers correctly
   - introduce high-level settings for RT budget, swappiness
   - how to reset dynamically changed unit cgroup attributes sanely?
   - when reloading configuration, apply new cgroup configuration
@@ -637,8 +664,6 @@ Features:
 * add a pam module that passes the hdd passphrase into the PAM stack and then expires it, for usage by gdm auto-login.
 
 * add a pam module that on password changes updates any LUKS slot where the password matches
-
-* maybe add a generator that looks for "systemd.run=" on the kernel cmdline for container usercases...
 
 * test/:
   - add unit tests for config_parse_device_allow()
@@ -792,6 +817,7 @@ Features:
   - man: document the very specific env the shutdown drop-in tools live in
   - man: add more examples to man pages
   - man: maybe sort directives in man pages, and take sections from --help and apply them to man too
+  - document root=gpt-auto properly
 
 * systemctl:
   - add systemctl switch to dump transaction without executing it
@@ -845,8 +871,6 @@ Features:
     PID 1...
   - optionally automatically add FORWARD rules to iptables whenever nspawn is
     running, remove them when shut down.
-  - maybe make copying of /etc/resolv.conf optional, and skip it if --read-only
-    is used
 
 * dissect
   - refuse mounting over a mount point
@@ -865,9 +889,6 @@ Features:
   - "machinectl diff"
   - "machinectl commit" that takes a writable snapshot of a tree, invokes a
     shell in it, and marks it read-only after use
-
-* importd:
-  - generate a nice warning if mkfs.btrfs is missing
 
 * cryptsetup:
   - cryptsetup-generator: allow specification of passwords in crypttab itself
@@ -1086,3 +1107,5 @@ Regularly:
 * use secure_getenv() instead of getenv() where appropriate
 
 * link up selected blog stories from man pages and unit files Documentation= fields
+String is not UTF-8 clean, ignoring assignment
+ timedatex.service: Consumed 26ms CPU time.

@@ -6,9 +6,10 @@
 
 #include "alloc-util.h"
 #include "log.h"
+#include "main-func.h"
+#include "pretty-print.h"
 #include "string-util.h"
 #include "strv.h"
-#include "terminal-util.h"
 #include "unit-name.h"
 
 static enum {
@@ -84,20 +85,18 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case ARG_SUFFIX:
 
-                        if (unit_type_from_string(optarg) < 0) {
-                                log_error("Invalid unit suffix type %s.", optarg);
-                                return -EINVAL;
-                        }
+                        if (unit_type_from_string(optarg) < 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Invalid unit suffix type %s.", optarg);
 
                         arg_suffix = optarg;
                         break;
 
                 case ARG_TEMPLATE:
 
-                        if (!unit_name_is_valid(optarg, UNIT_NAME_TEMPLATE)) {
-                                log_error("Template name %s is not valid.", optarg);
-                                return -EINVAL;
-                        }
+                        if (!unit_name_is_valid(optarg, UNIT_NAME_TEMPLATE))
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Template name %s is not valid.", optarg);
 
                         arg_template = optarg;
                         break;
@@ -125,45 +124,38 @@ static int parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        if (optind >= argc) {
-                log_error("Not enough arguments.");
-                return -EINVAL;
-        }
+        if (optind >= argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Not enough arguments.");
 
-        if (arg_template && arg_suffix) {
-                log_error("--suffix= and --template= may not be combined.");
-                return -EINVAL;
-        }
+        if (arg_template && arg_suffix)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "--suffix= and --template= may not be combined.");
 
-        if ((arg_template || arg_suffix) && arg_action == ACTION_MANGLE) {
-                log_error("--suffix= and --template= are not compatible with --mangle.");
-                return -EINVAL;
-        }
+        if ((arg_template || arg_suffix) && arg_action == ACTION_MANGLE)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "--suffix= and --template= are not compatible with --mangle.");
 
-        if (arg_suffix && arg_action == ACTION_UNESCAPE) {
-                log_error("--suffix is not compatible with --unescape.");
-                return -EINVAL;
-        }
+        if (arg_suffix && arg_action == ACTION_UNESCAPE)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "--suffix is not compatible with --unescape.");
 
-        if (arg_path && !IN_SET(arg_action, ACTION_ESCAPE, ACTION_UNESCAPE)) {
-                log_error("--path may not be combined with --mangle.");
-                return -EINVAL;
-        }
+        if (arg_path && !IN_SET(arg_action, ACTION_ESCAPE, ACTION_UNESCAPE))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "--path may not be combined with --mangle.");
 
-        if (arg_instance && arg_action != ACTION_UNESCAPE) {
-                log_error("--instance must be used in conjunction with --unescape.");
-                return -EINVAL;
-        }
+        if (arg_instance && arg_action != ACTION_UNESCAPE)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "--instance must be used in conjunction with --unescape.");
 
-        if (arg_instance && arg_template) {
-                log_error("--instance may not be combined with --template.");
-                return -EINVAL;
-        }
+        if (arg_instance && arg_template)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "--instance may not be combined with --template.");
 
         return 1;
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         char **i;
         int r;
 
@@ -172,7 +164,7 @@ int main(int argc, char *argv[]) {
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
         STRV_FOREACH(i, argv + optind) {
                 _cleanup_free_ char *e = NULL;
@@ -182,40 +174,30 @@ int main(int argc, char *argv[]) {
                 case ACTION_ESCAPE:
                         if (arg_path) {
                                 r = unit_name_path_escape(*i, &e);
-                                if (r < 0) {
-                                        log_error_errno(r, "Failed to escape string: %m");
-                                        goto finish;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to escape string: %m");
                         } else {
                                 e = unit_name_escape(*i);
-                                if (!e) {
-                                        r = log_oom();
-                                        goto finish;
-                                }
+                                if (!e)
+                                        return log_oom();
                         }
 
                         if (arg_template) {
                                 char *x;
 
                                 r = unit_name_replace_instance(arg_template, e, &x);
-                                if (r < 0) {
-                                        log_error_errno(r, "Failed to replace instance: %m");
-                                        goto finish;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to replace instance: %m");
 
-                                free(e);
-                                e = x;
+                                free_and_replace(e, x);
                         } else if (arg_suffix) {
                                 char *x;
 
                                 x = strjoin(e, ".", arg_suffix);
-                                if (!x) {
-                                        r = log_oom();
-                                        goto finish;
-                                }
+                                if (!x)
+                                        return log_oom();
 
-                                free(e);
-                                e = x;
+                                free_and_replace(e, x);
                         }
 
                         break;
@@ -227,55 +209,42 @@ int main(int argc, char *argv[]) {
                                 _cleanup_free_ char *template = NULL;
 
                                 r = unit_name_to_instance(*i, &name);
-                                if (r < 0) {
-                                        log_error_errno(r, "Failed to extract instance: %m");
-                                        goto finish;
-                                }
-                                if (isempty(name)) {
-                                        log_error("Unit %s is missing the instance name.", *i);
-                                        r = -EINVAL;
-                                        goto finish;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to extract instance: %m");
+                                if (isempty(name))
+                                        return log_error("Unit %s is missing the instance name.", *i);
+
                                 r = unit_name_template(*i, &template);
-                                if (r < 0) {
-                                        log_error_errno(r, "Failed to extract template: %m");
-                                        goto finish;
-                                }
-                                if (arg_template && !streq(arg_template, template)) {
-                                        log_error("Unit %s template %s does not match specified template %s.", *i, template, arg_template);
-                                        r = -EINVAL;
-                                        goto finish;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to extract template: %m");
+                                if (arg_template && !streq(arg_template, template))
+                                        return log_error("Unit %s template %s does not match specified template %s.",
+                                                         *i, template, arg_template);
                         } else {
                                 name = strdup(*i);
-                                if (!name) {
-                                        r = log_oom();
-                                        goto finish;
-                                }
+                                if (!name)
+                                        return log_oom();
                         }
 
                         if (arg_path)
                                 r = unit_name_path_unescape(name, &e);
                         else
                                 r = unit_name_unescape(name, &e);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to unescape string: %m");
 
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to unescape string: %m");
-                                goto finish;
-                        }
                         break;
                 }
 
                 case ACTION_MANGLE:
                         r = unit_name_mangle(*i, 0, &e);
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to mangle name: %m");
-                                goto finish;
-                        }
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to mangle name: %m");
+
                         break;
                 }
 
-                if (i != argv+optind)
+                if (i != argv + optind)
                         fputc(' ', stdout);
 
                 fputs(e, stdout);
@@ -283,6 +252,7 @@ int main(int argc, char *argv[]) {
 
         fputc('\n', stdout);
 
-finish:
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return 0;
 }
+
+DEFINE_MAIN_FUNCTION(run);

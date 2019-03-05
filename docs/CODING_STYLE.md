@@ -1,4 +1,8 @@
-# Coding style
+---
+title: Coding Style
+---
+
+# Coding Style
 
 - 8ch indent, no tabs, except for files in `man/` which are 2ch indent,
   and still no tabs.
@@ -6,12 +10,12 @@
 - We prefer `/* comments */` over `// comments` in code you commit, please. This
   way `// comments` are left for developers to use for local, temporary
   commenting of code for debug purposes (i.e. uncommittable stuff), making such
-  comments easily discernable from explanatory, documenting code comments
+  comments easily discernible from explanatory, documenting code comments
   (i.e. committable stuff).
 
 - Don't break code lines too eagerly. We do **not** force line breaks at 80ch,
   all of today's screens should be much larger than that. But then again, don't
-  overdo it, ~119ch should be enough really. The `.editorconfig`, `.vimrc` and
+  overdo it, ~109ch should be enough really. The `.editorconfig`, `.vimrc` and
   `.dir-locals.el` files contained in the repository will set this limit up for
   you automatically, if you let them (as well as a few other things).
 
@@ -126,8 +130,8 @@
   }
   ```
 
-- Unless you allocate an array, `double` is always the better choice
-  than `float`. Processors speak `double` natively anyway, so this is
+- Unless you allocate an array, `double` is always a better choice
+  than `float`. Processors speak `double` natively anyway, so there is
   no speed benefit, and on calls like `printf()` `float`s get promoted
   to `double`s anyway, so there is no point.
 
@@ -197,6 +201,24 @@
   about the resulting errors. If a "logging" function calls another
   "logging" function, then it should not generate log messages, so
   that log messages are not generated twice for the same errors.
+
+- If possible, do a combined log & return operation:
+
+  ```c
+  r = operation(...);
+  if (r < 0)
+          return log_(error|warning|notice|...)_errno(r, "Failed to ...: %m");
+  ```
+
+  If the error value is "synthetic", i.e. it was not received from
+  the called function, use `SYNTHETIC_ERRNO` wrapper to tell the logging
+  system to not log the errno value, but still return it:
+
+  ```c
+  n = read(..., s, sizeof s);
+  if (n != sizeof s)
+          return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to read ...");
+  ```
 
 - Avoid static variables, except for caches and very few other
   cases. Think about thread-safety! While most of our code is never
@@ -373,12 +395,16 @@
   something some time", or so is a lazy excuse. Always wait for the
   proper event, instead of doing time-based poll loops.
 
-- To determine the length of a constant string `"foo"`, don't bother
-  with `sizeof("foo")-1`, please use `STRLEN()` instead.
+- To determine the length of a constant string `"foo"`, don't bother with
+  `sizeof("foo")-1`, please use `strlen()` instead (both gcc and clang optimize
+  the call away for fixed strings). The only exception is when declaring an
+  array. In that case use STRLEN, which evaluates to a static constant and
+  doesn't force the compiler to create a VLA.
 
-- If you want to concatenate two or more strings, consider using
-  `strjoin()` rather than `asprintf()`, as the latter is a lot
-  slower. This matters particularly in inner loops.
+- If you want to concatenate two or more strings, consider using `strjoina()`
+  or `strjoin()` rather than `asprintf()`, as the latter is a lot slower. This
+  matters particularly in inner loops (but note that `strjoina()` cannot be
+  used there).
 
 - Please avoid using global variables as much as you can. And if you
   do use them make sure they are static at least, instead of
@@ -431,12 +457,13 @@
   want to call it "big endian" right-away.
 
 - You might wonder what kind of common code belongs in `src/shared/` and what
-  belongs in `src/basic/`. The split is like this: anything that uses public APIs
-  we expose (i.e. any of the sd-bus, sd-login, sd-id128, ... APIs) must be
-  located in `src/shared/`. All stuff that only uses external libraries from
-  other projects (such as glibc's APIs), or APIs from `src/basic/` itself should
-  be placed in `src/basic/`. Conversely, `src/libsystemd/` may only use symbols
-  from `src/basic`, but not from `src/shared/`.
+  belongs in `src/basic/`. The split is like this: anything that is used to
+  implement the public shared object we provide (sd-bus, sd-login, sd-id128,
+  nss-systemd, nss-mymachines, nss-resolve, nss-myhostname, pam_systemd), must
+  be located in `src/basic` (those objects are not allowed to link to
+  libsystemd-shared.so). Conversely, anything which is shared between multiple
+  components and does not need to be in `src/basic/`, should be in
+  `src/shared/`.
 
   To summarize:
 
@@ -449,7 +476,9 @@
   - may not use any code outside of `src/basic/`, `src/libsystemd/`
 
   `src/shared/`
-  - may be used by all code in the tree, except for code in `src/basic/`, `src/libsystemd/`
+  - may be used by all code in the tree, except for code in `src/basic/`,
+    `src/libsystemd/`, `src/nss-*`, `src/login/pam_systemd.*`, and files under
+    `src/journal/` that end up in `libjournal-client.a` convenience library.
   - may not use any code outside of `src/basic/`, `src/libsystemd/`, `src/shared/`
 
 - Our focus is on the GNU libc (glibc), not any other libcs. If other libcs are

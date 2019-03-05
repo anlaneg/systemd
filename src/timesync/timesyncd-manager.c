@@ -23,6 +23,7 @@
 #include "missing.h"
 #include "network-util.h"
 #include "ratelimit.h"
+#include "resolve-private.h"
 #include "socket-util.h"
 #include "string-util.h"
 #include "strv.h"
@@ -471,10 +472,9 @@ static int manager_receive_response(sd_event_source *source, int fd, uint32_t re
                         break;
                 }
         }
-        if (!recv_time) {
-                log_error("Invalid packet timestamp.");
-                return -EINVAL;
-        }
+        if (!recv_time)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Invalid packet timestamp.");
 
         if (!m->pending) {
                 log_debug("Unexpected reply. Ignoring.");
@@ -616,8 +616,9 @@ static int manager_receive_response(sd_event_source *source, int fd, uint32_t re
                 m->good = true;
 
                 server_address_pretty(m->current_server_address, &pretty);
-                log_info("Synchronized to time server %s (%s).", strna(pretty), m->current_server_name->string);
-                sd_notifyf(false, "STATUS=Synchronized to time server %s (%s).", strna(pretty), m->current_server_name->string);
+                /* "for the first time", as further successful syncs will not be logged. */
+                log_info("Synchronized to time server for the first time %s (%s).", strna(pretty), m->current_server_name->string);
+                sd_notifyf(false, "STATUS=Synchronized to time server for the first time %s (%s).", strna(pretty), m->current_server_name->string);
         }
 
         r = manager_arm_timer(m, m->poll_interval_usec);
@@ -725,8 +726,7 @@ void manager_set_server_address(Manager *m, ServerAddress *a) {
         }
 }
 
-static int manager_resolve_handler(sd_resolve_query *q, int ret, const struct addrinfo *ai, void *userdata) {
-        Manager *m = userdata;
+static int manager_resolve_handler(sd_resolve_query *q, int ret, const struct addrinfo *ai, Manager *m) {
         int r;
 
         assert(q);
@@ -874,7 +874,7 @@ int manager_connect(Manager *m) {
 
                 log_debug("Resolving %s...", m->current_server_name->string);
 
-                r = sd_resolve_getaddrinfo(m->resolve, &m->resolve_query, m->current_server_name->string, "123", &hints, manager_resolve_handler, m);
+                r = resolve_getaddrinfo(m->resolve, &m->resolve_query, m->current_server_name->string, "123", &hints, manager_resolve_handler, NULL, m);
                 if (r < 0)
                         return log_error_errno(r, "Failed to create resolver: %m");
 
@@ -938,7 +938,7 @@ void manager_free(Manager *m) {
         sd_resolve_unref(m->resolve);
         sd_event_unref(m->event);
 
-        sd_bus_unref(m->bus);
+        sd_bus_flush_close_unref(m->bus);
 
         free(m);
 }

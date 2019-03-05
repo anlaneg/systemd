@@ -94,6 +94,17 @@ tests += [
           libblkid],
          '', 'manual'],
 
+        [['src/test/test-nscd-flush.c'],
+         [libcore,
+          libshared],
+         [threads,
+          librt,
+          libseccomp,
+          libselinux,
+          libmount,
+          libblkid],
+         '', 'manual'],
+
         [['src/test/test-loopback.c'],
          [libcore,
           libshared],
@@ -156,6 +167,10 @@ tests += [
          [],
          []],
 
+        [['src/test/test-dev-setup.c'],
+         [],
+         []],
+
         [['src/test/test-capability.c'],
          [],
          [libcap]],
@@ -170,6 +185,10 @@ tests += [
          []],
 
         [['src/test/test-copy.c'],
+         [],
+         []],
+
+        [['src/test/test-static-destruct.c'],
          [],
          []],
 
@@ -210,6 +229,10 @@ tests += [
          []],
 
         [['src/test/test-mount-util.c'],
+         [],
+         []],
+
+        [['src/test/test-mountpoint-util.c'],
          [],
          []],
 
@@ -302,6 +325,10 @@ tests += [
          []],
 
         [['src/test/test-path-lookup.c'],
+         [],
+         []],
+
+        [['src/test/test-pretty-print.c'],
          [],
          []],
 
@@ -410,6 +437,10 @@ tests += [
          '', 'timeout=90'],
 
         [['src/test/test-set.c'],
+         [],
+         []],
+
+        [['src/test/test-ordered-set.c'],
          [],
          []],
 
@@ -533,6 +564,11 @@ tests += [
          [],
          '', 'manual'],
 
+        [['src/test/test-cgroup-cpu.c'],
+         [libcore,
+          libshared],
+         []],
+
         [['src/test/test-cgroup-mask.c',
           'src/test/test-helper.c'],
          [libcore,
@@ -631,6 +667,11 @@ tests += [
 
         [['src/test/test-arphrd-list.c',
           generated_gperf_headers],
+         [],
+         []],
+
+        [['src/test/test-ip-protocol-list.c',
+          shared_generated_gperf_headers],
          [],
          []],
 
@@ -826,6 +867,10 @@ tests += [
          [],
          [threads]],
 
+        [['src/libsystemd/sd-bus/test-bus-queue-ref-cycle.c'],
+         [],
+         [threads]],
+
         [['src/libsystemd/sd-bus/test-bus-watch-bind.c'],
          [],
          [threads], '', 'timeout=120'],
@@ -897,7 +942,8 @@ tests += [
 
         [['src/libsystemd/sd-resolve/test-resolve.c'],
          [],
-         [threads]],
+         [threads],
+         '', 'timeout=120'],
 
         [['src/libsystemd/sd-login/test-login.c'],
          [],
@@ -925,7 +971,7 @@ tests += [
 
 ]
 
-if cxx.found()
+if cxx_cmd != ''
         tests += [
                 [['src/libsystemd/sd-bus/test-bus-vtable-cc.cc'],
                  [],

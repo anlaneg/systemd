@@ -8,6 +8,7 @@
 #include "alloc-util.h"
 #include "bus-dump.h"
 #include "bus-internal.h"
+#include "bus-message.h"
 #include "bus-signature.h"
 #include "bus-type.h"
 #include "bus-util.h"
@@ -18,9 +19,11 @@
 #include "json.h"
 #include "locale-util.h"
 #include "log.h"
+#include "main-func.h"
 #include "pager.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "pretty-print.h"
 #include "set.h"
 #include "strv.h"
 #include "terminal-util.h"
@@ -33,7 +36,7 @@ static enum {
         JSON_SHORT,
         JSON_PRETTY,
 } arg_json = JSON_OFF;
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
 static bool arg_legend = true;
 static const char *arg_address = NULL;
 static bool arg_unique = false;
@@ -54,12 +57,18 @@ static bool arg_allow_interactive_authorization = true;
 static bool arg_augment_creds = true;
 static bool arg_watch_bind = false;
 static usec_t arg_timeout = 0;
+static const char *arg_destination = NULL;
+
+STATIC_DESTRUCTOR_REGISTER(arg_matches, strv_freep);
 
 #define NAME_IS_ACQUIRED INT_TO_PTR(1)
 #define NAME_IS_ACTIVATABLE INT_TO_PTR(2)
 
+static int json_transform_message(sd_bus_message *m, JsonVariant **ret);
+static void json_dump_with_flags(JsonVariant *v, FILE *f);
+
 static int acquire_bus(bool set_monitor, sd_bus **ret) {
-        _cleanup_(sd_bus_unrefp) sd_bus *bus = NULL;
+        _cleanup_(sd_bus_close_unrefp) sd_bus *bus = NULL;
         int r;
 
         r = sd_bus_new(&bus);
@@ -155,7 +164,7 @@ static int list_bus_names(int argc, char **argv, void *userdata) {
         if (r < 0)
                 return log_error_errno(r, "Failed to list names: %m");
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         names = hashmap_new(&string_hash_ops);
         if (!names)
@@ -321,8 +330,8 @@ static void print_subtree(const char *prefix, const char *path, char **l) {
                 l++;
         }
 
-        vertical = strjoina(prefix, special_glyph(TREE_VERTICAL));
-        space = strjoina(prefix, special_glyph(TREE_SPACE));
+        vertical = strjoina(prefix, special_glyph(SPECIAL_GLYPH_TREE_VERTICAL));
+        space = strjoina(prefix, special_glyph(SPECIAL_GLYPH_TREE_SPACE));
 
         for (;;) {
                 bool has_more = false;
@@ -343,7 +352,7 @@ static void print_subtree(const char *prefix, const char *path, char **l) {
                         n++;
                 }
 
-                printf("%s%s%s\n", prefix, special_glyph(has_more ? TREE_BRANCH : TREE_RIGHT), *l);
+                printf("%s%s%s\n", prefix, special_glyph(has_more ? SPECIAL_GLYPH_TREE_BRANCH : SPECIAL_GLYPH_TREE_RIGHT), *l);
 
                 print_subtree(has_more ? vertical : space, *l, l);
                 l = n;
@@ -470,7 +479,7 @@ static int tree_one(sd_bus *bus, const char *service, const char *prefix, bool m
                 p = NULL;
         }
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         l = set_get_strv(done);
         if (!l)
@@ -504,7 +513,7 @@ static int tree(int argc, char **argv, void *userdata) {
                 if (r < 0)
                         return log_error_errno(r, "Failed to get name list: %m");
 
-                (void) pager_open(arg_no_pager, false);
+                (void) pager_open(arg_pager_flags);
 
                 STRV_FOREACH(i, names) {
                         int q;
@@ -534,7 +543,7 @@ static int tree(int argc, char **argv, void *userdata) {
                                 printf("\n");
 
                         if (argv[2]) {
-                                (void) pager_open(arg_no_pager, false);
+                                (void) pager_open(arg_pager_flags);
                                 printf("Service %s%s%s:\n", ansi_highlight(), *i, ansi_normal());
                         }
 
@@ -705,8 +714,7 @@ typedef struct Member {
         uint64_t flags;
 } Member;
 
-static void member_hash_func(const void *p, struct siphash *state) {
-        const Member *m = p;
+static void member_hash_func(const Member *m, struct siphash *state) {
         uint64_t arity = 1;
 
         assert(m);
@@ -788,10 +796,8 @@ static int on_interface(const char *interface, uint64_t flags, void *userdata) {
                 return log_oom();
 
         r = set_put(members, m);
-        if (r <= 0) {
-                log_error("Duplicate interface");
-                return -EINVAL;
-        }
+        if (r <= 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Duplicate interface");
 
         m = NULL;
         return 0;
@@ -829,10 +835,8 @@ static int on_method(const char *interface, const char *name, const char *signat
                 return log_oom();
 
         r = set_put(members, m);
-        if (r <= 0) {
-                log_error("Duplicate method");
-                return -EINVAL;
-        }
+        if (r <= 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Duplicate method");
 
         m = NULL;
         return 0;
@@ -866,10 +870,8 @@ static int on_signal(const char *interface, const char *name, const char *signat
                 return log_oom();
 
         r = set_put(members, m);
-        if (r <= 0) {
-                log_error("Duplicate signal");
-                return -EINVAL;
-        }
+        if (r <= 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Duplicate signal");
 
         m = NULL;
         return 0;
@@ -904,21 +906,16 @@ static int on_property(const char *interface, const char *name, const char *sign
                 return log_oom();
 
         r = set_put(members, m);
-        if (r <= 0) {
-                log_error("Duplicate property");
-                return -EINVAL;
-        }
+        if (r <= 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Duplicate property");
 
         m = NULL;
         return 0;
 }
 
-static int introspect(int argc, char **argv, void *userdata) {
-        static const struct hash_ops member_hash_ops = {
-                .hash = member_hash_func,
-                .compare = (__compar_fn_t) member_compare_func,
-        };
+DEFINE_PRIVATE_HASH_OPS(member_hash_ops, Member, member_hash_func, member_compare_func);
 
+static int introspect(int argc, char **argv, void *userdata) {
         static const XMLIntrospectOps ops = {
                 .on_interface = on_interface,
                 .on_method = on_method,
@@ -1033,7 +1030,7 @@ static int introspect(int argc, char **argv, void *userdata) {
                         return bus_log_parse_error(r);
         }
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         name_width = STRLEN("NAME");
         type_width = STRLEN("TYPE");
@@ -1128,6 +1125,43 @@ static int message_pcap(sd_bus_message *m, FILE *f) {
         return bus_message_pcap_frame(m, arg_snaplen, f);
 }
 
+static int message_json(sd_bus_message *m, FILE *f) {
+        _cleanup_(json_variant_unrefp) JsonVariant *v = NULL, *w = NULL;
+        char e[2];
+        int r;
+
+        r = json_transform_message(m, &v);
+        if (r < 0)
+                return r;
+
+        e[0] = m->header->endian;
+        e[1] = 0;
+
+        r = json_build(&w, JSON_BUILD_OBJECT(
+                                       JSON_BUILD_PAIR("type", JSON_BUILD_STRING(bus_message_type_to_string(m->header->type))),
+                                       JSON_BUILD_PAIR("endian", JSON_BUILD_STRING(e)),
+                                       JSON_BUILD_PAIR("flags", JSON_BUILD_INTEGER(m->header->flags)),
+                                       JSON_BUILD_PAIR("version", JSON_BUILD_INTEGER(m->header->version)),
+                                       JSON_BUILD_PAIR_CONDITION(m->priority != 0, "priority", JSON_BUILD_INTEGER(m->priority)),
+                                       JSON_BUILD_PAIR("cookie", JSON_BUILD_INTEGER(BUS_MESSAGE_COOKIE(m))),
+                                       JSON_BUILD_PAIR_CONDITION(m->reply_cookie != 0, "reply_cookie", JSON_BUILD_INTEGER(m->reply_cookie)),
+                                       JSON_BUILD_PAIR_CONDITION(m->sender, "sender", JSON_BUILD_STRING(m->sender)),
+                                       JSON_BUILD_PAIR_CONDITION(m->destination, "destination", JSON_BUILD_STRING(m->destination)),
+                                       JSON_BUILD_PAIR_CONDITION(m->path, "path", JSON_BUILD_STRING(m->path)),
+                                       JSON_BUILD_PAIR_CONDITION(m->interface, "interface", JSON_BUILD_STRING(m->interface)),
+                                       JSON_BUILD_PAIR_CONDITION(m->member, "member", JSON_BUILD_STRING(m->member)),
+                                       JSON_BUILD_PAIR_CONDITION(m->monotonic != 0, "monotonic", JSON_BUILD_INTEGER(m->monotonic)),
+                                       JSON_BUILD_PAIR_CONDITION(m->realtime != 0, "realtime", JSON_BUILD_INTEGER(m->realtime)),
+                                       JSON_BUILD_PAIR_CONDITION(m->seqnum != 0, "seqnum", JSON_BUILD_INTEGER(m->seqnum)),
+                                       JSON_BUILD_PAIR_CONDITION(m->error.name, "error_name", JSON_BUILD_STRING(m->error.name)),
+                                       JSON_BUILD_PAIR("payload", JSON_BUILD_VARIANT(v))));
+        if (r < 0)
+                return log_error_errno(r, "Failed to build JSON object: %m");
+
+        json_dump_with_flags(w, f);
+        return 0;
+}
+
 static int monitor(int argc, char **argv, int (*dump)(sd_bus_message *m, FILE *f)) {
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *message = NULL;
@@ -1154,10 +1188,8 @@ static int monitor(int argc, char **argv, int (*dump)(sd_bus_message *m, FILE *f
         STRV_FOREACH(i, argv+1) {
                 _cleanup_free_ char *m = NULL;
 
-                if (!service_name_is_valid(*i)) {
-                        log_error("Invalid service name '%s'", *i);
-                        return -EINVAL;
-                }
+                if (!service_name_is_valid(*i))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Invalid service name '%s'", *i);
 
                 m = strjoin("sender='", *i, "'");
                 if (!m)
@@ -1247,16 +1279,15 @@ static int monitor(int argc, char **argv, int (*dump)(sd_bus_message *m, FILE *f
 }
 
 static int verb_monitor(int argc, char **argv, void *userdata) {
-        return monitor(argc, argv, message_dump);
+        return monitor(argc, argv, arg_json != JSON_OFF ? message_json : message_dump);
 }
 
 static int verb_capture(int argc, char **argv, void *userdata) {
         int r;
 
-        if (isatty(fileno(stdout)) > 0) {
-                log_error("Refusing to write message data to console, please redirect output to a file.");
-                return -EINVAL;
-        }
+        if (isatty(fileno(stdout)) > 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Refusing to write message data to console, please redirect output to a file.");
 
         bus_pcap_header(arg_snaplen, stdout);
 
@@ -1342,10 +1373,9 @@ static int message_append_cmdline(sd_bus_message *m, const char *signature, char
 
                 if (t == 0)
                         break;
-                if (!v) {
-                        log_error("Too few parameters for signature.");
-                        return -EINVAL;
-                }
+                if (!v)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Too few parameters for signature.");
 
                 signature++;
                 p++;
@@ -1535,12 +1565,12 @@ static int message_append_cmdline(sd_bus_message *m, const char *signature, char
                 }
 
                 case SD_BUS_TYPE_UNIX_FD:
-                        log_error("UNIX file descriptor not supported as type.");
-                        return -EINVAL;
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "UNIX file descriptor not supported as type.");
 
                 default:
-                        log_error("Unknown signature type %c.", t);
-                        return -EINVAL;
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Unknown signature type %c.", t);
                 }
 
                 if (r < 0)
@@ -1900,7 +1930,7 @@ static void json_dump_with_flags(JsonVariant *v, FILE *f) {
 
         json_variant_dump(v,
                           (arg_json == JSON_PRETTY ? JSON_FORMAT_PRETTY : JSON_FORMAT_NEWLINE) |
-                          colors_enabled() * JSON_FORMAT_COLOR,
+                          JSON_FORMAT_COLOR_AUTO,
                           f, NULL);
 }
 
@@ -1939,10 +1969,8 @@ static int call(int argc, char **argv, void *userdata) {
                 if (r < 0)
                         return r;
 
-                if (*p) {
-                        log_error("Too many parameters for signature.");
-                        return -EINVAL;
-                }
+                if (*p)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Too many parameters for signature.");
         }
 
         if (!arg_expect_reply) {
@@ -1967,7 +1995,7 @@ static int call(int argc, char **argv, void *userdata) {
                         _cleanup_(json_variant_unrefp) JsonVariant *v = NULL;
 
                         if (arg_json != JSON_SHORT)
-                                (void) pager_open(arg_no_pager, false);
+                                (void) pager_open(arg_pager_flags);
 
                         r = json_transform_message(reply, &v);
                         if (r < 0)
@@ -1976,7 +2004,7 @@ static int call(int argc, char **argv, void *userdata) {
                         json_dump_with_flags(v, stdout);
 
                 } else if (arg_verbose) {
-                        (void) pager_open(arg_no_pager, false);
+                        (void) pager_open(arg_pager_flags);
 
                         r = bus_message_dump(reply, stdout, 0);
                         if (r < 0)
@@ -1993,6 +2021,49 @@ static int call(int argc, char **argv, void *userdata) {
                         fputc('\n', stdout);
                 }
         }
+
+        return 0;
+}
+
+static int emit_signal(int argc, char **argv, void *userdata) {
+        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
+        int r;
+
+        r = acquire_bus(false, &bus);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_new_signal(bus, &m, argv[1], argv[2], argv[3]);
+        if (r < 0)
+                return bus_log_create_error(r);
+
+        if (arg_destination) {
+                r = sd_bus_message_set_destination(m, arg_destination);
+                if (r < 0)
+                        return bus_log_create_error(r);
+        }
+
+        r = sd_bus_message_set_auto_start(m, arg_auto_start);
+        if (r < 0)
+                return bus_log_create_error(r);
+
+        if (!isempty(argv[4])) {
+                char **p;
+
+                p = argv+5;
+
+                r = message_append_cmdline(m, argv[4], &p);
+                if (r < 0)
+                        return r;
+
+                if (*p)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Too many parameters for signature.");
+        }
+
+        r = sd_bus_send(bus, m, NULL);
+        if (r < 0)
+                return log_error_errno(r, "Failed to send signal: %m");
 
         return 0;
 }
@@ -2028,7 +2099,7 @@ static int get_property(int argc, char **argv, void *userdata) {
                         _cleanup_(json_variant_unrefp) JsonVariant *v = NULL;
 
                         if (arg_json != JSON_SHORT)
-                                (void) pager_open(arg_no_pager, false);
+                                (void) pager_open(arg_pager_flags);
 
                         r = json_transform_variant(reply, contents, &v);
                         if (r < 0)
@@ -2036,8 +2107,8 @@ static int get_property(int argc, char **argv, void *userdata) {
 
                         json_dump_with_flags(v, stdout);
 
-                } else if (arg_verbose)  {
-                        (void) pager_open(arg_no_pager, false);
+                } else if (arg_verbose) {
+                        (void) pager_open(arg_pager_flags);
 
                         r = bus_message_dump(reply, stdout, BUS_MESSAGE_DUMP_SUBTREE_ONLY);
                         if (r < 0)
@@ -2093,10 +2164,8 @@ static int set_property(int argc, char **argv, void *userdata) {
         if (r < 0)
                 return bus_log_create_error(r);
 
-        if (*p) {
-                log_error("Too many parameters for signature.");
-                return -EINVAL;
-        }
+        if (*p)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Too many parameters for signature.");
 
         r = sd_bus_call(bus, m, arg_timeout, &error, NULL);
         if (r < 0)
@@ -2115,48 +2184,51 @@ static int help(void) {
 
         printf("%s [OPTIONS...] {COMMAND} ...\n\n"
                "Introspect the bus.\n\n"
-               "  -h --help               Show this help\n"
-               "     --version            Show package version\n"
-               "     --no-pager           Do not pipe output into a pager\n"
-               "     --no-legend          Do not show the headers and footers\n"
-               "     --system             Connect to system bus\n"
-               "     --user               Connect to user bus\n"
-               "  -H --host=[USER@]HOST   Operate on remote host\n"
-               "  -M --machine=CONTAINER  Operate on local container\n"
-               "     --address=ADDRESS    Connect to bus specified by address\n"
-               "     --show-machine       Show machine ID column in list\n"
-               "     --unique             Only show unique names\n"
-               "     --acquired           Only show acquired names\n"
-               "     --activatable        Only show activatable names\n"
-               "     --match=MATCH        Only show matching messages\n"
-               "     --size=SIZE          Maximum length of captured packet\n"
-               "     --list               Don't show tree, but simple object path list\n"
-               "  -q --quiet              Don't show method call reply\n"
-               "     --verbose            Show result values in long format\n"
-               "     --json=MODE          Output as JSON\n"
-               "  -j                      Same as --json=pretty on tty, --json=short otherwise\n"
-               "     --expect-reply=BOOL  Expect a method call reply\n"
-               "     --auto-start=BOOL    Auto-start destination service\n"
+               "  -h --help                Show this help\n"
+               "     --version             Show package version\n"
+               "     --no-pager            Do not pipe output into a pager\n"
+               "     --no-legend           Do not show the headers and footers\n"
+               "     --system              Connect to system bus\n"
+               "     --user                Connect to user bus\n"
+               "  -H --host=[USER@]HOST    Operate on remote host\n"
+               "  -M --machine=CONTAINER   Operate on local container\n"
+               "     --address=ADDRESS     Connect to bus specified by address\n"
+               "     --show-machine        Show machine ID column in list\n"
+               "     --unique              Only show unique names\n"
+               "     --acquired            Only show acquired names\n"
+               "     --activatable         Only show activatable names\n"
+               "     --match=MATCH         Only show matching messages\n"
+               "     --size=SIZE           Maximum length of captured packet\n"
+               "     --list                Don't show tree, but simple object path list\n"
+               "  -q --quiet               Don't show method call reply\n"
+               "     --verbose             Show result values in long format\n"
+               "     --json=MODE           Output as JSON\n"
+               "  -j                       Same as --json=pretty on tty, --json=short otherwise\n"
+               "     --expect-reply=BOOL   Expect a method call reply\n"
+               "     --auto-start=BOOL     Auto-start destination service\n"
                "     --allow-interactive-authorization=BOOL\n"
-               "                          Allow interactive authorization for operation\n"
-               "     --timeout=SECS       Maximum time to wait for method call completion\n"
-               "     --augment-creds=BOOL Extend credential data with data read from /proc/$PID\n"
-               "     --watch-bind=BOOL    Wait for bus AF_UNIX socket to be bound in the file\n"
-               "                          system\n\n"
-               "Commands:\n"
-               "  list                    List bus names\n"
-               "  status [SERVICE]        Show bus service, process or bus owner credentials\n"
-               "  monitor [SERVICE...]    Show bus traffic\n"
-               "  capture [SERVICE...]    Capture bus traffic as pcap\n"
-               "  tree [SERVICE...]       Show object tree of service\n"
+               "                           Allow interactive authorization for operation\n"
+               "     --timeout=SECS        Maximum time to wait for method call completion\n"
+               "     --augment-creds=BOOL  Extend credential data with data read from /proc/$PID\n"
+               "     --watch-bind=BOOL     Wait for bus AF_UNIX socket to be bound in the file\n"
+               "                           system\n"
+               "     --destination=SERVICE Destination service of a signal\n"
+               "\nCommands:\n"
+               "  list                     List bus names\n"
+               "  status [SERVICE]         Show bus service, process or bus owner credentials\n"
+               "  monitor [SERVICE...]     Show bus traffic\n"
+               "  capture [SERVICE...]     Capture bus traffic as pcap\n"
+               "  tree [SERVICE...]        Show object tree of service\n"
                "  introspect SERVICE OBJECT [INTERFACE]\n"
                "  call SERVICE OBJECT INTERFACE METHOD [SIGNATURE [ARGUMENT...]]\n"
-               "                          Call a method\n"
+               "                           Call a method\n"
+               "  emit OBJECT INTERFACE SIGNAL [SIGNATURE [ARGUMENT...]]\n"
+               "                           Emit a signal\n"
                "  get-property SERVICE OBJECT INTERFACE PROPERTY...\n"
-               "                          Get property value\n"
+               "                           Get property value\n"
                "  set-property SERVICE OBJECT INTERFACE PROPERTY SIGNATURE ARGUMENT...\n"
-               "                          Set property value\n"
-               "  help                    Show this help\n"
+               "                           Set property value\n"
+               "  help                     Show this help\n"
                "\nSee the %s for details.\n"
                , program_invocation_short_name
                , link
@@ -2193,6 +2265,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_AUGMENT_CREDS,
                 ARG_WATCH_BIND,
                 ARG_JSON,
+                ARG_DESTINATION,
         };
 
         static const struct option options[] = {
@@ -2221,6 +2294,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "augment-creds",                   required_argument, NULL, ARG_AUGMENT_CREDS                   },
                 { "watch-bind",                      required_argument, NULL, ARG_WATCH_BIND                      },
                 { "json",                            required_argument, NULL, ARG_JSON                            },
+                { "destination",                     required_argument, NULL, ARG_DESTINATION                     },
                 {},
         };
 
@@ -2240,7 +2314,7 @@ static int parse_argv(int argc, char *argv[]) {
                         return version();
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case ARG_NO_LEGEND:
@@ -2287,10 +2361,9 @@ static int parse_argv(int argc, char *argv[]) {
                         if (r < 0)
                                 return log_error_errno(r, "Failed to parse size '%s': %m", optarg);
 
-                        if ((uint64_t) (size_t) sz !=  sz) {
-                                log_error("Size out of range.");
-                                return -E2BIG;
-                        }
+                        if ((uint64_t) (size_t) sz !=  sz)
+                                return log_error_errno(SYNTHETIC_ERRNO(E2BIG),
+                                                       "Size out of range.");
 
                         arg_snaplen = (size_t) sz;
                         break;
@@ -2381,11 +2454,15 @@ static int parse_argv(int argc, char *argv[]) {
                                 fputs("short\n"
                                       "pretty\n", stdout);
                                 return 0;
-                        } else {
-                                log_error("Unknown JSON out mode: %s", optarg);
-                                return -EINVAL;
-                        }
+                        } else
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Unknown JSON out mode: %s",
+                                                       optarg);
 
+                        break;
+
+                case ARG_DESTINATION:
+                        arg_destination = optarg;
                         break;
 
                 case '?':
@@ -2408,6 +2485,7 @@ static int busctl_main(int argc, char *argv[]) {
                 { "tree",         VERB_ANY, VERB_ANY, 0,            tree           },
                 { "introspect",   3,        4,        0,            introspect     },
                 { "call",         5,        VERB_ANY, 0,            call           },
+                { "emit",         4,        VERB_ANY, 0,            emit_signal    },
                 { "get-property", 5,        VERB_ANY, 0,            get_property   },
                 { "set-property", 6,        VERB_ANY, 0,            set_property   },
                 { "help",         VERB_ANY, VERB_ANY, 0,            verb_help      },
@@ -2417,7 +2495,7 @@ static int busctl_main(int argc, char *argv[]) {
         return dispatch_verb(argc, argv, verbs, NULL);
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         int r;
 
         log_parse_environment();
@@ -2425,16 +2503,9 @@ int main(int argc, char *argv[]) {
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
-        r = busctl_main(argc, argv);
-
-finish:
-        /* make sure we terminate the bus connection first, and then close the
-         * pager, see issue #3543 for the details. */
-        pager_close();
-
-        arg_matches = strv_free(arg_matches);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return busctl_main(argc, argv);
 }
+
+DEFINE_MAIN_FUNCTION(run);

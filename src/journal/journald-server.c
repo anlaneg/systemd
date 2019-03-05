@@ -550,9 +550,11 @@ void server_rotate(Server *s) {
                         ordered_hashmap_remove(s->user_journals, k);
         }
 
-        /* Finally, also rotate all user journals we currently do not have open. */
-        r = open_user_journal_directory(s, &d, &path);
-        if (r >= 0) {
+        /* Finally, also rotate all user journals we currently do not have open. (But do so only if we actually have
+         * access to /var, i.e. are not in the log-to-runtime-journal mode). */
+        if (!s->runtime_journal &&
+            open_user_journal_directory(s, &d, &path) >= 0) {
+
                 struct dirent *de;
 
                 FOREACH_DIRENT(de, d, log_warning_errno(errno, "Failed to enumerate %s, ignoring: %m", path)) {
@@ -903,6 +905,7 @@ static void dispatch_message_real(
                 pid_t object_pid) {
 
         char source_time[sizeof("_SOURCE_REALTIME_TIMESTAMP=") + DECIMAL_STR_MAX(usec_t)];
+        _cleanup_free_ char *cmdline1 = NULL, *cmdline2 = NULL;
         uid_t journal_uid;
         ClientContext *o;
 
@@ -919,20 +922,23 @@ static void dispatch_message_real(
                 IOVEC_ADD_NUMERIC_FIELD(iovec, n, c->uid, uid_t, uid_is_valid, UID_FMT, "_UID");
                 IOVEC_ADD_NUMERIC_FIELD(iovec, n, c->gid, gid_t, gid_is_valid, GID_FMT, "_GID");
 
-                IOVEC_ADD_STRING_FIELD(iovec, n, c->comm, "_COMM");
-                IOVEC_ADD_STRING_FIELD(iovec, n, c->exe, "_EXE");
-                IOVEC_ADD_STRING_FIELD(iovec, n, c->cmdline, "_CMDLINE");
-                IOVEC_ADD_STRING_FIELD(iovec, n, c->capeff, "_CAP_EFFECTIVE");
+                IOVEC_ADD_STRING_FIELD(iovec, n, c->comm, "_COMM"); /* At most TASK_COMM_LENGTH (16 bytes) */
+                IOVEC_ADD_STRING_FIELD(iovec, n, c->exe, "_EXE"); /* A path, so at most PATH_MAX (4096 bytes) */
 
+                if (c->cmdline)
+                        /* At most _SC_ARG_MAX (2MB usually), which is too much to put on stack.
+                         * Let's use a heap allocation for this one. */
+                        cmdline1 = set_iovec_string_field(iovec, &n, "_CMDLINE=", c->cmdline);
+
+                IOVEC_ADD_STRING_FIELD(iovec, n, c->capeff, "_CAP_EFFECTIVE"); /* Read from /proc/.../status */
                 IOVEC_ADD_SIZED_FIELD(iovec, n, c->label, c->label_size, "_SELINUX_CONTEXT");
-
                 IOVEC_ADD_NUMERIC_FIELD(iovec, n, c->auditid, uint32_t, audit_session_is_valid, "%" PRIu32, "_AUDIT_SESSION");
                 IOVEC_ADD_NUMERIC_FIELD(iovec, n, c->loginuid, uid_t, uid_is_valid, UID_FMT, "_AUDIT_LOGINUID");
 
-                IOVEC_ADD_STRING_FIELD(iovec, n, c->cgroup, "_SYSTEMD_CGROUP");
+                IOVEC_ADD_STRING_FIELD(iovec, n, c->cgroup, "_SYSTEMD_CGROUP"); /* A path */
                 IOVEC_ADD_STRING_FIELD(iovec, n, c->session, "_SYSTEMD_SESSION");
                 IOVEC_ADD_NUMERIC_FIELD(iovec, n, c->owner_uid, uid_t, uid_is_valid, UID_FMT, "_SYSTEMD_OWNER_UID");
-                IOVEC_ADD_STRING_FIELD(iovec, n, c->unit, "_SYSTEMD_UNIT");
+                IOVEC_ADD_STRING_FIELD(iovec, n, c->unit, "_SYSTEMD_UNIT"); /* Unit names are bounded by UNIT_NAME_MAX */
                 IOVEC_ADD_STRING_FIELD(iovec, n, c->user_unit, "_SYSTEMD_USER_UNIT");
                 IOVEC_ADD_STRING_FIELD(iovec, n, c->slice, "_SYSTEMD_SLICE");
                 IOVEC_ADD_STRING_FIELD(iovec, n, c->user_slice, "_SYSTEMD_USER_SLICE");
@@ -953,13 +959,14 @@ static void dispatch_message_real(
                 IOVEC_ADD_NUMERIC_FIELD(iovec, n, o->uid, uid_t, uid_is_valid, UID_FMT, "OBJECT_UID");
                 IOVEC_ADD_NUMERIC_FIELD(iovec, n, o->gid, gid_t, gid_is_valid, GID_FMT, "OBJECT_GID");
 
+                /* See above for size limits, only ->cmdline may be large, so use a heap allocation for it. */
                 IOVEC_ADD_STRING_FIELD(iovec, n, o->comm, "OBJECT_COMM");
                 IOVEC_ADD_STRING_FIELD(iovec, n, o->exe, "OBJECT_EXE");
-                IOVEC_ADD_STRING_FIELD(iovec, n, o->cmdline, "OBJECT_CMDLINE");
+                if (o->cmdline)
+                        cmdline2 = set_iovec_string_field(iovec, &n, "OBJECT_CMDLINE=", o->cmdline);
+
                 IOVEC_ADD_STRING_FIELD(iovec, n, o->capeff, "OBJECT_CAP_EFFECTIVE");
-
                 IOVEC_ADD_SIZED_FIELD(iovec, n, o->label, o->label_size, "OBJECT_SELINUX_CONTEXT");
-
                 IOVEC_ADD_NUMERIC_FIELD(iovec, n, o->auditid, uint32_t, audit_session_is_valid, "%" PRIu32, "OBJECT_AUDIT_SESSION");
                 IOVEC_ADD_NUMERIC_FIELD(iovec, n, o->loginuid, uid_t, uid_is_valid, UID_FMT, "OBJECT_AUDIT_LOGINUID");
 
@@ -1247,10 +1254,10 @@ int server_process_datagram(sd_event_source *es, int fd, uint32_t revents, void 
         assert(s);
         assert(fd == s->native_fd || fd == s->syslog_fd || fd == s->audit_fd);
 
-        if (revents != EPOLLIN) {
-                log_error("Got invalid event from epoll for datagram fd: %"PRIx32, revents);
-                return -EIO;
-        }
+        if (revents != EPOLLIN)
+                return log_error_errno(SYNTHETIC_ERRNO(EIO),
+                                       "Got invalid event from epoll for datagram fd: %" PRIx32,
+                                       revents);
 
         /* Try to get the right size, if we can. (Not all sockets support SIOCINQ, hence we just try, but don't rely on
          * it.) */
@@ -1264,8 +1271,7 @@ int server_process_datagram(sd_event_source *es, int fd, uint32_t revents, void 
         if (!GREEDY_REALLOC(s->buffer, s->buffer_size, m))
                 return log_oom();
 
-        iovec.iov_base = s->buffer;
-        iovec.iov_len = s->buffer_size - 1; /* Leave room for trailing NUL we add later */
+        iovec = IOVEC_MAKE(s->buffer, s->buffer_size - 1); /* Leave room for trailing NUL we add later */
 
         n = recvmsg(fd, &msghdr, MSG_DONTWAIT|MSG_CMSG_CLOEXEC);
         if (n < 0) {
@@ -1275,8 +1281,7 @@ int server_process_datagram(sd_event_source *es, int fd, uint32_t revents, void 
                 return log_error_errno(errno, "recvmsg() failed: %m");
         }
 
-        CMSG_FOREACH(cmsg, &msghdr) {
-
+        CMSG_FOREACH(cmsg, &msghdr)
                 if (cmsg->cmsg_level == SOL_SOCKET &&
                     cmsg->cmsg_type == SCM_CREDENTIALS &&
                     cmsg->cmsg_len == CMSG_LEN(sizeof(struct ucred)))
@@ -1294,7 +1299,6 @@ int server_process_datagram(sd_event_source *es, int fd, uint32_t revents, void 
                         fds = (int*) CMSG_DATA(cmsg);
                         n_fds = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
                 }
-        }
 
         /* And a trailing NUL, just in case */
         s->buffer[n] = 0;
@@ -1884,38 +1888,34 @@ int server_init(Server *s) {
 
                 if (sd_is_socket_unix(fd, SOCK_DGRAM, -1, "/run/systemd/journal/socket", 0) > 0) {
 
-                        if (s->native_fd >= 0) {
-                                log_error("Too many native sockets passed.");
-                                return -EINVAL;
-                        }
+                        if (s->native_fd >= 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Too many native sockets passed.");
 
                         s->native_fd = fd;
 
                 } else if (sd_is_socket_unix(fd, SOCK_STREAM, 1, "/run/systemd/journal/stdout", 0) > 0) {
 
-                        if (s->stdout_fd >= 0) {
-                                log_error("Too many stdout sockets passed.");
-                                return -EINVAL;
-                        }
+                        if (s->stdout_fd >= 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Too many stdout sockets passed.");
 
                         s->stdout_fd = fd;
 
                 } else if (sd_is_socket_unix(fd, SOCK_DGRAM, -1, "/dev/log", 0) > 0 ||
                            sd_is_socket_unix(fd, SOCK_DGRAM, -1, "/run/systemd/journal/dev-log", 0) > 0) {
 
-                        if (s->syslog_fd >= 0) {
-                                log_error("Too many /dev/log sockets passed.");
-                                return -EINVAL;
-                        }
+                        if (s->syslog_fd >= 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Too many /dev/log sockets passed.");
 
                         s->syslog_fd = fd;
 
                 } else if (sd_is_socket(fd, AF_NETLINK, SOCK_RAW, -1) > 0) {
 
-                        if (s->audit_fd >= 0) {
-                                log_error("Too many audit sockets passed.");
-                                return -EINVAL;
-                        }
+                        if (s->audit_fd >= 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Too many audit sockets passed.");
 
                         s->audit_fd = fd;
 

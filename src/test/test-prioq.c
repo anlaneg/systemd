@@ -48,22 +48,15 @@ struct test {
         unsigned idx;
 };
 
-static int test_compare(const void *a, const void *b) {
-        const struct test *x = a, *y = b;
-
+static int test_compare(const struct test *x, const struct test *y) {
         return CMP(x->value, y->value);
 }
 
-static void test_hash(const void *a, struct siphash *state) {
-        const struct test *x = a;
-
+static void test_hash(const struct test *x, struct siphash *state) {
         siphash24_compress(&x->value, sizeof(x->value), state);
 }
 
-static const struct hash_ops test_hash_ops = {
-        .hash = test_hash,
-        .compare = test_compare
-};
+DEFINE_PRIVATE_HASH_OPS(test_hash_ops, struct test, test_hash, test_compare);
 
 static void test_struct(void) {
         _cleanup_(prioq_freep) Prioq *q = NULL;
@@ -73,8 +66,13 @@ static void test_struct(void) {
 
         srand(0);
 
-        assert_se(q = prioq_new(test_compare));
+        assert_se(q = prioq_new((compare_func_t) test_compare));
         assert_se(s = set_new(&test_hash_ops));
+
+        assert_se(prioq_peek(q) == NULL);
+        assert_se(prioq_peek_by_index(q, 0) == NULL);
+        assert_se(prioq_peek_by_index(q, 1) == NULL);
+        assert_se(prioq_peek_by_index(q, (unsigned) -1) == NULL);
 
         for (i = 0; i < SET_SIZE; i++) {
                 assert_se(t = new0(struct test, 1));
@@ -85,6 +83,17 @@ static void test_struct(void) {
                 if (i % 4 == 0)
                         assert_se(set_consume(s, t) >= 0);
         }
+
+        for (i = 0; i < SET_SIZE; i++)
+                assert_se(prioq_peek_by_index(q, i));
+        assert_se(prioq_peek_by_index(q, SET_SIZE) == NULL);
+
+        unsigned count = 0;
+        PRIOQ_FOREACH_ITEM(q, t) {
+                assert_se(t);
+                count++;
+        }
+        assert_se(count == SET_SIZE);
 
         while ((t = set_steal_first(s))) {
                 assert_se(prioq_remove(q, t, &t->idx) == 1);

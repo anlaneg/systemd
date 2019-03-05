@@ -171,6 +171,10 @@ static bool print_multiline(
                         color_on = ANSI_HIGHLIGHT;
                         color_off = ANSI_NORMAL;
                         highlight_on = ANSI_HIGHLIGHT_RED;
+                } else if (priority >= LOG_DEBUG) {
+                        color_on = ANSI_GREY;
+                        color_off = ANSI_NORMAL;
+                        highlight_on = ANSI_HIGHLIGHT_RED;
                 }
         }
 
@@ -303,10 +307,9 @@ static int output_timestamp_realtime(FILE *f, sd_journal *j, OutputMode mode, Ou
                         k = format_timestamp_utc(buf, sizeof(buf), x);
                 else
                         k = format_timestamp(buf, sizeof(buf), x);
-                if (!k) {
-                        log_error("Failed to format timestamp: %"PRIu64, x);
-                        return -EINVAL;
-                }
+                if (!k)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Failed to format timestamp: %" PRIu64, x);
 
         } else {
                 char usec[7];
@@ -321,18 +324,16 @@ static int output_timestamp_realtime(FILE *f, sd_journal *j, OutputMode mode, Ou
                         break;
 
                 case OUTPUT_SHORT_ISO:
-                        if (strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", gettime_r(&t, &tm)) <= 0) {
-                                log_error("Failed to format ISO time");
-                                return -EINVAL;
-                        }
+                        if (strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", gettime_r(&t, &tm)) <= 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Failed to format ISO time");
                         break;
 
                 case OUTPUT_SHORT_ISO_PRECISE:
                         /* No usec in strftime, so we leave space and copy over */
-                        if (strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S.xxxxxx%z", gettime_r(&t, &tm)) <= 0) {
-                                log_error("Failed to format ISO-precise time");
-                                return -EINVAL;
-                        }
+                        if (strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S.xxxxxx%z", gettime_r(&t, &tm)) <= 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Failed to format ISO-precise time");
                         xsprintf(usec, "%06"PRI_USEC, x % USEC_PER_SEC);
                         memcpy(buf + 20, usec, 6);
                         break;
@@ -340,10 +341,9 @@ static int output_timestamp_realtime(FILE *f, sd_journal *j, OutputMode mode, Ou
                 case OUTPUT_SHORT:
                 case OUTPUT_SHORT_PRECISE:
 
-                        if (strftime(buf, sizeof(buf), "%b %d %H:%M:%S", gettime_r(&t, &tm)) <= 0) {
-                                log_error("Failed to format syslog time");
-                                return -EINVAL;
-                        }
+                        if (strftime(buf, sizeof(buf), "%b %d %H:%M:%S", gettime_r(&t, &tm)) <= 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Failed to format syslog time");
 
                         if (mode == OUTPUT_SHORT_PRECISE) {
                                 size_t k;
@@ -352,10 +352,9 @@ static int output_timestamp_realtime(FILE *f, sd_journal *j, OutputMode mode, Ou
                                 k = sizeof(buf) - strlen(buf);
 
                                 r = snprintf(buf + strlen(buf), k, ".%06"PRIu64, x % USEC_PER_SEC);
-                                if (r <= 0 || (size_t) r >= k) { /* too long? */
-                                        log_error("Failed to format precise time");
-                                        return -EINVAL;
-                                }
+                                if (r <= 0 || (size_t) r >= k) /* too long? */
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Failed to format precise time");
                         }
                         break;
 
@@ -563,10 +562,9 @@ static int output_verbose(
                 const char *on = "", *off = "";
 
                 c = memchr(data, '=', length);
-                if (!c) {
-                        log_error("Invalid field.");
-                        return -EINVAL;
-                }
+                if (!c)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Invalid field.");
                 fieldlen = c - (const char*) data;
 
                 r = field_set_test(output_fields, data, fieldlen);
@@ -658,10 +656,9 @@ static int output_export(
                         continue;
 
                 c = memchr(data, '=', length);
-                if (!c) {
-                        log_error("Invalid field.");
-                        return -EINVAL;
-                }
+                if (!c)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Invalid field.");
 
                 r = field_set_test(output_fields, data, c - (const char *) data);
                 if (r < 0)
@@ -727,7 +724,7 @@ void json_escape(
 
                 fputs(" ]", f);
         } else {
-                fputc('\"', f);
+                fputc('"', f);
 
                 while (l > 0) {
                         if (IN_SET(*p, '"', '\\')) {
@@ -744,7 +741,7 @@ void json_escape(
                         l--;
                 }
 
-                fputc('\"', f);
+                fputc('"', f);
         }
 }
 
@@ -953,10 +950,7 @@ static int output_json(
         }
 
         json_variant_dump(object,
-                          (mode == OUTPUT_JSON_SSE    ? JSON_FORMAT_SSE :
-                           mode == OUTPUT_JSON_SEQ    ? JSON_FORMAT_SEQ :
-                           mode == OUTPUT_JSON_PRETTY ? JSON_FORMAT_PRETTY :
-                                                        JSON_FORMAT_NEWLINE) |
+                          output_mode_to_json_format_flags(mode) |
                           (FLAGS_SET(flags, OUTPUT_COLOR) ? JSON_FORMAT_COLOR : 0),
                           f, NULL);
 
@@ -1038,7 +1032,7 @@ static int output_cat(
 
 static int (*output_funcs[_OUTPUT_MODE_MAX])(
                 FILE *f,
-                sd_journal*j,
+                sd_journal *j,
                 OutputMode mode,
                 unsigned n_columns,
                 OutputFlags flags,
@@ -1342,17 +1336,14 @@ static int get_boot_id_for_machine(const char *machine, sd_id128_t *boot_id) {
         if (socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) < 0)
                 return -errno;
 
-        r = safe_fork("(sd-bootid)", FORK_RESET_SIGNALS|FORK_DEATHSIG, &child);
+        r = namespace_fork("(sd-bootidns)", "(sd-bootid)", NULL, 0, FORK_RESET_SIGNALS|FORK_DEATHSIG,
+                           pidnsfd, mntnsfd, -1, -1, rootfd, &child);
         if (r < 0)
                 return r;
         if (r == 0) {
                 int fd;
 
                 pair[0] = safe_close(pair[0]);
-
-                r = namespace_enter(pidnsfd, mntnsfd, -1, -1, rootfd);
-                if (r < 0)
-                        _exit(EXIT_FAILURE);
 
                 fd = open("/proc/sys/kernel/random/boot_id", O_RDONLY|O_CLOEXEC|O_NOCTTY);
                 if (fd < 0)
@@ -1372,7 +1363,7 @@ static int get_boot_id_for_machine(const char *machine, sd_id128_t *boot_id) {
 
         pair[1] = safe_close(pair[1]);
 
-        r = wait_for_terminate_and_check("(sd-bootid)", child, 0);
+        r = wait_for_terminate_and_check("(sd-bootidns)", child, 0);
         if (r < 0)
                 return r;
         if (r != EXIT_SUCCESS)

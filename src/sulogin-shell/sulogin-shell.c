@@ -69,7 +69,7 @@ static int fork_wait(const char* const cmdline[]) {
         pid_t pid;
         int r;
 
-        r = safe_fork("(sulogin)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG, &pid);
+        r = safe_fork("(sulogin)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_RLIMIT_NOFILE_SAFE|FORK_LOG, &pid);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -98,9 +98,7 @@ int main(int argc, char *argv[]) {
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         int r;
 
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        log_setup_service();
 
         print_mode(argc > 1 ? argv[1] : "");
 

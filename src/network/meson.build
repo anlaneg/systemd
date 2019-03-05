@@ -64,6 +64,8 @@ sources = files('''
         networkd-manager.h
         networkd-ndisc.c
         networkd-ndisc.h
+        networkd-neighbor.c
+        networkd-neighbor.h
         networkd-radv.c
         networkd-radv.h
         networkd-network-bus.c
@@ -135,6 +137,24 @@ if conf.get('ENABLE_NETWORKD') == 1
 
         install_data('networkd.conf',
                      install_dir : pkgsysconfdir)
+
+        fuzzers += [
+    [['src/network/fuzz-netdev-parser.c',
+      'src/fuzz/fuzz.h'],
+     [libnetworkd_core,
+      libudev_static,
+      libsystemd_network,
+      libshared],
+     [threads]],
+
+    [['src/network/fuzz-network-parser.c',
+      'src/fuzz/fuzz.h'],
+     [libnetworkd_core,
+      libudev_static,
+      libsystemd_network,
+      libshared],
+     [threads]]
+    ]
 
         tests += [
     [['src/network/test-networkd-conf.c'],

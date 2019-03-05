@@ -14,6 +14,7 @@
 #include "macro.h"
 #include "socket-util.h"
 #include "string-util.h"
+#include "time-util.h"
 
 #define TEST_TIMEOUT_USEC (20*USEC_PER_SEC)
 
@@ -91,7 +92,7 @@ int main(int argc, char *argv[]) {
                 if (r == 0)
                         break;
                 if (r == -ETIMEDOUT) {
-                        /* Let's catch time-outs here, so that we can run safely in a CI that has no reliable DNS. Note
+                        /* Let's catch timeouts here, so that we can run safely in a CI that has no reliable DNS. Note
                          * that we invoke exit() directly here, as the stuck NSS call will not allow us to exit
                          * cleanly. */
 

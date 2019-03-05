@@ -18,6 +18,7 @@
 #define ANSI_MAGENTA "\x1B[0;35m"
 #define ANSI_CYAN    "\x1B[0;36m"
 #define ANSI_WHITE   "\x1B[0;37m"
+#define ANSI_GREY    "\x1B[0;2;37m"
 
 /* Bold/highlighted */
 #define ANSI_HIGHLIGHT_BLACK   "\x1B[0;1;30m"
@@ -132,6 +133,7 @@ DEFINE_ANSI_FUNC(highlight_yellow,           HIGHLIGHT_YELLOW);
 DEFINE_ANSI_FUNC(highlight_blue,             HIGHLIGHT_BLUE);
 DEFINE_ANSI_FUNC(highlight_magenta,          HIGHLIGHT_MAGENTA);
 DEFINE_ANSI_FUNC(normal,                     NORMAL);
+DEFINE_ANSI_FUNC(grey,                       GREY);
 
 DEFINE_ANSI_FUNC_UNDERLINE(underline,                  UNDERLINE, NORMAL);
 DEFINE_ANSI_FUNC_UNDERLINE(highlight_underline,        HIGHLIGHT_UNDERLINE, HIGHLIGHT);
@@ -154,15 +156,5 @@ int open_terminal_in_namespace(pid_t pid, const char *name, int mode);
 
 int vt_default_utf8(void);
 int vt_reset_keyboard(int fd);
-
-int terminal_urlify(const char *url, const char *text, char **ret);
-int terminal_urlify_path(const char *path, const char *text, char **ret);
-int terminal_urlify_man(const char *page, const char *section, char **ret);
-
-typedef enum CatFlags {
-        CAT_FLAGS_MAIN_FILE_OPTIONAL = 1 << 0,
-} CatFlags;
-
-int cat_files(const char *file, char **dropins, CatFlags flags);
-
-void print_separator(void);
+int vt_restore(int fd);
+int vt_release(int fd, bool restore_vt);

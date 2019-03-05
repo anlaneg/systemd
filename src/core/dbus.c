@@ -48,23 +48,22 @@
 
 static void destroy_bus(Manager *m, sd_bus **bus);
 
-int bus_send_queued_message(Manager *m) {
+int bus_send_pending_reload_message(Manager *m) {
         int r;
 
         assert(m);
 
-        if (!m->queued_message)
+        if (!m->pending_reload_message)
                 return 0;
 
-        /* If we cannot get rid of this message we won't dispatch any
-         * D-Bus messages, so that we won't end up wanting to queue
-         * another message. */
+        /* If we cannot get rid of this message we won't dispatch any D-Bus messages, so that we won't end up wanting
+         * to queue another message. */
 
-        r = sd_bus_send(NULL, m->queued_message, NULL);
+        r = sd_bus_send(NULL, m->pending_reload_message, NULL);
         if (r < 0)
-                log_warning_errno(r, "Failed to send queued message: %m");
+                log_warning_errno(r, "Failed to send queued message, ignoring: %m");
 
-        m->queued_message = sd_bus_message_unref(m->queued_message);
+        m->pending_reload_message = sd_bus_message_unref(m->pending_reload_message);
 
         return 0;
 }
@@ -612,7 +611,7 @@ static int bus_setup_disconnected_match(Manager *m, sd_bus *bus) {
 }
 
 static int bus_on_connection(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
-        _cleanup_(sd_bus_unrefp) sd_bus *bus = NULL;
+        _cleanup_(sd_bus_close_unrefp) sd_bus *bus = NULL;
         _cleanup_close_ int nfd = -1;
         Manager *m = userdata;
         sd_id128_t id;
@@ -877,7 +876,7 @@ static int bus_setup_api(Manager *m, sd_bus *bus) {
 }
 
 int bus_init_api(Manager *m) {
-        _cleanup_(sd_bus_unrefp) sd_bus *bus = NULL;
+        _cleanup_(sd_bus_close_unrefp) sd_bus *bus = NULL;
         int r;
 
         if (m->api_bus)
@@ -941,7 +940,7 @@ static int bus_setup_system(Manager *m, sd_bus *bus) {
 }
 
 int bus_init_system(Manager *m) {
-        _cleanup_(sd_bus_unrefp) sd_bus *bus = NULL;
+        _cleanup_(sd_bus_close_unrefp) sd_bus *bus = NULL;
         int r;
 
         if (m->system_bus)
@@ -995,10 +994,9 @@ int bus_init_private(Manager *m) {
                 const char *e, *joined;
 
                 e = secure_getenv("XDG_RUNTIME_DIR");
-                if (!e) {
-                        log_error("XDG_RUNTIME_DIR is not set, refusing.");
-                        return -EHOSTDOWN;
-                }
+                if (!e)
+                        return log_error_errno(SYNTHETIC_ERRNO(EHOSTDOWN),
+                                               "XDG_RUNTIME_DIR is not set, refusing.");
 
                 joined = strjoina(e, "/systemd/private");
                 salen = sockaddr_un_set_path(&sa.un, joined);
@@ -1073,8 +1071,8 @@ static void destroy_bus(Manager *m, sd_bus **bus) {
                         u->bus_track = sd_bus_track_unref(u->bus_track);
 
         /* Get rid of queued message on this bus */
-        if (m->queued_message && sd_bus_message_get_bus(m->queued_message) == *bus)
-                m->queued_message = sd_bus_message_unref(m->queued_message);
+        if (m->pending_reload_message && sd_bus_message_get_bus(m->pending_reload_message) == *bus)
+                m->pending_reload_message = sd_bus_message_unref(m->pending_reload_message);
 
         /* Possibly flush unwritten data, but only if we are
          * unprivileged, since we don't want to sync here */
@@ -1082,8 +1080,7 @@ static void destroy_bus(Manager *m, sd_bus **bus) {
                 sd_bus_flush(*bus);
 
         /* And destroy the object */
-        sd_bus_close(*bus);
-        *bus = sd_bus_unref(*bus);
+        *bus = sd_bus_close_unref(*bus);
 }
 
 void bus_done_api(Manager *m) {

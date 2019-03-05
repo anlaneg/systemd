@@ -5,7 +5,8 @@
 
 #include "alloc-util.h"
 #include "id128-print.h"
-#include "terminal-util.h"
+#include "main-func.h"
+#include "pretty-print.h"
 #include "util.h"
 #include "verbs.h"
 
@@ -51,7 +52,8 @@ static int verb_invocation_id(int argc, char **argv, void *userdata) {
         int r;
 
         if (!sd_id128_is_null(arg_app))
-                return log_error_errno(EINVAL, "Verb \"invocation-id\" cannot be combined with --app-specific=.");
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Verb \"invocation-id\" cannot be combined with --app-specific=.");
 
         r = sd_id128_get_invocation(&id);
         if (r < 0)
@@ -70,10 +72,10 @@ static int help(void) {
 
         printf("%s [OPTIONS...] {COMMAND} ...\n\n"
                "Generate and print id128 strings.\n\n"
-               "  -h --help               Show this help\n\n"
-               "  -p --pretty             Generate samples of program code\n\n"
-               "  -a --app-specific=ID    Generate app-specific IDs\n\n"
-               "Commands:\n"
+               "  -h --help               Show this help\n"
+               "  -p --pretty             Generate samples of program code\n"
+               "  -a --app-specific=ID    Generate app-specific IDs\n"
+               "\nCommands:\n"
                "  new                     Generate a new id128 string\n"
                "  machine-id              Print the ID of current machine\n"
                "  boot-id                 Print the ID of current boot\n"
@@ -150,7 +152,7 @@ static int id128_main(int argc, char *argv[]) {
         return dispatch_verb(argc, argv, verbs, NULL);
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         int r;
 
         log_parse_environment();
@@ -158,10 +160,9 @@ int main(int argc, char *argv[]) {
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
-        r = id128_main(argc, argv);
-
- finish:
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return id128_main(argc, argv);
 }
+
+DEFINE_MAIN_FUNCTION(run);

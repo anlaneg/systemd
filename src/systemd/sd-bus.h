@@ -107,7 +107,7 @@ typedef int (*sd_bus_property_set_t) (sd_bus *bus, const char *path, const char 
 typedef int (*sd_bus_object_find_t) (sd_bus *bus, const char *path, const char *interface, void *userdata, void **ret_found, sd_bus_error *ret_error);
 typedef int (*sd_bus_node_enumerator_t) (sd_bus *bus, const char *prefix, void *userdata, char ***ret_nodes, sd_bus_error *ret_error);
 typedef int (*sd_bus_track_handler_t) (sd_bus_track *track, void *userdata);
-typedef void (*sd_bus_destroy_t)(void *userdata);
+typedef _sd_destroy_t sd_bus_destroy_t;
 
 #include "sd-bus-protocol.h"
 #include "sd-bus-vtable.h"
@@ -154,6 +154,8 @@ int sd_bus_set_allow_interactive_authorization(sd_bus *bus, int b);
 int sd_bus_get_allow_interactive_authorization(sd_bus *bus);
 int sd_bus_set_exit_on_disconnect(sd_bus *bus, int b);
 int sd_bus_get_exit_on_disconnect(sd_bus *bus);
+int sd_bus_set_close_on_exit(sd_bus *bus, int b);
+int sd_bus_get_close_on_exit(sd_bus *bus);
 int sd_bus_set_watch_bind(sd_bus *bus, int b);
 int sd_bus_get_watch_bind(sd_bus *bus);
 int sd_bus_set_connected_signal(sd_bus *bus, int b);
@@ -168,6 +170,7 @@ void sd_bus_close(sd_bus *bus);
 
 sd_bus *sd_bus_ref(sd_bus *bus);
 sd_bus *sd_bus_unref(sd_bus *bus);
+sd_bus *sd_bus_close_unref(sd_bus *bus);
 sd_bus *sd_bus_flush_close_unref(sd_bus *bus);
 
 void sd_bus_default_flush_close(void);
@@ -491,6 +494,7 @@ int sd_bus_track_get_destroy_callback(sd_bus_track *s, sd_bus_destroy_t *ret);
 
 /* Define helpers so that __attribute__((cleanup(sd_bus_unrefp))) and similar may be used. */
 _SD_DEFINE_POINTER_CLEANUP_FUNC(sd_bus, sd_bus_unref);
+_SD_DEFINE_POINTER_CLEANUP_FUNC(sd_bus, sd_bus_close_unref);
 _SD_DEFINE_POINTER_CLEANUP_FUNC(sd_bus, sd_bus_flush_close_unref);
 _SD_DEFINE_POINTER_CLEANUP_FUNC(sd_bus_slot, sd_bus_slot_unref);
 _SD_DEFINE_POINTER_CLEANUP_FUNC(sd_bus_message, sd_bus_message_unref);

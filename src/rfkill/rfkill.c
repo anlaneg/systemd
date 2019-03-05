@@ -12,11 +12,13 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "io-util.h"
+#include "main-func.h"
 #include "mkdir.h"
 #include "parse-util.h"
 #include "proc-cmdline.h"
 #include "string-table.h"
 #include "string-util.h"
+#include "udev-util.h"
 #include "util.h"
 #include "list.h"
 
@@ -30,6 +32,11 @@ typedef struct write_queue_item {
         char *file;
         int state;
 } write_queue_item;
+
+typedef struct Context {
+        LIST_HEAD(write_queue_item, write_queue);
+        int rfkill_fd;
+} Context;
 
 static struct write_queue_item* write_queue_item_free(struct write_queue_item *item) {
         if (!item)
@@ -82,89 +89,6 @@ static int find_device(
         return 0;
 }
 
-struct DeviceMonitorData {
-        const char *sysname;
-        sd_device *device;
-};
-
-static int device_monitor_handler(sd_device_monitor *monitor, sd_device *device, void *userdata) {
-        struct DeviceMonitorData *data = userdata;
-        const char *sysname;
-
-        assert(device);
-        assert(data);
-        assert(data->sysname);
-
-        if (sd_device_get_sysname(device, &sysname) >= 0 && streq(sysname, data->sysname)) {
-                data->device = sd_device_ref(device);
-                return sd_event_exit(sd_device_monitor_get_event(monitor), 0);
-        }
-
-        return 0;
-}
-
-static int wait_for_initialized(
-                sd_device *device,
-                sd_device **ret) {
-
-        _cleanup_(sd_device_monitor_unrefp) sd_device_monitor *monitor = NULL;
-        _cleanup_(sd_event_unrefp) sd_event *event = NULL;
-        _cleanup_(sd_device_unrefp) sd_device *d = NULL;
-        struct DeviceMonitorData data = {};
-        int r;
-
-        assert(device);
-        assert(ret);
-
-        if (sd_device_get_is_initialized(device) > 0) {
-                *ret = sd_device_ref(device);
-                return 0;
-        }
-
-        assert_se(sd_device_get_sysname(device, &data.sysname) >= 0);
-
-        /* Wait until the device is initialized, so that we can get
-         * access to the ID_PATH property */
-
-        r = sd_event_default(&event);
-        if (r < 0)
-                return log_error_errno(r, "Failed to get default event: %m");
-
-        r = sd_device_monitor_new(&monitor);
-        if (r < 0)
-                return log_error_errno(r, "Failed to acquire monitor: %m");
-
-        r = sd_device_monitor_filter_add_match_subsystem_devtype(monitor, "rfkill", NULL);
-        if (r < 0)
-                return log_error_errno(r, "Failed to add rfkill device match to monitor: %m");
-
-        r = sd_device_monitor_attach_event(monitor, event, 0);
-        if (r < 0)
-                return log_error_errno(r, "Failed to attach event to device monitor: %m");
-
-        r = sd_device_monitor_start(monitor, device_monitor_handler, &data, "rfkill-device-monitor");
-        if (r < 0)
-                return log_error_errno(r, "Failed to start device monitor: %m");
-
-        /* Check again, maybe things changed */
-        r = sd_device_new_from_subsystem_sysname(&d, "rfkill", data.sysname);
-        if (r < 0)
-                return log_full_errno(IN_SET(r, -ENOENT, -ENXIO, -ENODEV) ? LOG_DEBUG : LOG_ERR, r,
-                                      "Failed to open device '%s': %m", data.sysname);
-
-        if (sd_device_get_is_initialized(d) > 0) {
-                *ret = TAKE_PTR(d);
-                return 0;
-        }
-
-        r = sd_event_loop(event);
-        if (r < 0)
-                return log_error_errno(r, "Event loop failed: %m");
-
-        *ret = TAKE_PTR(data.device);
-        return 0;
-}
-
 static int determine_state_file(
                 const struct rfkill_event *event,
                 char **ret) {
@@ -181,7 +105,7 @@ static int determine_state_file(
         if (r < 0)
                 return r;
 
-        r = wait_for_initialized(d, &device);
+        r = device_wait_for_initialization(d, "rfkill", &device);
         if (r < 0)
                 return r;
 
@@ -205,16 +129,14 @@ static int determine_state_file(
         return 0;
 }
 
-static int load_state(
-                int rfkill_fd,
-                const struct rfkill_event *event) {
-
+static int load_state(Context *c, const struct rfkill_event *event) {
         _cleanup_free_ char *state_file = NULL, *value = NULL;
         struct rfkill_event we;
         ssize_t l;
         int b, r;
 
-        assert(rfkill_fd >= 0);
+        assert(c);
+        assert(c->rfkill_fd >= 0);
         assert(event);
 
         if (shall_restore_state() == 0)
@@ -225,8 +147,8 @@ static int load_state(
                 return r;
 
         r = read_one_line_file(state_file, &value);
-        if (r == -ENOENT) {
-                /* No state file? Then save the current state */
+        if (IN_SET(r, -ENOENT, 0)) {
+                /* No state file or it's truncated? Then save the current state */
 
                 r = write_string_file(state_file, one_zero(event->soft), WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_ATOMIC);
                 if (r < 0)
@@ -248,51 +170,45 @@ static int load_state(
                 .soft = b,
         };
 
-        l = write(rfkill_fd, &we, sizeof(we));
+        l = write(c->rfkill_fd, &we, sizeof(we));
         if (l < 0)
                 return log_error_errno(errno, "Failed to restore rfkill state for %i: %m", event->idx);
-        if (l != sizeof(we)) {
-                log_error("Couldn't write rfkill event structure, too short.");
-                return -EIO;
-        }
+        if (l != sizeof(we))
+                return log_error_errno(SYNTHETIC_ERRNO(EIO),
+                                       "Couldn't write rfkill event structure, too short.");
 
         log_debug("Loaded state '%s' from %s.", one_zero(b), state_file);
         return 0;
 }
 
-static void save_state_queue_remove(
-                struct write_queue_item **write_queue,
-                int idx,
-                char *state_file) {
-
+static void save_state_queue_remove(Context *c, int idx, const char *state_file) {
         struct write_queue_item *item, *tmp;
 
-        LIST_FOREACH_SAFE(queue, item, tmp, *write_queue) {
+        assert(c);
+
+        LIST_FOREACH_SAFE(queue, item, tmp, c->write_queue) {
                 if ((state_file && streq(item->file, state_file)) || idx == item->rfkill_idx) {
                         log_debug("Canceled previous save state of '%s' to %s.", one_zero(item->state), item->file);
-                        LIST_REMOVE(queue, *write_queue, item);
+                        LIST_REMOVE(queue, c->write_queue, item);
                         write_queue_item_free(item);
                 }
         }
 }
 
-static int save_state_queue(
-                struct write_queue_item **write_queue,
-                int rfkill_fd,
-                const struct rfkill_event *event) {
-
+static int save_state_queue(Context *c, const struct rfkill_event *event) {
         _cleanup_free_ char *state_file = NULL;
         struct write_queue_item *item;
         int r;
 
-        assert(rfkill_fd >= 0);
+        assert(c);
+        assert(c->rfkill_fd >= 0);
         assert(event);
 
         r = determine_state_file(event, &state_file);
         if (r < 0)
                 return r;
 
-        save_state_queue_remove(write_queue, event->idx, state_file);
+        save_state_queue_remove(c, event->idx, state_file);
 
         item = new0(struct write_queue_item, 1);
         if (!item)
@@ -302,110 +218,90 @@ static int save_state_queue(
         item->rfkill_idx = event->idx;
         item->state = event->soft;
 
-        LIST_APPEND(queue, *write_queue, item);
+        LIST_APPEND(queue, c->write_queue, item);
 
         return 0;
 }
 
-static int save_state_cancel(
-                struct write_queue_item **write_queue,
-                int rfkill_fd,
-                const struct rfkill_event *event) {
-
+static int save_state_cancel(Context *c, const struct rfkill_event *event) {
         _cleanup_free_ char *state_file = NULL;
         int r;
 
-        assert(rfkill_fd >= 0);
+        assert(c);
+        assert(c->rfkill_fd >= 0);
         assert(event);
 
         r = determine_state_file(event, &state_file);
-        save_state_queue_remove(write_queue, event->idx, state_file);
+        save_state_queue_remove(c, event->idx, state_file);
         if (r < 0)
                 return r;
 
         return 0;
 }
 
-static int save_state_write(struct write_queue_item **write_queue) {
-        struct write_queue_item *item, *tmp;
-        int result = 0;
-        bool error_logged = false;
+static int save_state_write_one(struct write_queue_item *item) {
         int r;
 
-        LIST_FOREACH_SAFE(queue, item, tmp, *write_queue) {
-                r = write_string_file(item->file, one_zero(item->state), WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_ATOMIC);
-                if (r < 0) {
-                        result = r;
-                        if (!error_logged) {
-                                log_error_errno(r, "Failed to write state file %s: %m", item->file);
-                                error_logged = true;
-                        } else
-                                log_warning_errno(r, "Failed to write state file %s: %m", item->file);
-                } else
-                        log_debug("Saved state '%s' to %s.", one_zero(item->state), item->file);
+        r = write_string_file(item->file, one_zero(item->state), WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_ATOMIC);
+        if (r < 0)
+                return log_error_errno(r, "Failed to write state file %s: %m", item->file);
 
-                LIST_REMOVE(queue, *write_queue, item);
-                write_queue_item_free(item);
-        }
-        return result;
+        log_debug("Saved state '%s' to %s.", one_zero(item->state), item->file);
+        return 0;
 }
 
-int main(int argc, char *argv[]) {
-        LIST_HEAD(write_queue_item, write_queue);
-        _cleanup_close_ int rfkill_fd = -1;
+static void context_save_and_clear(Context *c) {
+        struct write_queue_item *i;
+
+        assert(c);
+
+        while ((i = c->write_queue)) {
+                LIST_REMOVE(queue, c->write_queue, i);
+                (void) save_state_write_one(i);
+                write_queue_item_free(i);
+        }
+
+        safe_close(c->rfkill_fd);
+}
+
+static int run(int argc, char *argv[]) {
+        _cleanup_(context_save_and_clear) Context c = { .rfkill_fd = -1 };
         bool ready = false;
         int r, n;
 
-        if (argc > 1) {
-                log_error("This program requires no arguments.");
-                return EXIT_FAILURE;
-        }
+        if (argc > 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "This program requires no arguments.");
 
-        LIST_HEAD_INIT(write_queue);
-
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        log_setup_service();
 
         umask(0022);
 
         r = mkdir_p("/var/lib/systemd/rfkill", 0755);
-        if (r < 0) {
-                log_error_errno(r, "Failed to create rfkill directory: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to create rfkill directory: %m");
 
         n = sd_listen_fds(false);
-        if (n < 0) {
-                r = log_error_errno(n, "Failed to determine whether we got any file descriptors passed: %m");
-                goto finish;
-        }
-        if (n > 1) {
-                log_error("Got too many file descriptors.");
-                r = -EINVAL;
-                goto finish;
-        }
+        if (n < 0)
+                return log_error_errno(n, "Failed to determine whether we got any file descriptors passed: %m");
+        if (n > 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Got too many file descriptors.");
 
         if (n == 0) {
-                rfkill_fd = open("/dev/rfkill", O_RDWR|O_CLOEXEC|O_NOCTTY|O_NONBLOCK);
-                if (rfkill_fd < 0) {
+                c.rfkill_fd = open("/dev/rfkill", O_RDWR|O_CLOEXEC|O_NOCTTY|O_NONBLOCK);
+                if (c.rfkill_fd < 0) {
                         if (errno == ENOENT) {
                                 log_debug_errno(errno, "Missing rfkill subsystem, or no device present, exiting.");
-                                r = 0;
-                                goto finish;
+                                return 0;
                         }
 
-                        r = log_error_errno(errno, "Failed to open /dev/rfkill: %m");
-                        goto finish;
+                        return log_error_errno(errno, "Failed to open /dev/rfkill: %m");
                 }
         } else {
-                rfkill_fd = SD_LISTEN_FDS_START;
+                c.rfkill_fd = SD_LISTEN_FDS_START;
 
-                r = fd_nonblock(rfkill_fd, 1);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to make /dev/rfkill socket non-blocking: %m");
-                        goto finish;
-                }
+                r = fd_nonblock(c.rfkill_fd, 1);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to make /dev/rfkill socket non-blocking: %m");
         }
 
         for (;;) {
@@ -413,7 +309,7 @@ int main(int argc, char *argv[]) {
                 const char *type;
                 ssize_t l;
 
-                l = read(rfkill_fd, &event, sizeof(event));
+                l = read(c.rfkill_fd, &event, sizeof(event));
                 if (l < 0) {
                         if (errno == EAGAIN) {
 
@@ -428,13 +324,11 @@ int main(int argc, char *argv[]) {
 
                                 /* Hang around for a bit, maybe there's more coming */
 
-                                r = fd_wait_for_event(rfkill_fd, POLLIN, EXIT_USEC);
+                                r = fd_wait_for_event(c.rfkill_fd, POLLIN, EXIT_USEC);
                                 if (r == -EINTR)
                                         continue;
-                                if (r < 0) {
-                                        log_error_errno(r, "Failed to poll() on device: %m");
-                                        goto finish;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to poll() on device: %m");
                                 if (r > 0)
                                         continue;
 
@@ -445,11 +339,8 @@ int main(int argc, char *argv[]) {
                         log_error_errno(errno, "Failed to read from /dev/rfkill: %m");
                 }
 
-                if (l != RFKILL_EVENT_SIZE_V1) {
-                        log_error("Read event structure of invalid size.");
-                        r = -EIO;
-                        goto finish;
-                }
+                if (l != RFKILL_EVENT_SIZE_V1)
+                        return log_error_errno(SYNTHETIC_ERRNO(EIO), "Read event structure of invalid size.");
 
                 type = rfkill_type_to_string(event.type);
                 if (!type) {
@@ -461,17 +352,17 @@ int main(int argc, char *argv[]) {
 
                 case RFKILL_OP_ADD:
                         log_debug("A new rfkill device has been added with index %i and type %s.", event.idx, type);
-                        (void) load_state(rfkill_fd, &event);
+                        (void) load_state(&c, &event);
                         break;
 
                 case RFKILL_OP_DEL:
                         log_debug("An rfkill device has been removed with index %i and type %s", event.idx, type);
-                        (void) save_state_cancel(&write_queue, rfkill_fd, &event);
+                        (void) save_state_cancel(&c, &event);
                         break;
 
                 case RFKILL_OP_CHANGE:
                         log_debug("An rfkill device has changed state with index %i and type %s", event.idx, type);
-                        (void) save_state_queue(&write_queue, rfkill_fd, &event);
+                        (void) save_state_queue(&c, &event);
                         break;
 
                 default:
@@ -480,10 +371,7 @@ int main(int argc, char *argv[]) {
                 }
         }
 
-        r = 0;
-
-finish:
-        (void) save_state_write(&write_queue);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return 0;
 }
+
+DEFINE_MAIN_FUNCTION(run);

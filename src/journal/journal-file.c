@@ -10,6 +10,8 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include "sd-event.h"
+
 #include "alloc-util.h"
 #include "btrfs-util.h"
 #include "chattr-util.h"
@@ -23,7 +25,6 @@
 #include "parse-util.h"
 #include "path-util.h"
 #include "random-util.h"
-#include "sd-event.h"
 #include "set.h"
 #include "stat-util.h"
 #include "string-util.h"
@@ -235,8 +236,7 @@ int journal_file_set_offline(JournalFile *f, bool wait) {
                 sigset_t ss, saved_ss;
                 int k;
 
-                if (sigfillset(&ss) < 0)
-                        return -errno;
+                assert_se(sigfillset(&ss) >= 0);
 
                 r = pthread_sigmask(SIG_BLOCK, &ss, &saved_ss);
                 if (r > 0)
@@ -349,11 +349,8 @@ JournalFile* journal_file_close(JournalFile *f) {
 #endif
 
         if (f->post_change_timer) {
-                int enabled;
-
-                if (sd_event_source_get_enabled(f->post_change_timer, &enabled) >= 0)
-                        if (enabled == SD_EVENT_ONESHOT)
-                                journal_file_post_change(f);
+                if (sd_event_source_get_enabled(f->post_change_timer, NULL) > 0)
+                        journal_file_post_change(f);
 
                 (void) sd_event_source_set_enabled(f->post_change_timer, SD_EVENT_OFF);
                 sd_event_source_unref(f->post_change_timer);
@@ -568,13 +565,14 @@ static int journal_file_verify_header(JournalFile *f) {
 
                 if (state == STATE_ARCHIVED)
                         return -ESHUTDOWN; /* Already archived */
-                else if (state == STATE_ONLINE) {
-                        log_debug("Journal file %s is already online. Assuming unclean closing.", f->path);
-                        return -EBUSY;
-                } else if (state != STATE_OFFLINE) {
-                        log_debug("Journal file %s has unknown state %i.", f->path, state);
-                        return -EBUSY;
-                }
+                else if (state == STATE_ONLINE)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBUSY),
+                                               "Journal file %s is already online. Assuming unclean closing.",
+                                               f->path);
+                else if (state != STATE_OFFLINE)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBUSY),
+                                               "Journal file %s has unknown state %i.",
+                                               f->path, state);
 
                 if (f->header->field_hash_table_size == 0 || f->header->data_hash_table_size == 0)
                         return -EBADMSG;
@@ -582,10 +580,10 @@ static int journal_file_verify_header(JournalFile *f) {
                 /* Don't permit appending to files from the future. Because otherwise the realtime timestamps wouldn't
                  * be strictly ordered in the entries in the file anymore, and we can't have that since it breaks
                  * bisection. */
-                if (le64toh(f->header->tail_entry_realtime) > now(CLOCK_REALTIME)) {
-                        log_debug("Journal file %s is from the future, refusing to append new data to it that'd be older.", f->path);
-                        return -ETXTBSY;
-                }
+                if (le64toh(f->header->tail_entry_realtime) > now(CLOCK_REALTIME))
+                        return log_debug_errno(SYNTHETIC_ERRNO(ETXTBSY),
+                                               "Journal file %s is from the future, refusing to append new data to it that'd be older.",
+                                               f->path);
         }
 
         f->compress_xz = JOURNAL_HEADER_COMPRESSED_XZ(f->header);
@@ -749,153 +747,124 @@ static int journal_file_check_object(JournalFile *f, uint64_t offset, Object *o)
         switch (o->object.type) {
 
         case OBJECT_DATA: {
-                if ((le64toh(o->data.entry_offset) == 0) ^ (le64toh(o->data.n_entries) == 0)) {
-                        log_debug("Bad n_entries: %"PRIu64": %"PRIu64,
-                                        le64toh(o->data.n_entries), offset);
-                        return -EBADMSG;
-                }
+                if ((le64toh(o->data.entry_offset) == 0) ^ (le64toh(o->data.n_entries) == 0))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Bad n_entries: %" PRIu64 ": %" PRIu64,
+                                               le64toh(o->data.n_entries),
+                                               offset);
 
-                if (le64toh(o->object.size) - offsetof(DataObject, payload) <= 0) {
-                        log_debug("Bad object size (<= %zu): %"PRIu64": %"PRIu64,
-                              offsetof(DataObject, payload),
-                              le64toh(o->object.size),
-                              offset);
-                        return -EBADMSG;
-                }
+                if (le64toh(o->object.size) - offsetof(DataObject, payload) <= 0)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Bad object size (<= %zu): %" PRIu64 ": %" PRIu64,
+                                               offsetof(DataObject, payload),
+                                               le64toh(o->object.size),
+                                               offset);
 
                 if (!VALID64(le64toh(o->data.next_hash_offset)) ||
                     !VALID64(le64toh(o->data.next_field_offset)) ||
                     !VALID64(le64toh(o->data.entry_offset)) ||
-                    !VALID64(le64toh(o->data.entry_array_offset))) {
-                        log_debug("Invalid offset, next_hash_offset="OFSfmt", next_field_offset="OFSfmt
-                                ", entry_offset="OFSfmt", entry_array_offset="OFSfmt": %"PRIu64,
-                              le64toh(o->data.next_hash_offset),
-                              le64toh(o->data.next_field_offset),
-                              le64toh(o->data.entry_offset),
-                              le64toh(o->data.entry_array_offset),
-                              offset);
-                        return -EBADMSG;
-                }
+                    !VALID64(le64toh(o->data.entry_array_offset)))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid offset, next_hash_offset=" OFSfmt ", next_field_offset=" OFSfmt ", entry_offset=" OFSfmt ", entry_array_offset=" OFSfmt ": %" PRIu64,
+                                               le64toh(o->data.next_hash_offset),
+                                               le64toh(o->data.next_field_offset),
+                                               le64toh(o->data.entry_offset),
+                                               le64toh(o->data.entry_array_offset),
+                                               offset);
 
                 break;
         }
 
         case OBJECT_FIELD:
-                if (le64toh(o->object.size) - offsetof(FieldObject, payload) <= 0) {
-                        log_debug(
-                              "Bad field size (<= %zu): %"PRIu64": %"PRIu64,
-                              offsetof(FieldObject, payload),
-                              le64toh(o->object.size),
-                              offset);
-                        return -EBADMSG;
-                }
+                if (le64toh(o->object.size) - offsetof(FieldObject, payload) <= 0)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Bad field size (<= %zu): %" PRIu64 ": %" PRIu64,
+                                               offsetof(FieldObject, payload),
+                                               le64toh(o->object.size),
+                                               offset);
 
                 if (!VALID64(le64toh(o->field.next_hash_offset)) ||
-                    !VALID64(le64toh(o->field.head_data_offset))) {
-                        log_debug(
-                              "Invalid offset, next_hash_offset="OFSfmt
-                              ", head_data_offset="OFSfmt": %"PRIu64,
-                              le64toh(o->field.next_hash_offset),
-                              le64toh(o->field.head_data_offset),
-                              offset);
-                        return -EBADMSG;
-                }
+                    !VALID64(le64toh(o->field.head_data_offset)))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid offset, next_hash_offset=" OFSfmt ", head_data_offset=" OFSfmt ": %" PRIu64,
+                                               le64toh(o->field.next_hash_offset),
+                                               le64toh(o->field.head_data_offset),
+                                               offset);
                 break;
 
         case OBJECT_ENTRY:
-                if ((le64toh(o->object.size) - offsetof(EntryObject, items)) % sizeof(EntryItem) != 0) {
-                        log_debug(
-                              "Bad entry size (<= %zu): %"PRIu64": %"PRIu64,
-                              offsetof(EntryObject, items),
-                              le64toh(o->object.size),
-                              offset);
-                        return -EBADMSG;
-                }
+                if ((le64toh(o->object.size) - offsetof(EntryObject, items)) % sizeof(EntryItem) != 0)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Bad entry size (<= %zu): %" PRIu64 ": %" PRIu64,
+                                               offsetof(EntryObject, items),
+                                               le64toh(o->object.size),
+                                               offset);
 
-                if ((le64toh(o->object.size) - offsetof(EntryObject, items)) / sizeof(EntryItem) <= 0) {
-                        log_debug(
-                              "Invalid number items in entry: %"PRIu64": %"PRIu64,
-                              (le64toh(o->object.size) - offsetof(EntryObject, items)) / sizeof(EntryItem),
-                              offset);
-                        return -EBADMSG;
-                }
+                if ((le64toh(o->object.size) - offsetof(EntryObject, items)) / sizeof(EntryItem) <= 0)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid number items in entry: %" PRIu64 ": %" PRIu64,
+                                               (le64toh(o->object.size) - offsetof(EntryObject, items)) / sizeof(EntryItem),
+                                               offset);
 
-                if (le64toh(o->entry.seqnum) <= 0) {
-                        log_debug(
-                              "Invalid entry seqnum: %"PRIx64": %"PRIu64,
-                              le64toh(o->entry.seqnum),
-                              offset);
-                        return -EBADMSG;
-                }
+                if (le64toh(o->entry.seqnum) <= 0)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid entry seqnum: %" PRIx64 ": %" PRIu64,
+                                               le64toh(o->entry.seqnum),
+                                               offset);
 
-                if (!VALID_REALTIME(le64toh(o->entry.realtime))) {
-                        log_debug(
-                              "Invalid entry realtime timestamp: %"PRIu64": %"PRIu64,
-                              le64toh(o->entry.realtime),
-                              offset);
-                        return -EBADMSG;
-                }
+                if (!VALID_REALTIME(le64toh(o->entry.realtime)))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid entry realtime timestamp: %" PRIu64 ": %" PRIu64,
+                                               le64toh(o->entry.realtime),
+                                               offset);
 
-                if (!VALID_MONOTONIC(le64toh(o->entry.monotonic))) {
-                        log_debug(
-                              "Invalid entry monotonic timestamp: %"PRIu64": %"PRIu64,
-                              le64toh(o->entry.monotonic),
-                              offset);
-                        return -EBADMSG;
-                }
+                if (!VALID_MONOTONIC(le64toh(o->entry.monotonic)))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid entry monotonic timestamp: %" PRIu64 ": %" PRIu64,
+                                               le64toh(o->entry.monotonic),
+                                               offset);
 
                 break;
 
         case OBJECT_DATA_HASH_TABLE:
         case OBJECT_FIELD_HASH_TABLE:
                 if ((le64toh(o->object.size) - offsetof(HashTableObject, items)) % sizeof(HashItem) != 0 ||
-                    (le64toh(o->object.size) - offsetof(HashTableObject, items)) / sizeof(HashItem) <= 0) {
-                        log_debug(
-                              "Invalid %s hash table size: %"PRIu64": %"PRIu64,
-                              o->object.type == OBJECT_DATA_HASH_TABLE ? "data" : "field",
-                              le64toh(o->object.size),
-                              offset);
-                        return -EBADMSG;
-                }
+                    (le64toh(o->object.size) - offsetof(HashTableObject, items)) / sizeof(HashItem) <= 0)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid %s hash table size: %" PRIu64 ": %" PRIu64,
+                                               o->object.type == OBJECT_DATA_HASH_TABLE ? "data" : "field",
+                                               le64toh(o->object.size),
+                                               offset);
 
                 break;
 
         case OBJECT_ENTRY_ARRAY:
                 if ((le64toh(o->object.size) - offsetof(EntryArrayObject, items)) % sizeof(le64_t) != 0 ||
-                    (le64toh(o->object.size) - offsetof(EntryArrayObject, items)) / sizeof(le64_t) <= 0) {
-                        log_debug(
-                              "Invalid object entry array size: %"PRIu64": %"PRIu64,
-                              le64toh(o->object.size),
-                              offset);
-                        return -EBADMSG;
-                }
+                    (le64toh(o->object.size) - offsetof(EntryArrayObject, items)) / sizeof(le64_t) <= 0)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid object entry array size: %" PRIu64 ": %" PRIu64,
+                                               le64toh(o->object.size),
+                                               offset);
 
-                if (!VALID64(le64toh(o->entry_array.next_entry_array_offset))) {
-                        log_debug(
-                              "Invalid object entry array next_entry_array_offset: "OFSfmt": %"PRIu64,
-                              le64toh(o->entry_array.next_entry_array_offset),
-                              offset);
-                        return -EBADMSG;
-                }
+                if (!VALID64(le64toh(o->entry_array.next_entry_array_offset)))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid object entry array next_entry_array_offset: " OFSfmt ": %" PRIu64,
+                                               le64toh(o->entry_array.next_entry_array_offset),
+                                               offset);
 
                 break;
 
         case OBJECT_TAG:
-                if (le64toh(o->object.size) != sizeof(TagObject)) {
-                        log_debug(
-                              "Invalid object tag size: %"PRIu64": %"PRIu64,
-                              le64toh(o->object.size),
-                              offset);
-                        return -EBADMSG;
-                }
+                if (le64toh(o->object.size) != sizeof(TagObject))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid object tag size: %" PRIu64 ": %" PRIu64,
+                                               le64toh(o->object.size),
+                                               offset);
 
-                if (!VALID_EPOCH(le64toh(o->tag.epoch))) {
-                        log_debug(
-                              "Invalid object tag epoch: %"PRIu64": %"PRIu64,
-                              le64toh(o->tag.epoch),
-                              offset);
-                        return -EBADMSG;
-                }
+                if (!VALID_EPOCH(le64toh(o->tag.epoch)))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid object tag epoch: %" PRIu64 ": %" PRIu64,
+                                               le64toh(o->tag.epoch), offset);
 
                 break;
         }
@@ -914,16 +883,16 @@ int journal_file_move_to_object(JournalFile *f, ObjectType type, uint64_t offset
         assert(ret);
 
         /* Objects may only be located at multiple of 64 bit */
-        if (!VALID64(offset)) {
-                log_debug("Attempt to move to object at non-64bit boundary: %" PRIu64, offset);
-                return -EBADMSG;
-        }
+        if (!VALID64(offset))
+                return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "Attempt to move to object at non-64bit boundary: %" PRIu64,
+                                       offset);
 
         /* Object may not be located in the file header */
-        if (offset < le64toh(f->header->header_size)) {
-                log_debug("Attempt to move to object located in file header: %" PRIu64, offset);
-                return -EBADMSG;
-        }
+        if (offset < le64toh(f->header->header_size))
+                return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "Attempt to move to object located in file header: %" PRIu64,
+                                       offset);
 
         r = journal_file_move_to(f, type, false, offset, sizeof(ObjectHeader), &t, &tsize);
         if (r < 0)
@@ -932,29 +901,29 @@ int journal_file_move_to_object(JournalFile *f, ObjectType type, uint64_t offset
         o = (Object*) t;
         s = le64toh(o->object.size);
 
-        if (s == 0) {
-                log_debug("Attempt to move to uninitialized object: %" PRIu64, offset);
-                return -EBADMSG;
-        }
-        if (s < sizeof(ObjectHeader)) {
-                log_debug("Attempt to move to overly short object: %" PRIu64, offset);
-                return -EBADMSG;
-        }
+        if (s == 0)
+                return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "Attempt to move to uninitialized object: %" PRIu64,
+                                       offset);
+        if (s < sizeof(ObjectHeader))
+                return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "Attempt to move to overly short object: %" PRIu64,
+                                       offset);
 
-        if (o->object.type <= OBJECT_UNUSED) {
-                log_debug("Attempt to move to object with invalid type: %" PRIu64, offset);
-                return -EBADMSG;
-        }
+        if (o->object.type <= OBJECT_UNUSED)
+                return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "Attempt to move to object with invalid type: %" PRIu64,
+                                       offset);
 
-        if (s < minimum_header_size(o)) {
-                log_debug("Attempt to move to truncated object: %" PRIu64, offset);
-                return -EBADMSG;
-        }
+        if (s < minimum_header_size(o))
+                return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "Attempt to move to truncated object: %" PRIu64,
+                                       offset);
 
-        if (type > OBJECT_UNUSED && o->object.type != type) {
-                log_debug("Attempt to move to object of unexpected type: %" PRIu64, offset);
-                return -EBADMSG;
-        }
+        if (type > OBJECT_UNUSED && o->object.type != type)
+                return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "Attempt to move to object of unexpected type: %" PRIu64,
+                                       offset);
 
         if (s > tsize) {
                 r = journal_file_move_to(f, type, false, offset, s, &t, NULL);
@@ -1869,37 +1838,33 @@ static int post_change_thunk(sd_event_source *timer, uint64_t usec, void *userda
 }
 
 static void schedule_post_change(JournalFile *f) {
-        sd_event_source *timer;
-        int enabled, r;
         uint64_t now;
+        int r;
 
         assert(f);
         assert(f->post_change_timer);
 
-        timer = f->post_change_timer;
-
-        r = sd_event_source_get_enabled(timer, &enabled);
+        r = sd_event_source_get_enabled(f->post_change_timer, NULL);
         if (r < 0) {
                 log_debug_errno(r, "Failed to get ftruncate timer state: %m");
                 goto fail;
         }
-
-        if (enabled == SD_EVENT_ONESHOT)
+        if (r > 0)
                 return;
 
-        r = sd_event_now(sd_event_source_get_event(timer), CLOCK_MONOTONIC, &now);
+        r = sd_event_now(sd_event_source_get_event(f->post_change_timer), CLOCK_MONOTONIC, &now);
         if (r < 0) {
                 log_debug_errno(r, "Failed to get clock's now for scheduling ftruncate: %m");
                 goto fail;
         }
 
-        r = sd_event_source_set_time(timer, now+f->post_change_timer_period);
+        r = sd_event_source_set_time(f->post_change_timer, now + f->post_change_timer_period);
         if (r < 0) {
                 log_debug_errno(r, "Failed to set time for scheduling ftruncate: %m");
                 goto fail;
         }
 
-        r = sd_event_source_set_enabled(timer, SD_EVENT_ONESHOT);
+        r = sd_event_source_set_enabled(f->post_change_timer, SD_EVENT_ONESHOT);
         if (r < 0) {
                 log_debug_errno(r, "Failed to enable scheduled ftruncate: %m");
                 goto fail;
@@ -1959,14 +1924,14 @@ int journal_file_append_entry(
         assert(iovec || n_iovec == 0);
 
         if (ts) {
-                if (!VALID_REALTIME(ts->realtime)) {
-                        log_debug("Invalid realtime timestamp %"PRIu64", refusing entry.", ts->realtime);
-                        return -EBADMSG;
-                }
-                if (!VALID_MONOTONIC(ts->monotonic)) {
-                        log_debug("Invalid monotomic timestamp %"PRIu64", refusing entry.", ts->monotonic);
-                        return -EBADMSG;
-                }
+                if (!VALID_REALTIME(ts->realtime))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid realtime timestamp %" PRIu64 ", refusing entry.",
+                                               ts->realtime);
+                if (!VALID_MONOTONIC(ts->monotonic))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                               "Invalid monotomic timestamp %" PRIu64 ", refusing entry.",
+                                               ts->monotonic);
         } else {
                 dual_timestamp_get(&_ts);
                 ts = &_ts;
@@ -2750,10 +2715,10 @@ int journal_file_next_entry(
         }
 
         /* Ensure our array is properly ordered. */
-        if (p > 0 && !check_properly_ordered(ofs, p, direction)) {
-                log_debug("%s: entry array not properly ordered at entry %" PRIu64, f->path, i);
-                return -EBADMSG;
-        }
+        if (p > 0 && !check_properly_ordered(ofs, p, direction))
+                return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "%s: entry array not properly ordered at entry %" PRIu64,
+                                       f->path, i);
 
         if (offset)
                 *offset = ofs;
@@ -2826,10 +2791,10 @@ int journal_file_next_entry_for_data(
         }
 
         /* Ensure our array is properly ordered. */
-        if (p > 0 && check_properly_ordered(ofs, p, direction)) {
-                log_debug("%s data entry array not properly ordered at entry %" PRIu64, f->path, i);
-                return -EBADMSG;
-        }
+        if (p > 0 && check_properly_ordered(ofs, p, direction))
+                return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "%s data entry array not properly ordered at entry %" PRIu64,
+                                       f->path, i);
 
         if (offset)
                 *offset = ofs;

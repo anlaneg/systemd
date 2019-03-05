@@ -1,3 +1,7 @@
+---
+title: Hacking on systemd
+---
+
 # Hacking on systemd
 
 We welcome all contributions to systemd. If you notice a bug or a missing
@@ -13,7 +17,7 @@ policy is to keep tests in matching files underneath `src/test/`,
 e.g. `src/test/test-path-util.c` contains tests for any functions in
 `src/basic/path-util.c`. If adding a new source file, consider adding a matching
 test executable. For features at a higher level, tests in `src/test/` are very
-strongly recommended. If that is no possible, integration tests in `test/` are
+strongly recommended. If that is not possible, integration tests in `test/` are
 encouraged.
 
 Please also have a look at our list of [code quality tools](CODE_QUALITY.md) we have setup for systemd,

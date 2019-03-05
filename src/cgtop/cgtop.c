@@ -19,8 +19,10 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "hashmap.h"
+#include "main-func.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "pretty-print.h"
 #include "process-util.h"
 #include "procfs-util.h"
 #include "stdio-util.h"
@@ -82,20 +84,12 @@ static enum {
         CPU_TIME,
 } arg_cpu_type = CPU_PERCENT;
 
-static void group_free(Group *g) {
-        assert(g);
+static Group *group_free(Group *g) {
+        if (!g)
+                return NULL;
 
         free(g->path);
-        free(g);
-}
-
-static void group_hashmap_clear(Hashmap *h) {
-        hashmap_clear_with_destructor(h, group_free);
-}
-
-static void group_hashmap_free(Hashmap *h) {
-        group_hashmap_clear(h);
-        hashmap_free(h);
+        return mfree(g);
 }
 
 static const char *maybe_format_bytes(char *buf, size_t l, bool is_valid, uint64_t t) {
@@ -110,7 +104,7 @@ static const char *maybe_format_bytes(char *buf, size_t l, bool is_valid, uint64
 
 static bool is_root_cgroup(const char *path) {
 
-        /* Returns true if the specified path belongs to the root cgroup. The root cgroup is special on cgroupsv2 as it
+        /* Returns true if the specified path belongs to the root cgroup. The root cgroup is special on cgroup v2 as it
          * carries only very few attributes in order not to export multiple truth about system state as most
          * information is available elsewhere in /proc anyway. We need to be able to deal with that, and need to get
          * our data from different sources in that case.
@@ -229,75 +223,10 @@ static int process(
                 if (g->n_tasks > 0)
                         g->n_tasks_valid = true;
 
-        } else if (STR_IN_SET(controller, "cpu", "cpuacct")) {
-                _cleanup_free_ char *p = NULL, *v = NULL;
-                uint64_t new_usage;
-                nsec_t timestamp;
-
-                if (is_root_cgroup(path)) {
-                        r = procfs_cpu_get_usage(&new_usage);
-                        if (r < 0)
-                                return r;
-                } else if (all_unified) {
-                        _cleanup_free_ char *val = NULL;
-
-                        if (!streq(controller, "cpu"))
-                                return 0;
-
-                        r = cg_get_keyed_attribute("cpu", path, "cpu.stat", STRV_MAKE("usage_usec"), &val);
-                        if (IN_SET(r, -ENOENT, -ENXIO))
-                                return 0;
-                        if (r < 0)
-                                return r;
-
-                        r = safe_atou64(val, &new_usage);
-                        if (r < 0)
-                                return r;
-
-                        new_usage *= NSEC_PER_USEC;
-                } else {
-                        if (!streq(controller, "cpuacct"))
-                                return 0;
-
-                        r = cg_get_path(controller, path, "cpuacct.usage", &p);
-                        if (r < 0)
-                                return r;
-
-                        r = read_one_line_file(p, &v);
-                        if (r == -ENOENT)
-                                return 0;
-                        if (r < 0)
-                                return r;
-
-                        r = safe_atou64(v, &new_usage);
-                        if (r < 0)
-                                return r;
-                }
-
-                timestamp = now_nsec(CLOCK_MONOTONIC);
-
-                if (g->cpu_iteration == iteration - 1 &&
-                    (nsec_t) new_usage > g->cpu_usage) {
-
-                        nsec_t x, y;
-
-                        x = timestamp - g->cpu_timestamp;
-                        if (x < 1)
-                                x = 1;
-
-                        y = (nsec_t) new_usage - g->cpu_usage;
-                        g->cpu_fraction = (double) y / (double) x;
-                        g->cpu_valid = true;
-                }
-
-                g->cpu_usage = (nsec_t) new_usage;
-                g->cpu_timestamp = timestamp;
-                g->cpu_iteration = iteration;
-
         } else if (streq(controller, "memory")) {
 
                 if (is_root_cgroup(path)) {
-                        r = procfs_memory_get_current(&g->memory);
+                        r = procfs_memory_get_used(&g->memory);
                         if (r < 0)
                                 return r;
                 } else {
@@ -417,6 +346,71 @@ static int process(
                 g->io_output = wr;
                 g->io_timestamp = timestamp;
                 g->io_iteration = iteration;
+        } else if (STR_IN_SET(controller, "cpu", "cpuacct") || cpu_accounting_is_cheap()) {
+                _cleanup_free_ char *p = NULL, *v = NULL;
+                uint64_t new_usage;
+                nsec_t timestamp;
+
+                if (is_root_cgroup(path)) {
+                        r = procfs_cpu_get_usage(&new_usage);
+                        if (r < 0)
+                                return r;
+                } else if (all_unified) {
+                        _cleanup_free_ char *val = NULL;
+
+                        if (!streq(controller, "cpu"))
+                                return 0;
+
+                        r = cg_get_keyed_attribute("cpu", path, "cpu.stat", STRV_MAKE("usage_usec"), &val);
+                        if (IN_SET(r, -ENOENT, -ENXIO))
+                                return 0;
+                        if (r < 0)
+                                return r;
+
+                        r = safe_atou64(val, &new_usage);
+                        if (r < 0)
+                                return r;
+
+                        new_usage *= NSEC_PER_USEC;
+                } else {
+                        if (!streq(controller, "cpuacct"))
+                                return 0;
+
+                        r = cg_get_path(controller, path, "cpuacct.usage", &p);
+                        if (r < 0)
+                                return r;
+
+                        r = read_one_line_file(p, &v);
+                        if (r == -ENOENT)
+                                return 0;
+                        if (r < 0)
+                                return r;
+
+                        r = safe_atou64(v, &new_usage);
+                        if (r < 0)
+                                return r;
+                }
+
+                timestamp = now_nsec(CLOCK_MONOTONIC);
+
+                if (g->cpu_iteration == iteration - 1 &&
+                    (nsec_t) new_usage > g->cpu_usage) {
+
+                        nsec_t x, y;
+
+                        x = timestamp - g->cpu_timestamp;
+                        if (x < 1)
+                                x = 1;
+
+                        y = (nsec_t) new_usage - g->cpu_usage;
+                        g->cpu_fraction = (double) y / (double) x;
+                        g->cpu_valid = true;
+                }
+
+                g->cpu_usage = (nsec_t) new_usage;
+                g->cpu_timestamp = timestamp;
+                g->cpu_iteration = iteration;
+
         }
 
         if (ret)
@@ -499,31 +493,14 @@ static int refresh_one(
 }
 
 static int refresh(const char *root, Hashmap *a, Hashmap *b, unsigned iteration) {
+        const char *c;
         int r;
 
-        assert(a);
-
-        r = refresh_one(SYSTEMD_CGROUP_CONTROLLER, root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("cpu", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("cpuacct", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("memory", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("io", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("blkio", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
-        r = refresh_one("pids", root, a, b, iteration, 0, NULL);
-        if (r < 0)
-                return r;
+        FOREACH_STRING(c, SYSTEMD_CGROUP_CONTROLLER, "cpu", "cpuacct", "memory", "io", "blkio", "pids") {
+                r = refresh_one(c, root, a, b, iteration, 0, NULL);
+                if (r < 0)
+                        return r;
+        }
 
         return 0;
 }
@@ -748,7 +725,6 @@ static int help(void) {
 }
 
 static int parse_argv(int argc, char *argv[]) {
-
         enum {
                 ARG_VERSION = 0x100,
                 ARG_DEPTH,
@@ -793,10 +769,10 @@ static int parse_argv(int argc, char *argv[]) {
                                         arg_cpu_type = CPU_TIME;
                                 else if (streq(optarg, "percentage"))
                                         arg_cpu_type = CPU_PERCENT;
-                                else {
-                                        log_error("Unknown argument to --cpu=: %s", optarg);
-                                        return -EINVAL;
-                                }
+                                else
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Unknown argument to --cpu=: %s",
+                                                               optarg);
                         } else
                                 arg_cpu_type = CPU_TIME;
 
@@ -813,10 +789,10 @@ static int parse_argv(int argc, char *argv[]) {
                         r = parse_sec(optarg, &arg_delay);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to parse delay parameter '%s': %m", optarg);
-                        if (arg_delay <= 0) {
-                                log_error("Invalid delay parameter '%s'", optarg);
-                                return -EINVAL;
-                        }
+                        if (arg_delay <= 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Invalid delay parameter '%s'",
+                                                       optarg);
 
                         break;
 
@@ -870,10 +846,10 @@ static int parse_argv(int argc, char *argv[]) {
                                 arg_order = ORDER_MEMORY;
                         else if (streq(optarg, "io"))
                                 arg_order = ORDER_IO;
-                        else {
-                                log_error("Invalid argument to --order=: %s", optarg);
-                                return -EINVAL;
-                        }
+                        else
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Invalid argument to --order=: %s",
+                                                       optarg);
                         break;
 
                 case 'k':
@@ -906,10 +882,9 @@ static int parse_argv(int argc, char *argv[]) {
 
         if (optind == argc - 1)
                 arg_root = argv[optind];
-        else if (optind < argc) {
-                log_error("Too many arguments.");
-                return -EINVAL;
-        }
+        else if (optind < argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Too many arguments.");
 
         return 1;
 }
@@ -923,27 +898,27 @@ static const char* counting_what(void) {
                 return "userspace processes (excl. kernel)";
 }
 
-int main(int argc, char *argv[]) {
-        int r;
-        Hashmap *a = NULL, *b = NULL;
+DEFINE_PRIVATE_HASH_OPS_WITH_VALUE_DESTRUCTOR(group_hash_ops, char, path_hash_func, path_compare_func, Group, group_free);
+
+static int run(int argc, char *argv[]) {
+        _cleanup_hashmap_free_ Hashmap *a = NULL, *b = NULL;
         unsigned iteration = 0;
         usec_t last_refresh = 0;
         bool quit = false, immediate_refresh = false;
         _cleanup_free_ char *root = NULL;
         CGroupMask mask;
+        int r;
 
         log_parse_environment();
         log_open();
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
         r = cg_mask_supported(&mask);
-        if (r < 0) {
-                log_error_errno(r, "Failed to determine supported controllers: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to determine supported controllers: %m");
 
         arg_count = (mask & CGROUP_MASK_PIDS) ? COUNT_PIDS : COUNT_USERSPACE_PROCESSES;
 
@@ -953,18 +928,14 @@ int main(int argc, char *argv[]) {
         }
 
         r = show_cgroup_get_path_and_warn(arg_machine, arg_root, &root);
-        if (r < 0) {
-                log_error_errno(r, "Failed to get root control group path: %m");
-                goto finish;
-        } else
-                log_debug("Cgroup path: %s", root);
+        if (r < 0)
+                return log_error_errno(r, "Failed to get root control group path: %m");
+        log_debug("Cgroup path: %s", root);
 
-        a = hashmap_new(&path_hash_ops);
-        b = hashmap_new(&path_hash_ops);
-        if (!a || !b) {
-                r = log_oom();
-                goto finish;
-        }
+        a = hashmap_new(&group_hash_ops);
+        b = hashmap_new(&group_hash_ops);
+        if (!a || !b)
+                return log_oom();
 
         signal(SIGWINCH, columns_lines_cache_reset);
 
@@ -972,7 +943,6 @@ int main(int argc, char *argv[]) {
                 arg_iterations = on_tty() ? 0 : 1;
 
         while (!quit) {
-                Hashmap *c;
                 usec_t t;
                 char key;
                 char h[FORMAT_TIMESPAN_MAX];
@@ -982,16 +952,11 @@ int main(int argc, char *argv[]) {
                 if (t >= last_refresh + arg_delay || immediate_refresh) {
 
                         r = refresh(root, a, b, iteration++);
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to refresh: %m");
-                                goto finish;
-                        }
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to refresh: %m");
 
-                        group_hashmap_clear(b);
-
-                        c = a;
-                        a = b;
-                        b = c;
+                        hashmap_clear(b);
+                        SWAP_TWO(a, b);
 
                         last_refresh = t;
                         immediate_refresh = false;
@@ -1012,10 +977,8 @@ int main(int argc, char *argv[]) {
                         r = read_one_char(stdin, &key, last_refresh + arg_delay - t, NULL);
                         if (r == -ETIMEDOUT)
                                 continue;
-                        if (r < 0) {
-                                log_error_errno(r, "Couldn't read key: %m");
-                                goto finish;
-                        }
+                        if (r < 0)
+                                return log_error_errno(r, "Couldn't read key: %m");
                 }
 
                 if (on_tty()) { /* TTY: Clear any user keystroke */
@@ -1135,11 +1098,7 @@ int main(int argc, char *argv[]) {
                 }
         }
 
-        r = 0;
-
-finish:
-        group_hashmap_free(a);
-        group_hashmap_free(b);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return 0;
 }
+
+DEFINE_MAIN_FUNCTION(run);

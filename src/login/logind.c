@@ -19,11 +19,13 @@
 #include "format-util.h"
 #include "fs-util.h"
 #include "logind.h"
+#include "main-func.h"
 #include "parse-util.h"
 #include "process-util.h"
 #include "selinux-util.h"
 #include "signal-util.h"
 #include "strv.h"
+#include "terminal-util.h"
 
 static Manager* manager_unref(Manager *m);
 DEFINE_TRIVIAL_CLEANUP_FUNC(Manager*, manager_unref);
@@ -144,7 +146,7 @@ static Manager* manager_unref(Manager *m) {
 
         bus_verify_polkit_async_registry_free(m->polkit_registry);
 
-        sd_bus_unref(m->bus);
+        sd_bus_flush_close_unref(m->bus);
         sd_event_unref(m->event);
 
         safe_close(m->reserve_vt_fd);
@@ -746,7 +748,29 @@ static int manager_vt_switch(sd_event_source *src, const struct signalfd_siginfo
 
         active = m->seat0->active;
         if (!active || active->vtnr < 1) {
-                log_warning("Received VT_PROCESS signal without a registered session on that VT.");
+                _cleanup_close_ int fd = -1;
+                int r;
+
+                /* We are requested to acknowledge the VT-switch signal by the kernel but
+                 * there's no registered sessions for the current VT. Normally this
+                 * shouldn't happen but something wrong might have happened when we tried
+                 * to release the VT. Better be safe than sorry, and try to release the VT
+                 * one more time otherwise the user will be locked with the current VT. */
+
+                log_warning("Received VT_PROCESS signal without a registered session, restoring VT.");
+
+                /* At this point we only have the kernel mapping for referring to the
+                 * current VT. */
+                fd = open_terminal("/dev/tty0", O_RDWR|O_NOCTTY|O_CLOEXEC|O_NONBLOCK);
+                if (fd < 0) {
+                        log_warning_errno(fd, "Failed to open, ignoring: %m");
+                        return 0;
+                }
+
+                r = vt_release(fd, true);
+                if (r < 0)
+                        log_warning_errno(r, "Failed to release VT, ignoring: %m");
+
                 return 0;
         }
 
@@ -800,10 +824,10 @@ static int manager_connect_console(Manager *m) {
          * release events immediately.
          */
 
-        if (SIGRTMIN + 1 > SIGRTMAX) {
-                log_error("Not enough real-time signals available: %u-%u", SIGRTMIN, SIGRTMAX);
-                return -EINVAL;
-        }
+        if (SIGRTMIN + 1 > SIGRTMAX)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Not enough real-time signals available: %u-%u",
+                                       SIGRTMIN, SIGRTMAX);
 
         assert_se(ignore_signals(SIGRTMIN + 1, -1) >= 0);
         assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGRTMIN, -1) >= 0);
@@ -832,13 +856,15 @@ static int manager_connect_udev(Manager *m) {
         if (r < 0)
                 return r;
 
-        r = sd_device_monitor_attach_event(m->device_seat_monitor, m->event, 0);
+        r = sd_device_monitor_attach_event(m->device_seat_monitor, m->event);
         if (r < 0)
                 return r;
 
-        r = sd_device_monitor_start(m->device_seat_monitor, manager_dispatch_seat_udev, m, "logind-seat-monitor");
+        r = sd_device_monitor_start(m->device_seat_monitor, manager_dispatch_seat_udev, m);
         if (r < 0)
                 return r;
+
+        (void) sd_event_source_set_description(sd_device_monitor_get_event_source(m->device_seat_monitor), "logind-seat-monitor");
 
         r = sd_device_monitor_new(&m->device_monitor);
         if (r < 0)
@@ -856,13 +882,15 @@ static int manager_connect_udev(Manager *m) {
         if (r < 0)
                 return r;
 
-        r = sd_device_monitor_attach_event(m->device_monitor, m->event, 0);
+        r = sd_device_monitor_attach_event(m->device_monitor, m->event);
         if (r < 0)
                 return r;
 
-        r = sd_device_monitor_start(m->device_monitor, manager_dispatch_device_udev, m, "logind-device-monitor");
+        r = sd_device_monitor_start(m->device_monitor, manager_dispatch_device_udev, m);
         if (r < 0)
                 return r;
+
+        (void) sd_event_source_set_description(sd_device_monitor_get_event_source(m->device_monitor), "logind-device-monitor");
 
         /* Don't watch keys if nobody cares */
         if (!manager_all_buttons_ignored(m)) {
@@ -878,13 +906,15 @@ static int manager_connect_udev(Manager *m) {
                 if (r < 0)
                         return r;
 
-                r = sd_device_monitor_attach_event(m->device_button_monitor, m->event, 0);
+                r = sd_device_monitor_attach_event(m->device_button_monitor, m->event);
                 if (r < 0)
                         return r;
 
-                r = sd_device_monitor_start(m->device_button_monitor, manager_dispatch_button_udev, m, "logind-button-monitor");
+                r = sd_device_monitor_start(m->device_button_monitor, manager_dispatch_button_udev, m);
                 if (r < 0)
                         return r;
+
+                (void) sd_event_source_set_description(sd_device_monitor_get_event_source(m->device_button_monitor), "logind-button-monitor");
         }
 
         /* Don't bother watching VCSA devices, if nobody cares */
@@ -898,13 +928,15 @@ static int manager_connect_udev(Manager *m) {
                 if (r < 0)
                         return r;
 
-                r = sd_device_monitor_attach_event(m->device_vcsa_monitor, m->event, 0);
+                r = sd_device_monitor_attach_event(m->device_vcsa_monitor, m->event);
                 if (r < 0)
                         return r;
 
-                r = sd_device_monitor_start(m->device_vcsa_monitor, manager_dispatch_vcsa_udev, m, "logind-vcsa-monitor");
+                r = sd_device_monitor_start(m->device_vcsa_monitor, manager_dispatch_vcsa_udev, m);
                 if (r < 0)
                         return r;
+
+                (void) sd_event_source_set_description(sd_device_monitor_get_event_source(m->device_vcsa_monitor), "logind-vcsa-monitor");
         }
 
         return 0;
@@ -1158,28 +1190,23 @@ static int manager_run(Manager *m) {
         }
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         _cleanup_(manager_unrefp) Manager *m = NULL;
         int r;
 
-        log_set_target(LOG_TARGET_AUTO);
         log_set_facility(LOG_AUTH);
-        log_parse_environment();
-        log_open();
+        log_setup_service();
 
         umask(0022);
 
         if (argc != 1) {
                 log_error("This program takes no arguments.");
-                r = -EINVAL;
-                goto finish;
+                return -EINVAL;
         }
 
         r = mac_selinux_init();
-        if (r < 0) {
-                log_error_errno(r, "Could not initialize labelling: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Could not initialize labelling: %m");
 
         /* Always create the directories people can create inotify watches in. Note that some applications might check
          * for the existence of /run/systemd/seats/ to determine whether logind is available, so please always make
@@ -1191,21 +1218,16 @@ int main(int argc, char *argv[]) {
         assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGHUP, SIGTERM, SIGINT, -1) >= 0);
 
         r = manager_new(&m);
-        if (r < 0) {
-                log_error_errno(r, "Failed to allocate manager object: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to allocate manager object: %m");
 
         (void) manager_parse_config_file(m);
 
         r = manager_startup(m);
-        if (r < 0) {
-                log_error_errno(r, "Failed to fully start up daemon: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to fully start up daemon: %m");
 
         log_debug("systemd-logind running as pid "PID_FMT, getpid_cached());
-
         (void) sd_notify(false,
                          "READY=1\n"
                          "STATUS=Processing requests...");
@@ -1213,11 +1235,11 @@ int main(int argc, char *argv[]) {
         r = manager_run(m);
 
         log_debug("systemd-logind stopped as pid "PID_FMT, getpid_cached());
-
         (void) sd_notify(false,
                          "STOPPING=1\n"
                          "STATUS=Shutting down...");
 
-finish:
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return r;
 }
+
+DEFINE_MAIN_FUNCTION(run);

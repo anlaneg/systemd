@@ -10,6 +10,7 @@
 #include "alloc-util.h"
 #include "bus-error.h"
 #include "bus-util.h"
+#include "env-file.h"
 #include "escape.h"
 #include "extract-word.h"
 #include "fd-util.h"
@@ -26,6 +27,7 @@
 #include "stdio-util.h"
 #include "string-table.h"
 #include "terminal-util.h"
+#include "tmpfile-util.h"
 #include "unit-name.h"
 #include "user-util.h"
 #include "util.h"
@@ -70,8 +72,9 @@ fail:
         return mfree(m);
 }
 
-void machine_free(Machine *m) {
-        assert(m);
+Machine* machine_free(Machine *m) {
+        if (!m)
+                return NULL;
 
         while (m->operations)
                 operation_free(m->operations);
@@ -98,7 +101,7 @@ void machine_free(Machine *m) {
         free(m->service);
         free(m->root_directory);
         free(m->netif);
-        free(m);
+        return mfree(m);
 }
 
 int machine_save(Machine *m) {
@@ -251,7 +254,7 @@ int machine_load(Machine *m) {
         if (!m->state_file)
                 return 0;
 
-        r = parse_env_file(NULL, m->state_file, NEWLINE,
+        r = parse_env_file(NULL, m->state_file,
                            "SCOPE",     &m->unit,
                            "SCOPE_JOB", &m->scope_job,
                            "SERVICE",   &m->service,
@@ -261,8 +264,7 @@ int machine_load(Machine *m) {
                            "CLASS",     &class,
                            "REALTIME",  &realtime,
                            "MONOTONIC", &monotonic,
-                           "NETIF",     &netif,
-                           NULL);
+                           "NETIF",     &netif);
         if (r < 0) {
                 if (r == -ENOENT)
                         return 0;
@@ -396,6 +398,7 @@ int machine_start(Machine *m, sd_bus_message *properties, sd_bus_error *error) {
         machine_save(m);
 
         machine_send_signal(m, true);
+        (void) manager_enqueue_nscd_cache_flush(m->manager);
 
         return 0;
 }
@@ -403,7 +406,7 @@ int machine_start(Machine *m, sd_bus_message *properties, sd_bus_error *error) {
 static int machine_stop_scope(Machine *m) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         char *job = NULL;
-        int r;
+        int r, q;
 
         assert(m);
         assert(m->class != MACHINE_HOST);
@@ -412,10 +415,17 @@ static int machine_stop_scope(Machine *m) {
                 return 0;
 
         r = manager_stop_unit(m->manager, m->unit, &error, &job);
-        if (r < 0)
-                return log_error_errno(r, "Failed to stop machine scope: %s", bus_error_message(&error, r));
+        if (r < 0) {
+                log_error_errno(r, "Failed to stop machine scope: %s", bus_error_message(&error, r));
+                sd_bus_error_free(&error);
+        } else
+                free_and_replace(m->scope_job, job);
 
-        return free_and_replace(m->scope_job, job);
+        q = manager_unref_unit(m->manager, m->unit, &error);
+        if (q < 0)
+                log_warning_errno(q, "Failed to drop reference to machine scope, ignoring: %s", bus_error_message(&error, r));
+
+        return r;
 }
 
 int machine_stop(Machine *m) {
@@ -430,6 +440,7 @@ int machine_stop(Machine *m) {
         m->stopping = true;
 
         machine_save(m);
+        (void) manager_enqueue_nscd_cache_flush(m->manager);
 
         return r;
 }
@@ -583,7 +594,7 @@ int machine_get_uid_shift(Machine *m, uid_t *ret) {
         uid_t uid_base, uid_shift, uid_range;
         gid_t gid_base, gid_shift, gid_range;
         _cleanup_fclose_ FILE *f = NULL;
-        int k;
+        int k, r;
 
         assert(m);
         assert(ret);
@@ -632,7 +643,10 @@ int machine_get_uid_shift(Machine *m, uid_t *ret) {
                 return -ENXIO;
 
         /* If there's more than one line, then we don't support this mapping. */
-        if (fgetc(f) != EOF)
+        r = safe_fgetc(f, NULL);
+        if (r < 0)
+                return r;
+        if (r != 0) /* Insist on EOF */
                 return -ENXIO;
 
         fclose(f);
@@ -653,7 +667,10 @@ int machine_get_uid_shift(Machine *m, uid_t *ret) {
         }
 
         /* If there's more than one line, then we don't support this file. */
-        if (fgetc(f) != EOF)
+        r = safe_fgetc(f, NULL);
+        if (r < 0)
+                return r;
+        if (r != 0) /* Insist on EOF */
                 return -ENXIO;
 
         /* If the UID and GID mapping doesn't match, we don't support this mapping. */

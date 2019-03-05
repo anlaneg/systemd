@@ -233,12 +233,8 @@ static void server_done(Server *s) {
         while (s->fifos)
                 fifo_free(s->fifos);
 
-        safe_close(s->epoll_fd);
-
-        if (s->bus) {
-                sd_bus_flush(s->bus);
-                sd_bus_unref(s->bus);
-        }
+        s->epoll_fd = safe_close(s->epoll_fd);
+        s->bus = sd_bus_flush_close_unref(s->bus);
 }
 
 static int server_init(Server *s, unsigned n_sockets) {
@@ -322,10 +318,9 @@ static int process_event(Server *s, struct epoll_event *ev) {
 
         assert(s);
 
-        if (!(ev->events & EPOLLIN)) {
-                log_info("Got invalid event from epoll. (3)");
-                return -EIO;
-        }
+        if (!(ev->events & EPOLLIN))
+                return log_info_errno(SYNTHETIC_ERRNO(EIO),
+                                      "Got invalid event from epoll. (3)");
 
         f = (Fifo*) ev->data.ptr;
         r = fifo_process(f);
@@ -352,9 +347,7 @@ int main(int argc, char *argv[]) {
                 return EXIT_FAILURE;
         }
 
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        log_setup_service();
 
         umask(0022);
 

@@ -10,8 +10,9 @@
 #include "alloc-util.h"
 #include "log.h"
 #include "macro.h"
+#include "main-func.h"
+#include "pretty-print.h"
 #include "string-util.h"
-#include "terminal-util.h"
 #include "util.h"
 
 static const char *arg_suffix = NULL;
@@ -99,8 +100,8 @@ static int print_home(const char *n) {
                 }
         }
 
-        log_error("Path %s not known.", n);
-        return -EOPNOTSUPP;
+        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                               "Path %s not known.", n);
 }
 
 static int help(void) {
@@ -167,7 +168,7 @@ static int parse_argv(int argc, char *argv[]) {
         return 1;
 }
 
-int main(int argc, char* argv[]) {
+static int run(int argc, char* argv[]) {
         int r;
 
         log_parse_environment();
@@ -175,7 +176,7 @@ int main(int argc, char* argv[]) {
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
         if (argc > optind) {
                 int i, q;
@@ -185,9 +186,10 @@ int main(int argc, char* argv[]) {
                         if (q < 0)
                                 r = q;
                 }
-        } else
-                r = list_homes();
 
-finish:
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+                return r;
+        } else
+                return list_homes();
 }
+
+DEFINE_MAIN_FUNCTION(run);

@@ -13,6 +13,7 @@
 #include "fs-util.h"
 #include "macro.h"
 #include "manager.h"
+#include "missing_prctl.h"
 #include "mkdir.h"
 #include "path-util.h"
 #include "rm-rf.h"
@@ -54,6 +55,9 @@ static void check(Manager *m, Unit *unit, int status_expected, int code_expected
                 n = now(CLOCK_MONOTONIC);
                 if (ts + timeout < n) {
                         log_error("Test timeout when testing %s", unit->id);
+                        r = unit_kill(unit, KILL_ALL, SIGKILL, NULL);
+                        if (r < 0)
+                                log_error_errno(r, "Failed to kill %s: %m", unit->id);
                         exit(EXIT_FAILURE);
                 }
         }
@@ -127,7 +131,7 @@ static bool check_user_has_group_with_same_name(const char *name) {
 }
 
 static bool is_inaccessible_available(void) {
-        char *p;
+        const char *p;
 
         FOREACH_STRING(p,
                 "/run/systemd/inaccessible/reg",
@@ -150,7 +154,7 @@ static void test(Manager *m, const char *unit_name, int status_expected, int cod
         assert_se(unit_name);
 
         assert_se(manager_load_startable_unit_or_warn(m, unit_name, NULL, &unit) >= 0);
-        assert_se(UNIT_VTABLE(unit)->start(unit) >= 0);
+        assert_se(unit_start(unit) >= 0);
         check(m, unit, status_expected, code_expected);
 }
 
@@ -490,6 +494,7 @@ static void test_exec_dynamicuser(Manager *m) {
 }
 
 static void test_exec_environment(Manager *m) {
+        test(m, "exec-environment-no-substitute.service", 0, CLD_EXITED);
         test(m, "exec-environment.service", 0, CLD_EXITED);
         test(m, "exec-environment-multiple.service", 0, CLD_EXITED);
         test(m, "exec-environment-empty.service", 0, CLD_EXITED);
@@ -756,9 +761,17 @@ int main(int argc, char *argv[]) {
 
         test_setup_logging(LOG_DEBUG);
 
+#if HAS_FEATURE_ADDRESS_SANITIZER
+        if (is_run_on_travis_ci()) {
+                log_notice("Running on TravisCI under ASan, skipping, see https://github.com/systemd/systemd/issues/10696");
+                return EXIT_TEST_SKIP;
+        }
+#endif
+
         (void) unsetenv("USER");
         (void) unsetenv("LOGNAME");
         (void) unsetenv("SHELL");
+        (void) unsetenv("HOME");
 
         can_unshare = have_namespaces();
 
@@ -771,7 +784,7 @@ int main(int argc, char *argv[]) {
                 return log_tests_skipped("cgroupfs not available");
 
         assert_se(runtime_dir = setup_fake_runtime_dir());
-        test_execute_path = path_join(NULL, get_testdata_dir(), "test-execute");
+        test_execute_path = path_join(get_testdata_dir(), "test-execute");
         assert_se(set_unit_path(test_execute_path) >= 0);
 
         /* Unset VAR1, VAR2 and VAR3 which are used in the PassEnvironment test

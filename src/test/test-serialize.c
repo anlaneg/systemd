@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include "def.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -9,6 +8,7 @@
 #include "serialize.h"
 #include "strv.h"
 #include "tests.h"
+#include "tmpfile-util.h"
 
 char long_string[LONG_LINE_MAX+1];
 
@@ -138,7 +138,7 @@ static void test_deserialize_environment(void) {
 
         log_info("/* %s */", __func__);
 
-        assert_se(env = strv_new("A=1", NULL));
+        assert_se(env = strv_new("A=1"));
 
         assert_se(deserialize_environment("B=2", &env) >= 0);
         assert_se(deserialize_environment("FOO%%=a\\177b\\nc\\td e", &env) >= 0);
@@ -162,8 +162,7 @@ static void test_serialize_environment(void) {
                                  "B=2",
                                  "C=ąęółń",
                                  "D=D=a\\x0Ab",
-                                 "FOO%%=a\177b\nc\td e",
-                                 NULL));
+                                 "FOO%%=a\177b\nc\td e"));
 
         assert_se(serialize_strv(f, "env", env) == 1);
         assert_se(fflush_and_check(f) == 0);

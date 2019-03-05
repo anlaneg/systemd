@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
@@ -199,10 +200,8 @@ int cg_rmdir(const char *controller, const char *path) {
                 return -errno;
 
         r = cg_hybrid_unified();
-        if (r < 0)
+        if (r <= 0)
                 return r;
-        if (r == 0)
-                return 0;
 
         if (streq(controller, SYSTEMD_CGROUP_CONTROLLER)) {
                 r = cg_rmdir(SYSTEMD_CGROUP_CONTROLLER_LEGACY, path);
@@ -224,7 +223,7 @@ int cg_kill(
 
         _cleanup_set_free_ Set *allocated_set = NULL;
         bool done = false;
-        int r, ret = 0;
+        int r, ret = 0, ret_log_kill = 0;
         pid_t my_pid;
 
         assert(sig >= 0);
@@ -268,7 +267,7 @@ int cg_kill(
                                 continue;
 
                         if (log_kill)
-                                log_kill(pid, sig, userdata);
+                                ret_log_kill = log_kill(pid, sig, userdata);
 
                         /* If we haven't killed this process yet, kill
                          * it */
@@ -279,8 +278,12 @@ int cg_kill(
                                 if (flags & CGROUP_SIGCONT)
                                         (void) kill(pid, SIGCONT);
 
-                                if (ret == 0)
-                                        ret = 1;
+                                if (ret == 0) {
+                                        if (log_kill)
+                                                ret = ret_log_kill;
+                                        else
+                                                ret = 1;
+                                }
                         }
 
                         done = false;
@@ -873,7 +876,7 @@ int cg_set_access(
                 bool fatal;
         };
 
-        /* cgroupsv1, aka legacy/non-unified */
+        /* cgroup v1, aka legacy/non-unified */
         static const struct Attribute legacy_attributes[] = {
                 { "cgroup.procs",           true  },
                 { "tasks",                  false },
@@ -881,7 +884,7 @@ int cg_set_access(
                 {},
         };
 
-        /* cgroupsv2, aka unified */
+        /* cgroup v2, aka unified */
         static const struct Attribute unified_attributes[] = {
                 { "cgroup.procs",           true  },
                 { "cgroup.subtree_control", true  },
@@ -1853,9 +1856,7 @@ char *cg_escape(const char *p) {
          * needs free()! */
 
         if (IN_SET(p[0], 0, '_', '.') ||
-            streq(p, "notify_on_release") ||
-            streq(p, "release_agent") ||
-            streq(p, "tasks") ||
+            STR_IN_SET(p, "notify_on_release", "release_agent", "tasks") ||
             startswith(p, "cgroup."))
                 need_prefix = true;
         else {
@@ -2042,7 +2043,7 @@ int cg_get_keyed_attribute(
         char **v;
         int r;
 
-        /* Reads one or more fields of a cgroupsv2 keyed attribute file. The 'keys' parameter should be an strv with
+        /* Reads one or more fields of a cgroup v2 keyed attribute file. The 'keys' parameter should be an strv with
          * all keys to retrieve. The 'ret_values' parameter should be passed as string size with the same number of
          * entries as 'keys'. On success each entry will be set to the value of the matching key.
          *
@@ -2110,6 +2111,7 @@ done:
 
 int cg_create_everywhere(CGroupMask supported, CGroupMask mask, const char *path) {
         CGroupController c;
+        CGroupMask done;
         bool created;
         int r;
 
@@ -2134,20 +2136,28 @@ int cg_create_everywhere(CGroupMask supported, CGroupMask mask, const char *path
         if (r > 0)
                 return created;
 
+        supported &= CGROUP_MASK_V1;
+        mask = CGROUP_MASK_EXTEND_JOINED(mask);
+        done = 0;
+
         /* Otherwise, do the same in the other hierarchies */
         for (c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
                 CGroupMask bit = CGROUP_CONTROLLER_TO_MASK(c);
                 const char *n;
 
-                if (!FLAGS_SET(CGROUP_MASK_V1, bit))
+                if (!FLAGS_SET(supported, bit))
+                        continue;
+
+                if (FLAGS_SET(done, bit))
                         continue;
 
                 n = cgroup_controller_to_string(c);
-
                 if (FLAGS_SET(mask, bit))
                         (void) cg_create(n, path);
-                else if (FLAGS_SET(supported, bit))
+                else
                         (void) cg_trim(n, path, true);
+
+                done |= CGROUP_MASK_EXTEND_JOINED(bit);
         }
 
         return created;
@@ -2155,6 +2165,7 @@ int cg_create_everywhere(CGroupMask supported, CGroupMask mask, const char *path
 
 int cg_attach_everywhere(CGroupMask supported, const char *path, pid_t pid, cg_migrate_callback_t path_callback, void *userdata) {
         CGroupController c;
+        CGroupMask done;
         int r;
 
         r = cg_attach(SYSTEMD_CGROUP_CONTROLLER, path, pid);
@@ -2167,23 +2178,26 @@ int cg_attach_everywhere(CGroupMask supported, const char *path, pid_t pid, cg_m
         if (r > 0)
                 return 0;
 
+        supported &= CGROUP_MASK_V1;
+        done = 0;
+
         for (c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
                 CGroupMask bit = CGROUP_CONTROLLER_TO_MASK(c);
                 const char *p = NULL;
 
-                if (!FLAGS_SET(CGROUP_MASK_V1, bit))
+                if (!FLAGS_SET(supported, bit))
                         continue;
 
-                if (!FLAGS_SET(supported, bit))
+                if (FLAGS_SET(done, bit))
                         continue;
 
                 if (path_callback)
                         p = path_callback(bit, userdata);
-
                 if (!p)
                         p = path;
 
                 (void) cg_attach_fallback(cgroup_controller_to_string(c), p, pid);
+                done |= CGROUP_MASK_EXTEND_JOINED(bit);
         }
 
         return 0;
@@ -2208,6 +2222,7 @@ int cg_attach_many_everywhere(CGroupMask supported, const char *path, Set* pids,
 
 int cg_migrate_everywhere(CGroupMask supported, const char *from, const char *to, cg_migrate_callback_t to_callback, void *userdata) {
         CGroupController c;
+        CGroupMask done;
         int r = 0, q;
 
         if (!path_equal(from, to))  {
@@ -2222,30 +2237,34 @@ int cg_migrate_everywhere(CGroupMask supported, const char *from, const char *to
         if (q > 0)
                 return r;
 
+        supported &= CGROUP_MASK_V1;
+        done = 0;
+
         for (c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
                 CGroupMask bit = CGROUP_CONTROLLER_TO_MASK(c);
                 const char *p = NULL;
 
-                if (!FLAGS_SET(CGROUP_MASK_V1, bit))
+                if (!FLAGS_SET(supported, bit))
                         continue;
 
-                if (!FLAGS_SET(supported, bit))
+                if (FLAGS_SET(done, bit))
                         continue;
 
                 if (to_callback)
                         p = to_callback(bit, userdata);
-
                 if (!p)
                         p = to;
 
                 (void) cg_migrate_recursive_fallback(SYSTEMD_CGROUP_CONTROLLER, to, cgroup_controller_to_string(c), p, 0);
+                done |= CGROUP_MASK_EXTEND_JOINED(bit);
         }
 
-        return 0;
+        return r;
 }
 
 int cg_trim_everywhere(CGroupMask supported, const char *path, bool delete_root) {
         CGroupController c;
+        CGroupMask done;
         int r, q;
 
         r = cg_trim(SYSTEMD_CGROUP_CONTROLLER, path, delete_root);
@@ -2258,19 +2277,23 @@ int cg_trim_everywhere(CGroupMask supported, const char *path, bool delete_root)
         if (q > 0)
                 return r;
 
+        supported &= CGROUP_MASK_V1;
+        done = 0;
+
         for (c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
                 CGroupMask bit = CGROUP_CONTROLLER_TO_MASK(c);
-
-                if (!FLAGS_SET(CGROUP_MASK_V1, bit))
-                        continue;
 
                 if (!FLAGS_SET(supported, bit))
                         continue;
 
+                if (FLAGS_SET(done, bit))
+                        continue;
+
                 (void) cg_trim(cgroup_controller_to_string(c), path, delete_root);
+                done |= CGROUP_MASK_EXTEND_JOINED(bit);
         }
 
-        return 0;
+        return r;
 }
 
 int cg_mask_to_string(CGroupMask mask, char **ret) {
@@ -2347,9 +2370,9 @@ int cg_mask_supported(CGroupMask *ret) {
         CGroupMask mask;
         int r;
 
-        /* Determines the mask of supported cgroup controllers. Only
-         * includes controllers we can make sense of and that are
-         * actually accessible. */
+        /* Determines the mask of supported cgroup controllers. Only includes controllers we can make sense of and that
+         * are actually accessible. Only covers real controllers, i.e. not the CGROUP_CONTROLLER_BPF_xyz
+         * pseudo-controllers. */
 
         r = cg_all_unified();
         if (r < 0)
@@ -2472,7 +2495,7 @@ int cg_kernel_controllers(Set **ret) {
 
 static thread_local CGroupUnified unified_cache = CGROUP_UNIFIED_UNKNOWN;
 
-/* The hybrid mode was initially implemented in v232 and simply mounted cgroup v2 on /sys/fs/cgroup/systemd.  This
+/* The hybrid mode was initially implemented in v232 and simply mounted cgroup2 on /sys/fs/cgroup/systemd.  This
  * unfortunately broke other tools (such as docker) which expected the v1 "name=systemd" hierarchy on
  * /sys/fs/cgroup/systemd.  From v233 and on, the hybrid mode mountnbs v2 on /sys/fs/cgroup/unified and maintains
  * "name=systemd" hierarchy on /sys/fs/cgroup/systemd for compatibility with other tools.
@@ -2524,11 +2547,10 @@ static int cg_unified_update(void) {
                                 unified_cache = CGROUP_UNIFIED_NONE;
                         }
                 }
-        } else {
-                log_debug("Unknown filesystem type %llx mounted on /sys/fs/cgroup.",
-                          (unsigned long long) fs.f_type);
-                return -ENOMEDIUM;
-        }
+        } else
+                return log_debug_errno(SYNTHETIC_ERRNO(ENOMEDIUM),
+                                       "Unknown filesystem type %llx mounted on /sys/fs/cgroup.",
+                                       (unsigned long long)fs.f_type);
 
         return 0;
 }
@@ -2575,22 +2597,45 @@ int cg_unified_flush(void) {
         return cg_unified_update();
 }
 
-int cg_enable_everywhere(CGroupMask supported, CGroupMask mask, const char *p) {
+int cg_enable_everywhere(
+                CGroupMask supported,
+                CGroupMask mask,
+                const char *p,
+                CGroupMask *ret_result_mask) {
+
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_free_ char *fs = NULL;
         CGroupController c;
+        CGroupMask ret = 0;
         int r;
 
         assert(p);
 
-        if (supported == 0)
+        if (supported == 0) {
+                if (ret_result_mask)
+                        *ret_result_mask = 0;
                 return 0;
+        }
 
         r = cg_all_unified();
         if (r < 0)
                 return r;
-        if (r == 0) /* on the legacy hiearchy there's no joining of controllers defined */
+        if (r == 0) {
+                /* On the legacy hiearchy there's no concept of "enabling" controllers in cgroups defined. Let's claim
+                 * complete success right away. (If you wonder why we return the full mask here, rather than zero: the
+                 * caller tends to use the returned mask later on to compare if all controllers where properly joined,
+                 * and if not requeues realization. This use is the primary purpose of the return value, hence let's
+                 * minimize surprises here and reduce triggers for re-realization by always saying we fully
+                 * succeeded.) */
+                if (ret_result_mask)
+                        *ret_result_mask = mask & supported & CGROUP_MASK_V2; /* If you wonder why we mask this with
+                                                                               * CGROUP_MASK_V2: The 'supported' mask
+                                                                               * might contain pure-V1 or BPF
+                                                                               * controllers, and we never want to
+                                                                               * claim that we could enable those with
+                                                                               * cgroup.subtree_control */
                 return 0;
+        }
 
         r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, p, "cgroup.subtree_control", &fs);
         if (r < 0)
@@ -2615,19 +2660,47 @@ int cg_enable_everywhere(CGroupMask supported, CGroupMask mask, const char *p) {
 
                         if (!f) {
                                 f = fopen(fs, "we");
-                                if (!f) {
-                                        log_debug_errno(errno, "Failed to open cgroup.subtree_control file of %s: %m", p);
-                                        break;
-                                }
+                                if (!f)
+                                        return log_debug_errno(errno, "Failed to open cgroup.subtree_control file of %s: %m", p);
                         }
 
                         r = write_string_stream(f, s, WRITE_STRING_FILE_DISABLE_BUFFER);
                         if (r < 0) {
-                                log_debug_errno(r, "Failed to enable controller %s for %s (%s): %m", n, p, fs);
+                                log_debug_errno(r, "Failed to %s controller %s for %s (%s): %m",
+                                                FLAGS_SET(mask, bit) ? "enable" : "disable", n, p, fs);
                                 clearerr(f);
+
+                                /* If we can't turn off a controller, leave it on in the reported resulting mask. This
+                                 * happens for example when we attempt to turn off a controller up in the tree that is
+                                 * used down in the tree. */
+                                if (!FLAGS_SET(mask, bit) && r == -EBUSY) /* You might wonder why we check for EBUSY
+                                                                           * only here, and not follow the same logic
+                                                                           * for other errors such as EINVAL or
+                                                                           * EOPNOTSUPP or anything else. That's
+                                                                           * because EBUSY indicates that the
+                                                                           * controllers is currently enabled and
+                                                                           * cannot be disabled because something down
+                                                                           * the hierarchy is still using it. Any other
+                                                                           * error most likely means something like "I
+                                                                           * never heard of this controller" or
+                                                                           * similar. In the former case it's hence
+                                                                           * safe to assume the controller is still on
+                                                                           * after the failed operation, while in the
+                                                                           * latter case it's safer to assume the
+                                                                           * controller is unknown and hence certainly
+                                                                           * not enabled. */
+                                        ret |= bit;
+                        } else {
+                                /* Otherwise, if we managed to turn on a controller, set the bit reflecting that. */
+                                if (FLAGS_SET(mask, bit))
+                                        ret |= bit;
                         }
                 }
         }
+
+        /* Let's return the precise set of controllers now enabled for the cgroup. */
+        if (ret_result_mask)
+                *ret_result_mask = ret;
 
         return 0;
 }
@@ -2637,6 +2710,7 @@ bool cg_is_unified_wanted(void) {
         int r;
         bool b;
         const bool is_default = DEFAULT_HIERARCHY == CGROUP_UNIFIED_ALL;
+        _cleanup_free_ char *c = NULL;
 
         /* If we have a cached value, return that. */
         if (wanted >= 0)
@@ -2647,11 +2721,19 @@ bool cg_is_unified_wanted(void) {
         if (cg_unified_flush() >= 0)
                 return (wanted = unified_cache >= CGROUP_UNIFIED_ALL);
 
-        /* Otherwise, let's see what the kernel command line has to say.
-         * Since checking is expensive, cache a non-error result. */
+        /* If we were explicitly passed systemd.unified_cgroup_hierarchy,
+         * respect that. */
         r = proc_cmdline_get_bool("systemd.unified_cgroup_hierarchy", &b);
+        if (r > 0)
+                return (wanted = b);
 
-        return (wanted = r > 0 ? b : is_default);
+        /* If we passed cgroup_no_v1=all with no other instructions, it seems
+         * highly unlikely that we want to use hybrid or legacy hierarchy. */
+        r = proc_cmdline_get_key("cgroup_no_v1", 0, &c);
+        if (r > 0 && streq_ptr(c, "all"))
+                return (wanted = true);
+
+        return (wanted = is_default);
 }
 
 bool cg_is_legacy_wanted(void) {
@@ -2661,13 +2743,13 @@ bool cg_is_legacy_wanted(void) {
         if (wanted >= 0)
                 return wanted;
 
-        /* Check if we have cgroups2 already mounted. */
+        /* Check if we have cgroup v2 already mounted. */
         if (cg_unified_flush() >= 0 &&
             unified_cache == CGROUP_UNIFIED_ALL)
                 return (wanted = false);
 
         /* Otherwise, assume that at least partial legacy is wanted,
-         * since cgroups2 should already be mounted at this point. */
+         * since cgroup v2 should already be mounted at this point. */
         return (wanted = true);
 }
 
@@ -2802,3 +2884,54 @@ static const char *cgroup_controller_table[_CGROUP_CONTROLLER_MAX] = {
 };
 
 DEFINE_STRING_TABLE_LOOKUP(cgroup_controller, CGroupController);
+
+CGroupMask get_cpu_accounting_mask(void) {
+        static CGroupMask needed_mask = (CGroupMask) -1;
+
+        /* On kernel ≥4.15 with unified hierarchy, cpu.stat's usage_usec is
+         * provided externally from the CPU controller, which means we don't
+         * need to enable the CPU controller just to get metrics. This is good,
+         * because enabling the CPU controller comes at a minor performance
+         * hit, especially when it's propagated deep into large hierarchies.
+         * There's also no separate CPU accounting controller available within
+         * a unified hierarchy.
+         *
+         * This combination of factors results in the desired cgroup mask to
+         * enable for CPU accounting varying as follows:
+         *
+         *                   ╔═════════════════════╤═════════════════════╗
+         *                   ║     Linux ≥4.15     │     Linux <4.15     ║
+         *   ╔═══════════════╬═════════════════════╪═════════════════════╣
+         *   ║ Unified       ║ nothing             │ CGROUP_MASK_CPU     ║
+         *   ╟───────────────╫─────────────────────┼─────────────────────╢
+         *   ║ Hybrid/Legacy ║ CGROUP_MASK_CPUACCT │ CGROUP_MASK_CPUACCT ║
+         *   ╚═══════════════╩═════════════════════╧═════════════════════╝
+         *
+         * We check kernel version here instead of manually checking whether
+         * cpu.stat is present for every cgroup, as that check in itself would
+         * already be fairly expensive.
+         *
+         * Kernels where this patch has been backported will therefore have the
+         * CPU controller enabled unnecessarily. This is more expensive than
+         * necessary, but harmless. ☺️
+         */
+
+        if (needed_mask == (CGroupMask) -1) {
+                if (cg_all_unified()) {
+                        struct utsname u;
+                        assert_se(uname(&u) >= 0);
+
+                        if (str_verscmp(u.release, "4.15") < 0)
+                                needed_mask = CGROUP_MASK_CPU;
+                        else
+                                needed_mask = 0;
+                } else
+                        needed_mask = CGROUP_MASK_CPUACCT;
+        }
+
+        return needed_mask;
+}
+
+bool cpu_accounting_is_cheap(void) {
+        return get_cpu_accounting_mask() == 0;
+}

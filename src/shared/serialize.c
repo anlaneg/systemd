@@ -1,12 +1,17 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
+#include <sys/mman.h>
+
 #include "alloc-util.h"
-#include "def.h"
 #include "env-util.h"
 #include "escape.h"
+#include "fileio.h"
+#include "missing.h"
 #include "parse-util.h"
+#include "process-util.h"
 #include "serialize.h"
 #include "strv.h"
+#include "tmpfile-util.h"
 
 int serialize_item(FILE *f, const char *key, const char *value) {
         assert(f);
@@ -153,10 +158,10 @@ int deserialize_dual_timestamp(const char *value, dual_timestamp *t) {
                 return -EINVAL;
 
         r = sscanf(value, "%" PRIu64 "%" PRIu64 "%n", &a, &b, &pos);
-        if (r != 2) {
-                log_debug("Failed to parse dual timestamp value \"%s\".", value);
-                return -EINVAL;
-        }
+        if (r != 2)
+                return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Failed to parse dual timestamp value \"%s\".",
+                                       value);
 
         if (value[pos] != '\0')
                 /* trailing garbage */
@@ -187,4 +192,23 @@ int deserialize_environment(const char *value, char ***list) {
 
         unescaped = NULL; /* now part of 'list' */
         return 0;
+}
+
+int open_serialization_fd(const char *ident) {
+        int fd;
+
+        fd = memfd_create(ident, MFD_CLOEXEC);
+        if (fd < 0) {
+                const char *path;
+
+                path = getpid_cached() == 1 ? "/run/systemd" : "/tmp";
+                fd = open_tmpfile_unlinkable(path, O_RDWR|O_CLOEXEC);
+                if (fd < 0)
+                        return fd;
+
+                log_debug("Serializing %s to %s.", ident, path);
+        } else
+                log_debug("Serializing %s to memfd.", ident);
+
+        return fd;
 }

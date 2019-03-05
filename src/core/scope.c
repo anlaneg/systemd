@@ -5,6 +5,7 @@
 
 #include "alloc-util.h"
 #include "dbus-scope.h"
+#include "dbus-unit.h"
 #include "load-dropin.h"
 #include "log.h"
 #include "scope.h"
@@ -81,6 +82,9 @@ static int scope_arm_timer(Scope *s, usec_t usec) {
 static void scope_set_state(Scope *s, ScopeState state) {
         ScopeState old_state;
         assert(s);
+
+        if (s->state != state)
+                bus_unit_send_pending_change_signal(UNIT(s), false);
 
         old_state = s->state;
         s->state = state;
@@ -240,9 +244,7 @@ static void scope_enter_dead(Scope *s, ScopeResult f) {
         if (s->result == SCOPE_SUCCESS)
                 s->result = f;
 
-        if (s->result != SCOPE_SUCCESS)
-                log_unit_warning(UNIT(s), "Failed with result '%s'.", scope_result_to_string(s->result));
-
+        unit_log_result(UNIT(s), s->result == SCOPE_SUCCESS, scope_result_to_string(s->result));
         scope_set_state(s, s->result != SCOPE_SUCCESS ? SCOPE_FAILED : SCOPE_DEAD);
 }
 

@@ -6,8 +6,9 @@
 
 #include "alloc-util.h"
 #include "hwdb-util.h"
+#include "main-func.h"
+#include "pretty-print.h"
 #include "selinux-util.h"
-#include "terminal-util.h"
 #include "util.h"
 #include "verbs.h"
 
@@ -110,7 +111,7 @@ static int hwdb_main(int argc, char *argv[]) {
         return dispatch_verb(argc, argv, verbs, NULL);
 }
 
-int main (int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         int r;
 
         log_parse_environment();
@@ -118,12 +119,11 @@ int main (int argc, char *argv[]) {
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
         mac_selinux_init();
 
-        r = hwdb_main(argc, argv);
-
-finish:
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return hwdb_main(argc, argv);
 }
+
+DEFINE_MAIN_FUNCTION(run);

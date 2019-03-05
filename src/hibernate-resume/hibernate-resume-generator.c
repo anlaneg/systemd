@@ -5,7 +5,9 @@
 
 #include "alloc-util.h"
 #include "fstab-util.h"
+#include "generator.h"
 #include "log.h"
+#include "main-func.h"
 #include "mkdir.h"
 #include "proc-cmdline.h"
 #include "special.h"
@@ -16,6 +18,8 @@
 static const char *arg_dest = "/tmp";
 static char *arg_resume_device = NULL;
 static bool arg_noresume = false;
+
+STATIC_DESTRUCTOR_REGISTER(arg_resume_device, freep);
 
 static int parse_proc_cmdline_item(const char *key, const char *value, void *data) {
 
@@ -65,20 +69,14 @@ static int process_resume(void) {
         return 0;
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         int r = 0;
 
-        log_set_prohibit_ipc(true);
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        log_setup_generator();
 
-        umask(0022);
-
-        if (argc > 1 && argc != 4) {
-                log_error("This program takes three or no arguments.");
-                return EXIT_FAILURE;
-        }
+        if (argc > 1 && argc != 4)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "This program takes three or no arguments.");
 
         if (argc > 1)
                 arg_dest = argv[1];
@@ -86,7 +84,7 @@ int main(int argc, char *argv[]) {
         /* Don't even consider resuming outside of initramfs. */
         if (!in_initrd()) {
                 log_debug("Not running in an initrd, quitting.");
-                return EXIT_SUCCESS;
+                return 0;
         }
 
         r = proc_cmdline_parse(parse_proc_cmdline_item, NULL, 0);
@@ -95,11 +93,10 @@ int main(int argc, char *argv[]) {
 
         if (arg_noresume) {
                 log_notice("Found \"noresume\" on the kernel command line, quitting.");
-                return EXIT_SUCCESS;
+                return 0;
         }
 
-        r = process_resume();
-        free(arg_resume_device);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return process_resume();
 }
+
+DEFINE_MAIN_FUNCTION(run);

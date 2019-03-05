@@ -10,7 +10,6 @@
 #include "chattr-util.h"
 #include "copy.h"
 #include "fd-util.h"
-#include "fileio.h"
 #include "fs-util.h"
 #include "hostname-util.h"
 #include "import-common.h"
@@ -24,6 +23,7 @@
 #include "ratelimit.h"
 #include "rm-rf.h"
 #include "string-util.h"
+#include "tmpfile-util.h"
 #include "util.h"
 
 struct RawImport {
@@ -37,7 +37,6 @@ struct RawImport {
         char *local;
         bool force_local;
         bool read_only;
-        bool grow_machine_directory;
 
         char *temp_path;
         char *final_path;
@@ -46,8 +45,6 @@ struct RawImport {
         int output_fd;
 
         ImportCompress compress;
-
-        uint64_t written_since_last_grow;
 
         sd_event_source *input_event_source;
 
@@ -94,26 +91,29 @@ int raw_import_new(
                 void *userdata) {
 
         _cleanup_(raw_import_unrefp) RawImport *i = NULL;
+        _cleanup_free_ char *root = NULL;
         int r;
 
         assert(ret);
 
-        i = new0(RawImport, 1);
+        root = strdup(image_root ?: "/var/lib/machines");
+        if (!root)
+                return -ENOMEM;
+
+        i = new(RawImport, 1);
         if (!i)
                 return -ENOMEM;
 
-        i->input_fd = i->output_fd = -1;
-        i->on_finished = on_finished;
-        i->userdata = userdata;
+        *i = (RawImport) {
+                .input_fd = -1,
+                .output_fd = -1,
+                .on_finished = on_finished,
+                .userdata = userdata,
+                .last_percent = (unsigned) -1,
+                .image_root = TAKE_PTR(root),
+        };
 
         RATELIMIT_INIT(i->progress_rate_limit, 100 * USEC_PER_MSEC, 1);
-        i->last_percent = (unsigned) -1;
-
-        i->image_root = strdup(image_root ?: "/var/lib/machines");
-        if (!i->image_root)
-                return -ENOMEM;
-
-        i->grow_machine_directory = path_startswith(i->image_root, "/var/lib/machines");
 
         if (event)
                 i->event = sd_event_ref(event);
@@ -215,7 +215,7 @@ static int raw_import_finish(RawImport *i) {
                 return r;
 
         if (S_ISREG(i->st.st_mode)) {
-                (void) copy_times(i->input_fd, i->output_fd);
+                (void) copy_times(i->input_fd, i->output_fd, COPY_CRTIME);
                 (void) copy_xattr(i->input_fd, i->output_fd);
         }
 
@@ -300,11 +300,6 @@ static int raw_import_write(const void *p, size_t sz, void *userdata) {
         RawImport *i = userdata;
         ssize_t n;
 
-        if (i->grow_machine_directory && i->written_since_last_grow >= GROW_INTERVAL_BYTES) {
-                i->written_since_last_grow = 0;
-                grow_machine_directory();
-        }
-
         n = sparse_write(i->output_fd, p, sz, 64);
         if (n < 0)
                 return (int) n;
@@ -312,7 +307,6 @@ static int raw_import_write(const void *p, size_t sz, void *userdata) {
                 return -EIO;
 
         i->written_uncompressed += sz;
-        i->written_since_last_grow += sz;
 
         return 0;
 }

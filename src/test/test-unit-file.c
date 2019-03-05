@@ -7,12 +7,12 @@
 #include <sys/capability.h>
 #include <unistd.h>
 
-#include "alloc-util.h"
 #include "all-units.h"
+#include "alloc-util.h"
 #include "capability-util.h"
 #include "conf-parser.h"
+#include "env-file.h"
 #include "fd-util.h"
-#include "fileio.h"
 #include "fs-util.h"
 #include "hashmap.h"
 #include "hostname-util.h"
@@ -26,6 +26,7 @@
 #include "strv.h"
 #include "test-helper.h"
 #include "tests.h"
+#include "tmpfile-util.h"
 #include "user-util.h"
 #include "util.h"
 
@@ -529,9 +530,9 @@ static void test_load_env_file_1(void) {
 
         fd = mkostemp_safe(name);
         assert_se(fd >= 0);
-        assert_se(write(fd, env_file_1, sizeof(env_file_1)) == sizeof(env_file_1));
+        assert_se(write(fd, env_file_1, strlen(env_file_1)) == strlen(env_file_1));
 
-        r = load_env_file(NULL, name, NULL, &data);
+        r = load_env_file(NULL, name, &data);
         assert_se(r == 0);
         assert_se(streq(data[0], "a=a"));
         assert_se(streq(data[1], "b=bc"));
@@ -551,9 +552,9 @@ static void test_load_env_file_2(void) {
 
         fd = mkostemp_safe(name);
         assert_se(fd >= 0);
-        assert_se(write(fd, env_file_2, sizeof(env_file_2)) == sizeof(env_file_2));
+        assert_se(write(fd, env_file_2, strlen(env_file_2)) == strlen(env_file_2));
 
-        r = load_env_file(NULL, name, NULL, &data);
+        r = load_env_file(NULL, name, &data);
         assert_se(r == 0);
         assert_se(streq(data[0], "a=a"));
         assert_se(data[1] == NULL);
@@ -568,9 +569,9 @@ static void test_load_env_file_3(void) {
 
         fd = mkostemp_safe(name);
         assert_se(fd >= 0);
-        assert_se(write(fd, env_file_3, sizeof(env_file_3)) == sizeof(env_file_3));
+        assert_se(write(fd, env_file_3, strlen(env_file_3)) == strlen(env_file_3));
 
-        r = load_env_file(NULL, name, NULL, &data);
+        r = load_env_file(NULL, name, &data);
         assert_se(r == 0);
         assert_se(data == NULL);
 }
@@ -583,9 +584,9 @@ static void test_load_env_file_4(void) {
 
         fd = mkostemp_safe(name);
         assert_se(fd >= 0);
-        assert_se(write(fd, env_file_4, sizeof(env_file_4)) == sizeof(env_file_4));
+        assert_se(write(fd, env_file_4, strlen(env_file_4)) == strlen(env_file_4));
 
-        r = load_env_file(NULL, name, NULL, &data);
+        r = load_env_file(NULL, name, &data);
         assert_se(r == 0);
         assert_se(streq(data[0], "HWMON_MODULES=coretemp f71882fg"));
         assert_se(streq(data[1], "MODULE_0=coretemp"));
@@ -602,9 +603,9 @@ static void test_load_env_file_5(void) {
 
         fd = mkostemp_safe(name);
         assert_se(fd >= 0);
-        assert_se(write(fd, env_file_5, sizeof(env_file_5)) == sizeof(env_file_5));
+        assert_se(write(fd, env_file_5, strlen(env_file_5)) == strlen(env_file_5));
 
-        r = load_env_file(NULL, name, NULL, &data);
+        r = load_env_file(NULL, name, &data);
         assert_se(r == 0);
         assert_se(streq(data[0], "a="));
         assert_se(streq(data[1], "b="));

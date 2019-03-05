@@ -41,6 +41,7 @@
 #include "strv.h"
 #include "terminal-util.h"
 #include "time-util.h"
+#include "tmpfile-util.h"
 #include "umask-util.h"
 #include "utf8.h"
 #include "util.h"
@@ -155,7 +156,7 @@ static int add_to_keyring_and_log(const char *keyname, AskPasswordFlags flags, c
         return 0;
 }
 
-int ask_password_keyring(const char *keyname, AskPasswordFlags flags, char ***ret) {
+static int ask_password_keyring(const char *keyname, AskPasswordFlags flags, char ***ret) {
 
         key_serial_t serial;
         int r;
@@ -340,7 +341,7 @@ int ask_password_tty(
                         goto finish;
                 }
 
-                if (notify >= 0 && pollfd[POLL_INOTIFY].revents != 0) {
+                if (notify >= 0 && pollfd[POLL_INOTIFY].revents != 0 && keyname) {
                         (void) flush_fd(notify);
 
                         r = ask_password_keyring(keyname, flags, ret);
@@ -384,13 +385,13 @@ int ask_password_tty(
                                 if (!(flags & ASK_PASSWORD_SILENT))
                                         backspace_chars(ttyfd, 1);
 
-                                /* Remove a full UTF-8 codepoint from the end. For that, figure out where the last one
-                                 * begins */
+                                /* Remove a full UTF-8 codepoint from the end. For that, figure out where the
+                                 * last one begins */
                                 q = 0;
                                 for (;;) {
                                         size_t z;
 
-                                        z = utf8_encoded_valid_unichar(passphrase + q);
+                                        z = utf8_encoded_valid_unichar(passphrase + q, (size_t) -1);
                                         if (z == 0) {
                                                 q = (size_t) -1; /* Invalid UTF8! */
                                                 break;
@@ -409,8 +410,8 @@ int ask_password_tty(
 
                                 flags |= ASK_PASSWORD_SILENT;
 
-                                /* There are two ways to enter silent mode. Either by pressing backspace as first key
-                                 * (and only as first key), or ... */
+                                /* There are two ways to enter silent mode. Either by pressing backspace as
+                                 * first key (and only as first key), or ... */
 
                                 if (ttyfd >= 0)
                                         (void) loop_write(ttyfd, "(no echo) ", 10, false);
@@ -439,10 +440,13 @@ int ask_password_tty(
 
                         if (!(flags & ASK_PASSWORD_SILENT) && ttyfd >= 0) {
                                 /* Check if we got a complete UTF-8 character now. If so, let's output one '*'. */
-                                n = utf8_encoded_valid_unichar(passphrase + codepoint);
+                                n = utf8_encoded_valid_unichar(passphrase + codepoint, (size_t) -1);
                                 if (n >= 0) {
+                                        if (flags & ASK_PASSWORD_ECHO)
+                                                (void) loop_write(ttyfd, passphrase + codepoint, n, false);
+                                        else
+                                                (void) loop_write(ttyfd, "*", 1, false);
                                         codepoint = p;
-                                        (void) loop_write(ttyfd, (flags & ASK_PASSWORD_ECHO) ? &c : "*", 1, false);
                                 }
                         }
 
@@ -460,11 +464,9 @@ int ask_password_tty(
                 goto finish;
         }
 
-        l = strv_new(x, NULL);
-        if (!l) {
-                r = -ENOMEM;
+        r = strv_consume(&l, x);
+        if (r < 0)
                 goto finish;
-        }
 
         if (keyname)
                 (void) add_to_keyring_and_log(keyname, flags, l);
@@ -700,9 +702,7 @@ int ask_password_agent(
                         goto finish;
                 }
 
-                zero(iovec);
-                iovec.iov_base = passphrase;
-                iovec.iov_len = sizeof(passphrase);
+                iovec = IOVEC_MAKE(passphrase, sizeof(passphrase));
 
                 zero(control);
                 zero(msghdr);
@@ -744,7 +744,7 @@ int ask_password_agent(
                 if (passphrase[0] == '+') {
                         /* An empty message refers to the empty password */
                         if (n == 1)
-                                l = strv_new("", NULL);
+                                l = strv_new("");
                         else
                                 l = strv_parse_nulstr(passphrase+1, n-1);
                         explicit_bzero_safe(passphrase, n);

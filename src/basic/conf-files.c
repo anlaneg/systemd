@@ -195,25 +195,29 @@ int conf_files_insert(char ***strv, const char *root, char **dirs, const char *p
          * - do nothing if our new entry matches the existing entry,
          * - replace the existing entry if our new entry has higher priority.
          */
-        size_t i;
+        size_t i, n;
         char *t;
         int r;
 
-        for (i = 0; i < strv_length(*strv); i++) {
+        n = strv_length(*strv);
+        for (i = 0; i < n; i++) {
                 int c;
 
                 c = base_cmp((char* const*) *strv + i, (char* const*) &path);
                 if (c == 0) {
                         char **dir;
 
-                        /* Oh, we found our spot and it already contains something. */
+                        /* Oh, there already is an entry with a matching name (the last component). */
+
                         STRV_FOREACH(dir, dirs) {
+                                _cleanup_free_ char *rdir = NULL;
                                 char *p1, *p2;
 
-                                p1 = path_startswith((*strv)[i], root);
-                                if (p1)
-                                        /* Skip "/" in *dir, because p1 is without "/" too */
-                                        p1 = path_startswith(p1, *dir + 1);
+                                rdir = prefix_root(root, *dir);
+                                if (!rdir)
+                                        return -ENOMEM;
+
+                                p1 = path_startswith((*strv)[i], rdir);
                                 if (p1)
                                         /* Existing entry with higher priority
                                          * or same priority, no need to do anything. */
@@ -222,7 +226,8 @@ int conf_files_insert(char ***strv, const char *root, char **dirs, const char *p
                                 p2 = path_startswith(path, *dir);
                                 if (p2) {
                                         /* Our new entry has higher priority */
-                                        t = path_join(root, path, NULL);
+
+                                        t = prefix_root(root, path);
                                         if (!t)
                                                 return log_oom();
 
@@ -238,26 +243,16 @@ int conf_files_insert(char ***strv, const char *root, char **dirs, const char *p
                 /* … we are not there yet, let's continue */
         }
 
-        t = path_join(root, path, NULL);
+        /* The new file has lower priority than all the existing entries */
+        t = prefix_root(root, path);
         if (!t)
-                return log_oom();
+                return -ENOMEM;
 
         r = strv_insert(strv, i, t);
         if (r < 0)
                 free(t);
+
         return r;
-}
-
-int conf_files_insert_nulstr(char ***strv, const char *root, const char *dirs, const char *path) {
-        _cleanup_strv_free_ char **d = NULL;
-
-        assert(strv);
-
-        d = strv_split_nulstr(dirs);
-        if (!d)
-                return -ENOMEM;
-
-        return conf_files_insert(strv, root, d, path);
 }
 
 //在dirs指定的目录中查找所有以suffix结尾的文件，将其存放在strv中
@@ -327,7 +322,7 @@ int conf_files_list_with_replacement(
                 if (r < 0)
                         return log_error_errno(r, "Failed to extend config file list: %m");
 
-                p = path_join(root, replacement, NULL);
+                p = prefix_root(root, replacement);
                 if (!p)
                         return log_oom();
         }
@@ -336,37 +331,4 @@ int conf_files_list_with_replacement(
         if (replace_file)
                 *replace_file = TAKE_PTR(p);
         return 0;
-}
-
-int conf_files_cat(const char *root, const char *name) {
-        _cleanup_strv_free_ char **dirs = NULL, **files = NULL;
-        _cleanup_free_ char *path = NULL;
-        const char *dir;
-        char **t;
-        int r;
-
-        NULSTR_FOREACH(dir, CONF_PATHS_NULSTR("")) {
-                assert(endswith(dir, "/"));
-                r = strv_extendf(&dirs, "%s%s.d", dir, name);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to build directory list: %m");
-        }
-
-        r = conf_files_list_strv(&files, ".conf", root, 0, (const char* const*) dirs);
-        if (r < 0)
-                return log_error_errno(r, "Failed to query file list: %m");
-
-        path = path_join(root, "/etc", name);
-        if (!path)
-                return log_oom();
-
-        if (DEBUG_LOGGING) {
-                log_debug("Looking for configuration in:");
-                log_debug("   %s", path);
-                STRV_FOREACH(t, dirs)
-                        log_debug("   %s/*.conf", *t);
-        }
-
-        /* show */
-        return cat_files(path, files, CAT_FLAGS_MAIN_FILE_OPTIONAL);
 }

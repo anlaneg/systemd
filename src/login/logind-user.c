@@ -11,6 +11,7 @@
 #include "bus-util.h"
 #include "cgroup-util.h"
 #include "clean-ipc.h"
+#include "env-file.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -28,6 +29,7 @@
 #include "stdio-util.h"
 #include "string-table.h"
 #include "strv.h"
+#include "tmpfile-util.h"
 #include "unit-name.h"
 #include "user-util.h"
 #include "util.h"
@@ -312,13 +314,12 @@ int user_load(User *u) {
 
         assert(u);
 
-        r = parse_env_file(NULL, u->state_file, NEWLINE,
+        r = parse_env_file(NULL, u->state_file,
                            "SERVICE_JOB",            &u->service_job,
                            "STOPPING",               &stopping,
                            "REALTIME",               &realtime,
                            "MONOTONIC",              &monotonic,
-                           "LAST_SESSION_TIMESTAMP", &last_session_timestamp,
-                           NULL);
+                           "LAST_SESSION_TIMESTAMP", &last_session_timestamp);
         if (r == -ENOENT)
                 return 0;
         if (r < 0)
@@ -356,7 +357,8 @@ static void user_start_service(User *u) {
 
         r = manager_start_unit(u->manager, u->service, &error, &u->service_job);
         if (r < 0)
-                log_warning_errno(r, "Failed to start user service '%s', ignoring: %s", u->service, bus_error_message(&error, r));
+                log_full_errno(sd_bus_error_has_name(&error, BUS_ERROR_UNIT_MASKED) ? LOG_DEBUG : LOG_WARNING, r,
+                               "Failed to start user service '%s', ignoring: %s", u->service, bus_error_message(&error, r));
 }
 
 int user_start(User *u) {

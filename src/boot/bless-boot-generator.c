@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "efivars.h"
+#include "generator.h"
 #include "log.h"
 #include "mkdir.h"
 #include "special.h"
@@ -21,12 +22,7 @@ static const char *arg_dest = "/tmp";
 int main(int argc, char *argv[]) {
         const char *p;
 
-        log_set_prohibit_ipc(true);
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
-
-        umask(0022);
+        log_setup_generator();
 
         if (argc > 1 && argc != 4) {
                 log_error("This program takes three or no arguments.");

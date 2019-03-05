@@ -13,6 +13,7 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "macro.h"
+#include "missing_prctl.h"
 #include "parse-util.h"
 #include "tests.h"
 #include "util.h"
@@ -20,8 +21,13 @@
 static uid_t test_uid = -1;
 static gid_t test_gid = -1;
 
+#if HAS_FEATURE_ADDRESS_SANITIZER
+/* Keep CAP_SYS_PTRACE when running under Address Sanitizer */
+static const uint64_t test_flags = UINT64_C(1) << CAP_SYS_PTRACE;
+#else
 /* We keep CAP_DAC_OVERRIDE to avoid errors with gcov when doing test coverage */
-static uint64_t test_flags = 1ULL << CAP_DAC_OVERRIDE;
+static const uint64_t test_flags = UINT64_C(1) << CAP_DAC_OVERRIDE;
+#endif
 
 /* verify cap_last_cap() against /proc/sys/kernel/cap_last_cap */
 static void test_last_cap_file(void) {
@@ -180,8 +186,6 @@ static void test_update_inherited_set(void) {
 
         caps = cap_get_proc();
         assert_se(caps);
-        assert_se(!cap_get_flag(caps, CAP_CHOWN, CAP_INHERITABLE, &fv));
-        assert(fv == CAP_CLEAR);
 
         set = (UINT64_C(1) << CAP_CHOWN);
 
@@ -196,12 +200,6 @@ static void test_set_ambient_caps(void) {
         cap_t caps;
         uint64_t set = 0;
         cap_flag_value_t fv;
-
-        caps = cap_get_proc();
-        assert_se(caps);
-        assert_se(!cap_get_flag(caps, CAP_CHOWN, CAP_INHERITABLE, &fv));
-        assert(fv == CAP_CLEAR);
-        cap_free(caps);
 
         assert_se(prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_CHOWN, 0, 0) == 0);
 

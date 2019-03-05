@@ -387,10 +387,8 @@ DnsQuery *dns_query_free(DnsQuery *q) {
 
         if (q->request_dns_stream) {
                 /* Detach the stream from our query, in case something else keeps a reference to it. */
-                q->request_dns_stream->complete = NULL;
-                q->request_dns_stream->on_packet = NULL;
-                q->request_dns_stream->query = NULL;
-                dns_stream_unref(q->request_dns_stream);
+                (void) set_remove(q->request_dns_stream->queries, q);
+                q->request_dns_stream = dns_stream_unref(q->request_dns_stream);
         }
 
         free(q->request_address_string);
@@ -682,22 +680,15 @@ int dns_query_go(DnsQuery *q) {
                         continue;
 
                 match = dns_scope_good_domain(s, q->ifindex, q->flags, name);
-                if (match < 0)
-                        return match;
-
-                if (match == DNS_SCOPE_NO)
+                if (match < 0) {
+                        log_debug("Couldn't check if '%s' matches against scope, ignoring.", name);
                         continue;
+                }
 
-                found = match;
-
-                if (match == DNS_SCOPE_YES) {
+                if (match > found) { /* Does this match better? If so, remember how well it matched, and the first one
+                                      * that matches this well */
+                        found = match;
                         first = s;
-                        break;
-                } else {
-                        assert(match == DNS_SCOPE_MAYBE);
-
-                        if (!first)
-                                first = s;
                 }
         }
 
@@ -725,10 +716,12 @@ int dns_query_go(DnsQuery *q) {
                         continue;
 
                 match = dns_scope_good_domain(s, q->ifindex, q->flags, name);
-                if (match < 0)
-                        goto fail;
+                if (match < 0) {
+                        log_debug("Couldn't check if '%s' matches against scope, ignoring.", name);
+                        continue;
+                }
 
-                if (match != found)
+                if (match < found)
                         continue;
 
                 r = dns_query_add_candidate(q, s);

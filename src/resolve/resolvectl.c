@@ -15,9 +15,12 @@
 #include "escape.h"
 #include "gcrypt-util.h"
 #include "in-addr-util.h"
+#include "main-func.h"
+#include "missing_network.h"
 #include "netlink-util.h"
 #include "pager.h"
 #include "parse-util.h"
+#include "pretty-print.h"
 #include "resolvconf-compat.h"
 #include "resolvectl.h"
 #include "resolved-def.h"
@@ -34,7 +37,7 @@ static uint16_t arg_type = 0;
 static uint16_t arg_class = 0;
 static bool arg_legend = true;
 static uint64_t arg_flags = 0;
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
 bool arg_ifindex_permissive = false; /* If true, don't generate an error if the specified interface index doesn't exist */
 static const char *arg_service_family = NULL;
 
@@ -55,10 +58,16 @@ static const char *arg_set_dns_over_tls = NULL;
 static const char *arg_set_dnssec = NULL;
 static char **arg_set_nta = NULL;
 
+STATIC_DESTRUCTOR_REGISTER(arg_ifname, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_set_dns, strv_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_set_domain, strv_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_set_nta, strv_freep);
+
 typedef enum StatusMode {
         STATUS_ALL,
         STATUS_DNS,
         STATUS_DOMAIN,
+        STATUS_DEFAULT_ROUTE,
         STATUS_LLMNR,
         STATUS_MDNS,
         STATUS_PRIVATE,
@@ -80,40 +89,26 @@ static int parse_ifindex_and_warn(const char *s) {
         return ifi;
 }
 
-int ifname_mangle(const char *s, bool allow_loopback) {
+int ifname_mangle(const char *s) {
         _cleanup_free_ char *iface = NULL;
         const char *dot;
-        int r;
+        int ifi;
 
         assert(s);
 
-        if (arg_ifname) {
-                assert(arg_ifindex >= 0);
-
-                if (!allow_loopback && arg_ifindex == LOOPBACK_IFINDEX) {
-                        log_error("Interface can't be the loopback interface (lo). Sorry.");
-                        return -EINVAL;
-                }
-
-                return 1;
-        }
-
         dot = strchr(s, '.');
         if (dot) {
-                iface = strndup(s, dot - s);
-                if (!iface)
-                        return log_oom();
-
                 log_debug("Ignoring protocol specifier '%s'.", dot + 1);
-        } else {
-                iface = strdup(s);
-                if (!iface)
-                        return log_oom();
-        }
+                iface = strndup(s, dot - s);
 
-        if (parse_ifindex(iface, &r) < 0) {
-                r = if_nametoindex(iface);
-                if (r <= 0) {
+        } else
+                iface = strdup(s);
+        if (!iface)
+                return log_oom();
+
+        if (parse_ifindex(iface, &ifi) < 0) {
+                ifi = if_nametoindex(iface);
+                if (ifi <= 0) {
                         if (errno == ENODEV && arg_ifindex_permissive) {
                                 log_debug("Interface '%s' not found, but -f specified, ignoring.", iface);
                                 return 0; /* done */
@@ -123,13 +118,13 @@ int ifname_mangle(const char *s, bool allow_loopback) {
                 }
         }
 
-        if (!allow_loopback && r == LOOPBACK_IFINDEX) {
-                log_error("Interface can't be the loopback interface (lo). Sorry.");
+        if (arg_ifindex > 0 && arg_ifindex != ifi) {
+                log_error("Specified multiple different interfaces. Refusing.");
                 return -EINVAL;
         }
 
-        arg_ifindex = r;
-        arg_ifname = TAKE_PTR(iface);
+        arg_ifindex = ifi;
+        free_and_replace(arg_ifname, iface);
 
         return 1;
 }
@@ -143,7 +138,7 @@ static void print_source(uint64_t flags, usec_t rtt) {
         if (flags == 0)
                 return;
 
-        fputs("\n-- Information acquired via", stdout);
+        printf("\n%s-- Information acquired via", ansi_grey());
 
         if (flags != 0)
                 printf(" protocol%s%s%s%s%s",
@@ -155,12 +150,24 @@ static void print_source(uint64_t flags, usec_t rtt) {
 
         assert_se(format_timespan(rtt_str, sizeof(rtt_str), rtt, 100));
 
-        printf(" in %s", rtt_str);
+        printf(" in %s.%s\n"
+               "%s-- Data is authenticated: %s%s\n",
+               rtt_str, ansi_normal(),
+               ansi_grey(), yes_no(flags & SD_RESOLVED_AUTHENTICATED), ansi_normal());
+}
 
-        fputc('.', stdout);
-        fputc('\n', stdout);
+static void print_ifindex_comment(int printed_so_far, int ifindex) {
+        char ifname[IF_NAMESIZE];
 
-        printf("-- Data is authenticated: %s\n", yes_no(flags & SD_RESOLVED_AUTHENTICATED));
+        if (ifindex <= 0)
+                return;
+
+        if (!if_indextoname(ifindex, ifname))
+                log_warning_errno(errno, "Failed to resolve interface name for index %i, ignoring: %m", ifindex);
+        else
+                printf("%*s%s-- link: %s%s",
+                       60 > printed_so_far ? 60 - printed_so_far : 0, " ", /* Align comment to the 60th column */
+                       ansi_grey(), ifname, ansi_normal());
 }
 
 static int resolve_host(sd_bus *bus, const char *name) {
@@ -204,8 +211,7 @@ static int resolve_host(sd_bus *bus, const char *name) {
 
         while ((r = sd_bus_message_enter_container(reply, 'r', "iiay")) > 0) {
                 _cleanup_free_ char *pretty = NULL;
-                char ifname[IF_NAMESIZE] = "";
-                int ifindex, family;
+                int ifindex, family, k;
                 const void *a;
                 size_t sz;
 
@@ -233,17 +239,16 @@ static int resolve_host(sd_bus *bus, const char *name) {
                         return -EINVAL;
                 }
 
-                if (ifindex > 0 && !if_indextoname(ifindex, ifname))
-                        log_warning_errno(errno, "Failed to resolve interface name for index %i: %m", ifindex);
-
                 r = in_addr_ifindex_to_string(family, a, ifindex, &pretty);
                 if (r < 0)
                         return log_error_errno(r, "Failed to print address for %s: %m", name);
 
-                printf("%*s%s %s%s%s\n",
-                       (int) strlen(name), c == 0 ? name : "", c == 0 ? ":" : " ",
-                       pretty,
-                       isempty(ifname) ? "" : "%", ifname);
+                k = printf("%*s%s %s%s%s",
+                           (int) strlen(name), c == 0 ? name : "", c == 0 ? ":" : " ",
+                           ansi_highlight(), pretty, ansi_normal());
+
+                print_ifindex_comment(k, ifindex);
+                fputc('\n', stdout);
 
                 c++;
         }
@@ -277,7 +282,6 @@ static int resolve_address(sd_bus *bus, int family, const union in_addr_union *a
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *req = NULL, *reply = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_free_ char *pretty = NULL;
-        char ifname[IF_NAMESIZE] = "";
         uint64_t flags;
         unsigned c = 0;
         usec_t ts;
@@ -294,10 +298,7 @@ static int resolve_address(sd_bus *bus, int family, const union in_addr_union *a
         if (r < 0)
                 return log_oom();
 
-        if (ifindex > 0 && !if_indextoname(ifindex, ifname))
-                return log_error_errno(errno, "Failed to resolve interface name for index %i: %m", ifindex);
-
-        log_debug("Resolving %s%s%s.", pretty, isempty(ifname) ? "" : "%", ifname);
+        log_debug("Resolving %s.", pretty);
 
         r = sd_bus_message_new_method_call(
                         bus,
@@ -335,6 +336,7 @@ static int resolve_address(sd_bus *bus, int family, const union in_addr_union *a
 
         while ((r = sd_bus_message_enter_container(reply, 'r', "is")) > 0) {
                 const char *n;
+                int k;
 
                 assert_cc(sizeof(int) == sizeof(int32_t));
 
@@ -346,16 +348,13 @@ static int resolve_address(sd_bus *bus, int family, const union in_addr_union *a
                 if (r < 0)
                         return r;
 
-                ifname[0] = 0;
-                if (ifindex > 0 && !if_indextoname(ifindex, ifname))
-                        log_warning_errno(errno, "Failed to resolve interface name for index %i: %m", ifindex);
+                k = printf("%*s%s %s%s%s",
+                           (int) strlen(pretty), c == 0 ? pretty : "",
+                           c == 0 ? ":" : " ",
+                           ansi_highlight(), n, ansi_normal());
 
-                printf("%*s%*s%*s%s %s\n",
-                       (int) strlen(pretty), c == 0 ? pretty : "",
-                       isempty(ifname) ? 0 : 1, c > 0 || isempty(ifname) ? "" : "%",
-                       (int) strlen(ifname), c == 0 ? ifname : "",
-                       c == 0 ? ":" : " ",
-                       n);
+                print_ifindex_comment(k, ifindex);
+                fputc('\n', stdout);
 
                 c++;
         }
@@ -384,7 +383,6 @@ static int output_rr_packet(const void *d, size_t l, int ifindex) {
         _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *rr = NULL;
         _cleanup_(dns_packet_unrefp) DnsPacket *p = NULL;
         int r;
-        char ifname[IF_NAMESIZE] = "";
 
         r = dns_packet_new(&p, DNS_PROTOCOL_DNS, 0, DNS_PACKET_SIZE_MAX);
         if (r < 0)
@@ -410,15 +408,15 @@ static int output_rr_packet(const void *d, size_t l, int ifindex) {
                 fwrite(data, 1, k, stdout);
         } else {
                 const char *s;
+                int k;
 
                 s = dns_resource_record_to_string(rr);
                 if (!s)
                         return log_oom();
 
-                if (ifindex > 0 && !if_indextoname(ifindex, ifname))
-                        log_warning_errno(errno, "Failed to resolve interface name for index %i: %m", ifindex);
-
-                printf("%s%s%s\n", s, isempty(ifname) ? "" : " # interface ", ifname);
+                k = printf("%s", s);
+                print_ifindex_comment(k, ifindex);
+                fputc('\n', stdout);
         }
 
         return 0;
@@ -578,10 +576,9 @@ static int resolve_rfc4501(sd_bus *bus, const char *name) {
                                 _cleanup_free_ char *t = NULL;
                                 const char *e;
 
-                                if (class != 0) {
-                                        log_error("DNS class specified twice.");
-                                        return -EINVAL;
-                                }
+                                if (class != 0)
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "DNS class specified twice.");
 
                                 e = strchrnul(f, ';');
                                 t = strndup(f, e - f);
@@ -589,10 +586,9 @@ static int resolve_rfc4501(sd_bus *bus, const char *name) {
                                         return log_oom();
 
                                 r = dns_class_from_string(t);
-                                if (r < 0) {
-                                        log_error("Unknown DNS class %s.", t);
-                                        return -EINVAL;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Unknown DNS class %s.", t);
 
                                 class = r;
 
@@ -609,10 +605,9 @@ static int resolve_rfc4501(sd_bus *bus, const char *name) {
                                 _cleanup_free_ char *t = NULL;
                                 const char *e;
 
-                                if (type != 0) {
-                                        log_error("DNS type specified twice.");
-                                        return -EINVAL;
-                                }
+                                if (type != 0)
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "DNS type specified twice.");
 
                                 e = strchrnul(f, ';');
                                 t = strndup(f, e - f);
@@ -620,10 +615,9 @@ static int resolve_rfc4501(sd_bus *bus, const char *name) {
                                         return log_oom();
 
                                 r = dns_type_from_string(t);
-                                if (r < 0) {
-                                        log_error("Unknown DNS type %s.", t);
-                                        return -EINVAL;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Unknown DNS type %s.", t);
 
                                 type = r;
 
@@ -648,8 +642,8 @@ static int resolve_rfc4501(sd_bus *bus, const char *name) {
         return resolve_record(bus, n, class, type, true);
 
 invalid:
-        log_error("Invalid DNS URI: %s", name);
-        return -EINVAL;
+        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                               "Invalid DNS URI: %s", name);
 }
 
 static int verb_query(int argc, char **argv, void *userdata) {
@@ -766,8 +760,7 @@ static int resolve_service(sd_bus *bus, const char *name, const char *type, cons
 
                 while ((r = sd_bus_message_enter_container(reply, 'r', "iiay")) > 0) {
                         _cleanup_free_ char *pretty = NULL;
-                        char ifname[IF_NAMESIZE] = "";
-                        int ifindex, family;
+                        int ifindex, family, k;
                         const void *a;
 
                         assert_cc(sizeof(int) == sizeof(int32_t));
@@ -794,14 +787,13 @@ static int resolve_service(sd_bus *bus, const char *name, const char *type, cons
                                 return -EINVAL;
                         }
 
-                        if (ifindex > 0 && !if_indextoname(ifindex, ifname))
-                                log_warning_errno(errno, "Failed to resolve interface name for index %i: %m", ifindex);
-
-                        r = in_addr_to_string(family, a, &pretty);
+                        r = in_addr_ifindex_to_string(family, a, ifindex, &pretty);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to print address for %s: %m", name);
 
-                        printf("%*s%s%s%s\n", (int) indent, "", pretty, isempty(ifname) ? "" : "%s", ifname);
+                        k = printf("%*s%s", (int) indent, "", pretty);
+                        print_ifindex_comment(k, ifindex);
+                        fputc('\n', stdout);
                 }
                 if (r < 0)
                         return bus_log_parse_error(r);
@@ -896,13 +888,12 @@ static int resolve_openpgp(sd_bus *bus, const char *address) {
         assert(address);
 
         domain = strrchr(address, '@');
-        if (!domain) {
-                log_error("Address does not contain '@': \"%s\"", address);
-                return -EINVAL;
-        } else if (domain == address || domain[1] == '\0') {
-                log_error("Address starts or ends with '@': \"%s\"", address);
-                return -EINVAL;
-        }
+        if (!domain)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Address does not contain '@': \"%s\"", address);
+        if (domain == address || domain[1] == '\0')
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Address starts or ends with '@': \"%s\"", address);
         domain++;
 
         r = string_hashsum_sha256(address, domain - 1 - address, &hashed);
@@ -1379,6 +1370,7 @@ struct link_info {
         char **domains;
         char **ntas;
         bool dnssec_supported;
+        bool default_route;
 };
 
 static void link_info_clear(struct link_info *p) {
@@ -1394,6 +1386,7 @@ static int status_ifindex(sd_bus *bus, int ifindex, const char *name, StatusMode
                 { "DNS",                        "a(iay)", map_link_dns_servers,        offsetof(struct link_info, dns)              },
                 { "CurrentDNSServer",           "(iay)",  map_link_current_dns_server, offsetof(struct link_info, current_dns)      },
                 { "Domains",                    "a(sb)",  map_link_domains,            offsetof(struct link_info, domains)          },
+                { "DefaultRoute",               "b",      NULL,                        offsetof(struct link_info, default_route)    },
                 { "LLMNR",                      "s",      NULL,                        offsetof(struct link_info, llmnr)            },
                 { "MulticastDNS",               "s",      NULL,                        offsetof(struct link_info, mdns)             },
                 { "DNSOverTLS",                 "s",      NULL,                        offsetof(struct link_info, dns_over_tls)     },
@@ -1438,7 +1431,7 @@ static int status_ifindex(sd_bus *bus, int ifindex, const char *name, StatusMode
         if (r < 0)
                 return log_error_errno(r, "Failed to get link data for %i: %s", ifindex, bus_error_message(&error, r));
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         if (mode == STATUS_DNS)
                 return status_print_strv_ifindex(ifindex, name, link_info.dns);
@@ -1448,6 +1441,14 @@ static int status_ifindex(sd_bus *bus, int ifindex, const char *name, StatusMode
 
         if (mode == STATUS_NTA)
                 return status_print_strv_ifindex(ifindex, name, link_info.ntas);
+
+        if (mode == STATUS_DEFAULT_ROUTE) {
+                printf("%sLink %i (%s)%s: %s\n",
+                       ansi_highlight(), ifindex, name, ansi_normal(),
+                       yes_no(link_info.default_route));
+
+                return 0;
+        }
 
         if (mode == STATUS_LLMNR) {
                 printf("%sLink %i (%s)%s: %s\n",
@@ -1497,11 +1498,13 @@ static int status_ifindex(sd_bus *bus, int ifindex, const char *name, StatusMode
                        link_info.scopes_mask & SD_RESOLVED_MDNS_IPV4 ? " mDNS/IPv4" : "",
                        link_info.scopes_mask & SD_RESOLVED_MDNS_IPV6 ? " mDNS/IPv6" : "");
 
-        printf("       LLMNR setting: %s\n"
+        printf("DefaultRoute setting: %s\n"
+               "       LLMNR setting: %s\n"
                "MulticastDNS setting: %s\n"
                "  DNSOverTLS setting: %s\n"
                "      DNSSEC setting: %s\n"
                "    DNSSEC supported: %s\n",
+               yes_no(link_info.default_route),
                strna(link_info.llmnr),
                strna(link_info.mdns),
                strna(link_info.dns_over_tls),
@@ -1684,7 +1687,7 @@ static int status_global(sd_bus *bus, StatusMode mode, bool *empty_line) {
         if (r < 0)
                 return log_error_errno(r, "Failed to get global data: %s", bus_error_message(&error, r));
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         if (mode == STATUS_DNS)
                 return status_print_strv_global(global_info.dns);
@@ -1873,14 +1876,16 @@ static int verb_dns(int argc, char **argv, void *userdata) {
 
         assert(bus);
 
-        if (argc <= 1)
+        if (argc >= 2) {
+                r = ifname_mangle(argv[1]);
+                if (r < 0)
+                        return r;
+        }
+
+        if (arg_ifindex <= 0)
                 return status_all(bus, STATUS_DNS);
 
-        r = ifname_mangle(argv[1], false);
-        if (r < 0)
-                return r;
-
-        if (argc == 2)
+        if (argc < 3)
                 return status_ifindex(bus, arg_ifindex, NULL, STATUS_DNS, NULL);
 
         r = sd_bus_message_new_method_call(
@@ -1957,14 +1962,16 @@ static int verb_domain(int argc, char **argv, void *userdata) {
 
         assert(bus);
 
-        if (argc <= 1)
+        if (argc >= 2) {
+                r = ifname_mangle(argv[1]);
+                if (r < 0)
+                        return r;
+        }
+
+        if (arg_ifindex <= 0)
                 return status_all(bus, STATUS_DOMAIN);
 
-        r = ifname_mangle(argv[1], false);
-        if (r < 0)
-                return r;
-
-        if (argc == 2)
+        if (argc < 3)
                 return status_ifindex(bus, arg_ifindex, NULL, STATUS_DOMAIN, NULL);
 
         r = sd_bus_message_new_method_call(
@@ -2026,6 +2033,51 @@ static int verb_domain(int argc, char **argv, void *userdata) {
         return 0;
 }
 
+static int verb_default_route(int argc, char **argv, void *userdata) {
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+        sd_bus *bus = userdata;
+        int r, b;
+
+        assert(bus);
+
+        if (argc >= 2) {
+                r = ifname_mangle(argv[1]);
+                if (r < 0)
+                        return r;
+        }
+
+        if (arg_ifindex <= 0)
+                return status_all(bus, STATUS_DEFAULT_ROUTE);
+
+        if (argc < 3)
+                return status_ifindex(bus, arg_ifindex, NULL, STATUS_DEFAULT_ROUTE, NULL);
+
+        b = parse_boolean(argv[2]);
+        if (b < 0)
+                return log_error_errno(b, "Failed to parse boolean argument: %s", argv[2]);
+
+        r = sd_bus_call_method(bus,
+                               "org.freedesktop.resolve1",
+                               "/org/freedesktop/resolve1",
+                               "org.freedesktop.resolve1.Manager",
+                               "SetLinkDefaultRoute",
+                               &error,
+                               NULL,
+                               "ib", arg_ifindex, b);
+        if (r < 0) {
+                if (sd_bus_error_has_name(&error, BUS_ERROR_LINK_BUSY))
+                        return log_interface_is_managed(r, arg_ifindex);
+
+                if (arg_ifindex_permissive &&
+                    sd_bus_error_has_name(&error, BUS_ERROR_NO_SUCH_LINK))
+                        return 0;
+
+                return log_error_errno(r, "Failed to set default route configuration: %s", bus_error_message(&error, r));
+        }
+
+        return 0;
+}
+
 static int verb_llmnr(int argc, char **argv, void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         sd_bus *bus = userdata;
@@ -2033,14 +2085,16 @@ static int verb_llmnr(int argc, char **argv, void *userdata) {
 
         assert(bus);
 
-        if (argc <= 1)
+        if (argc >= 2) {
+                r = ifname_mangle(argv[1]);
+                if (r < 0)
+                        return r;
+        }
+
+        if (arg_ifindex <= 0)
                 return status_all(bus, STATUS_LLMNR);
 
-        r = ifname_mangle(argv[1], false);
-        if (r < 0)
-                return r;
-
-        if (argc == 2)
+        if (argc < 3)
                 return status_ifindex(bus, arg_ifindex, NULL, STATUS_LLMNR, NULL);
 
         r = sd_bus_call_method(bus,
@@ -2072,14 +2126,16 @@ static int verb_mdns(int argc, char **argv, void *userdata) {
 
         assert(bus);
 
-        if (argc <= 1)
+        if (argc >= 2) {
+                r = ifname_mangle(argv[1]);
+                if (r < 0)
+                        return r;
+        }
+
+        if (arg_ifindex <= 0)
                 return status_all(bus, STATUS_MDNS);
 
-        r = ifname_mangle(argv[1], false);
-        if (r < 0)
-                return r;
-
-        if (argc == 2)
+        if (argc < 3)
                 return status_ifindex(bus, arg_ifindex, NULL, STATUS_MDNS, NULL);
 
         r = sd_bus_call_method(bus,
@@ -2111,14 +2167,16 @@ static int verb_dns_over_tls(int argc, char **argv, void *userdata) {
 
         assert(bus);
 
-        if (argc <= 1)
+        if (argc >= 2) {
+                r = ifname_mangle(argv[1]);
+                if (r < 0)
+                        return r;
+        }
+
+        if (arg_ifindex <= 0)
                 return status_all(bus, STATUS_PRIVATE);
 
-        r = ifname_mangle(argv[1], false);
-        if (r < 0)
-                return r;
-
-        if (argc == 2)
+        if (argc < 3)
                 return status_ifindex(bus, arg_ifindex, NULL, STATUS_PRIVATE, NULL);
 
         r = sd_bus_call_method(bus,
@@ -2150,14 +2208,16 @@ static int verb_dnssec(int argc, char **argv, void *userdata) {
 
         assert(bus);
 
-        if (argc <= 1)
+        if (argc >= 2) {
+                r = ifname_mangle(argv[1]);
+                if (r < 0)
+                        return r;
+        }
+
+        if (arg_ifindex <= 0)
                 return status_all(bus, STATUS_DNSSEC);
 
-        r = ifname_mangle(argv[1], false);
-        if (r < 0)
-                return r;
-
-        if (argc == 2)
+        if (argc < 3)
                 return status_ifindex(bus, arg_ifindex, NULL, STATUS_DNSSEC, NULL);
 
         r = sd_bus_call_method(bus,
@@ -2192,14 +2252,16 @@ static int verb_nta(int argc, char **argv, void *userdata) {
 
         assert(bus);
 
-        if (argc <= 1)
+        if (argc >= 2) {
+                r = ifname_mangle(argv[1]);
+                if (r < 0)
+                        return r;
+        }
+
+        if (arg_ifindex <= 0)
                 return status_all(bus, STATUS_NTA);
 
-        r = ifname_mangle(argv[1], false);
-        if (r < 0)
-                return r;
-
-        if (argc == 2)
+        if (argc < 3)
                 return status_ifindex(bus, arg_ifindex, NULL, STATUS_NTA, NULL);
 
         /* If only argument is the empty string, then call SetLinkDNSSECNegativeTrustAnchors()
@@ -2257,9 +2319,14 @@ static int verb_revert_link(int argc, char **argv, void *userdata) {
 
         assert(bus);
 
-        r = ifname_mangle(argv[1], false);
-        if (r < 0)
-                return r;
+        if (argc >= 2) {
+                r = ifname_mangle(argv[1]);
+                if (r < 0)
+                        return r;
+        }
+
+        if (arg_ifindex <= 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Interface argument required.");
 
         r = sd_bus_call_method(bus,
                                "org.freedesktop.resolve1",
@@ -2398,6 +2465,7 @@ static int native_help(void) {
                "  reset-server-features        Forget learnt DNS server feature levels\n"
                "  dns [LINK [SERVER...]]       Get/set per-interface DNS server address\n"
                "  domain [LINK [DOMAIN...]]    Get/set per-interface search domain\n"
+               "  default-route [LINK [BOOL]]  Get/set per-interface default route flag\n"
                "  llmnr [LINK [MODE]]          Get/set per-interface LLMNR mode\n"
                "  mdns [LINK [MODE]]           Get/set per-interface MulticastDNS mode\n"
                "  dnsovertls [LINK [MODE]]     Get/set per-interface DNS-over-TLS mode\n"
@@ -2500,8 +2568,7 @@ static int compat_parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 'i':
-                        arg_ifname = mfree(arg_ifname);
-                        r = ifname_mangle(optarg, true);
+                        r = ifname_mangle(optarg);
                         if (r < 0)
                                 return r;
                         break;
@@ -2565,10 +2632,9 @@ static int compat_parse_argv(int argc, char *argv[]) {
                                 arg_flags |= SD_RESOLVED_MDNS_IPV4;
                         else if (streq(optarg, "mdns-ipv6"))
                                 arg_flags |= SD_RESOLVED_MDNS_IPV6;
-                        else {
-                                log_error("Unknown protocol specifier: %s", optarg);
-                                return -EINVAL;
-                        }
+                        else
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Unknown protocol specifier: %s", optarg);
 
                         break;
 
@@ -2584,26 +2650,24 @@ static int compat_parse_argv(int argc, char *argv[]) {
                         arg_mode = MODE_RESOLVE_TLSA;
                         if (!optarg || service_family_is_valid(optarg))
                                 arg_service_family = optarg;
-                        else {
-                                log_error("Unknown service family \"%s\".", optarg);
-                                return -EINVAL;
-                        }
+                        else
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Unknown service family \"%s\".", optarg);
                         break;
 
                 case ARG_RAW:
-                        if (on_tty()) {
-                                log_error("Refusing to write binary data to tty.");
-                                return -ENOTTY;
-                        }
+                        if (on_tty())
+                                return log_error_errno(SYNTHETIC_ERRNO(ENOTTY),
+                                                       "Refusing to write binary data to tty.");
 
                         if (optarg == NULL || streq(optarg, "payload"))
                                 arg_raw = RAW_PAYLOAD;
                         else if (streq(optarg, "packet"))
                                 arg_raw = RAW_PACKET;
-                        else {
-                                log_error("Unknown --raw specifier \"%s\".", optarg);
-                                return -EINVAL;
-                        }
+                        else
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Unknown --raw specifier \"%s\".",
+                                                       optarg);
 
                         arg_legend = false;
                         break;
@@ -2657,7 +2721,7 @@ static int compat_parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case ARG_SET_DNS:
@@ -2715,15 +2779,13 @@ static int compat_parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        if (arg_type == 0 && arg_class != 0) {
-                log_error("--class= may only be used in conjunction with --type=.");
-                return -EINVAL;
-        }
+        if (arg_type == 0 && arg_class != 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "--class= may only be used in conjunction with --type=.");
 
-        if (arg_type != 0 && arg_mode == MODE_RESOLVE_SERVICE) {
-                log_error("--service and --type= may not be combined.");
-                return -EINVAL;
-        }
+        if (arg_type != 0 && arg_mode == MODE_RESOLVE_SERVICE)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "--service and --type= may not be combined.");
 
         if (arg_type != 0 && arg_class == 0)
                 arg_class = DNS_CLASS_IN;
@@ -2733,15 +2795,9 @@ static int compat_parse_argv(int argc, char *argv[]) {
 
         if (IN_SET(arg_mode, MODE_SET_LINK, MODE_REVERT_LINK)) {
 
-                if (arg_ifindex <= 0) {
-                        log_error("--set-dns=, --set-domain=, --set-llmnr=, --set-mdns=, --set-dnsovertls=, --set-dnssec=, --set-nta= and --revert require --interface=.");
-                        return -EINVAL;
-                }
-
-                if (arg_ifindex == LOOPBACK_IFINDEX) {
-                        log_error("Interface can't be the loopback interface (lo). Sorry.");
-                        return -EINVAL;
-                }
+                if (arg_ifindex <= 0)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "--set-dns=, --set-domain=, --set-llmnr=, --set-mdns=, --set-dnsovertls=, --set-dnssec=, --set-nta= and --revert require --interface=.");
         }
 
         return 1 /* work to do */;
@@ -2799,8 +2855,7 @@ static int native_parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 'i':
-                        arg_ifname = mfree(arg_ifname);
-                        r = ifname_mangle(optarg, true);
+                        r = ifname_mangle(optarg);
                         if (r < 0)
                                 return r;
                         break;
@@ -2863,27 +2918,26 @@ static int native_parse_argv(int argc, char *argv[]) {
                                 arg_flags |= SD_RESOLVED_MDNS_IPV4;
                         else if (streq(optarg, "mdns-ipv6"))
                                 arg_flags |= SD_RESOLVED_MDNS_IPV6;
-                        else {
-                                log_error("Unknown protocol specifier: %s", optarg);
-                                return -EINVAL;
-                        }
+                        else
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Unknown protocol specifier: %s",
+                                                       optarg);
 
                         break;
 
                 case ARG_RAW:
-                        if (on_tty()) {
-                                log_error("Refusing to write binary data to tty.");
-                                return -ENOTTY;
-                        }
+                        if (on_tty())
+                                return log_error_errno(SYNTHETIC_ERRNO(ENOTTY),
+                                                       "Refusing to write binary data to tty.");
 
                         if (optarg == NULL || streq(optarg, "payload"))
                                 arg_raw = RAW_PAYLOAD;
                         else if (streq(optarg, "packet"))
                                 arg_raw = RAW_PACKET;
-                        else {
-                                log_error("Unknown --raw specifier \"%s\".", optarg);
-                                return -EINVAL;
-                        }
+                        else
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Unknown --raw specifier \"%s\".",
+                                                       optarg);
 
                         arg_legend = false;
                         break;
@@ -2917,7 +2971,7 @@ static int native_parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case '?':
@@ -2927,10 +2981,9 @@ static int native_parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        if (arg_type == 0 && arg_class != 0) {
-                log_error("--class= may only be used in conjunction with --type=.");
-                return -EINVAL;
-        }
+        if (arg_type == 0 && arg_class != 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "--class= may only be used in conjunction with --type=.");
 
         if (arg_type != 0 && arg_class == 0)
                 arg_class = DNS_CLASS_IN;
@@ -2956,12 +3009,13 @@ static int native_main(int argc, char *argv[], sd_bus *bus) {
                 { "reset-server-features", VERB_ANY, 1,        0,            reset_server_features },
                 { "dns",                   VERB_ANY, VERB_ANY, 0,            verb_dns              },
                 { "domain",                VERB_ANY, VERB_ANY, 0,            verb_domain           },
+                { "default-route",         VERB_ANY, 3,        0,            verb_default_route    },
                 { "llmnr",                 VERB_ANY, 3,        0,            verb_llmnr            },
                 { "mdns",                  VERB_ANY, 3,        0,            verb_mdns             },
-                { "dnsovertls",            VERB_ANY, 3,        0,            verb_dns_over_tls      },
+                { "dnsovertls",            VERB_ANY, 3,        0,            verb_dns_over_tls     },
                 { "dnssec",                VERB_ANY, 3,        0,            verb_dnssec           },
                 { "nta",                   VERB_ANY, VERB_ANY, 0,            verb_nta              },
-                { "revert",                2,        2,        0,            verb_revert_link      },
+                { "revert",                VERB_ANY, 2,        0,            verb_revert_link      },
                 {}
         };
 
@@ -3079,8 +3133,8 @@ static int compat_main(int argc, char *argv[], sd_bus *bus) {
         return 0;
 }
 
-int main(int argc, char **argv) {
-        sd_bus *bus = NULL;
+static int run(int argc, char **argv) {
+        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         int r;
 
         setlocale(LC_ALL, "");
@@ -3094,29 +3148,16 @@ int main(int argc, char **argv) {
         else
                 r = native_parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
         r = sd_bus_open_system(&bus);
-        if (r < 0) {
-                log_error_errno(r, "sd_bus_open_system: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "sd_bus_open_system: %m");
 
         if (STR_IN_SET(program_invocation_short_name, "systemd-resolve", "resolvconf"))
-                r = compat_main(argc, argv, bus);
-        else
-                r = native_main(argc, argv, bus);
+                return compat_main(argc, argv, bus);
 
-finish:
-        /* make sure we terminate the bus connection first, and then close the
-         * pager, see issue #3543 for the details. */
-        sd_bus_flush_close_unref(bus);
-        pager_close();
-
-        free(arg_ifname);
-        strv_free(arg_set_dns);
-        strv_free(arg_set_domain);
-        strv_free(arg_set_nta);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return native_main(argc, argv, bus);
 }
+
+DEFINE_MAIN_FUNCTION(run);

@@ -16,6 +16,7 @@
 #include "bus-error.h"
 #include "bus-util.h"
 #include "dbus-automount.h"
+#include "dbus-unit.h"
 #include "fd-util.h"
 #include "format-util.h"
 #include "io-util.h"
@@ -23,6 +24,7 @@
 #include "mkdir.h"
 #include "mount-util.h"
 #include "mount.h"
+#include "mountpoint-util.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
@@ -46,7 +48,7 @@ struct expire_data {
         int ioctl_fd;
 };
 
-static inline void expire_data_free(struct expire_data *data) {
+static void expire_data_free(struct expire_data *data) {
         if (!data)
                 return;
 
@@ -236,6 +238,9 @@ static void automount_set_state(Automount *a, AutomountState state) {
         AutomountState old_state;
         assert(a);
 
+        if (a->state != state)
+                bus_unit_send_pending_change_signal(UNIT(a), false);
+
         old_state = a->state;
         a->state = state;
 
@@ -315,9 +320,7 @@ static void automount_enter_dead(Automount *a, AutomountResult f) {
         if (a->result == AUTOMOUNT_SUCCESS)
                 a->result = f;
 
-        if (a->result != AUTOMOUNT_SUCCESS)
-                log_unit_warning(UNIT(a), "Failed with result '%s'.", automount_result_to_string(a->result));
-
+        unit_log_result(UNIT(a), a->result == AUTOMOUNT_SUCCESS, automount_result_to_string(a->result));
         automount_set_state(a, a->result != AUTOMOUNT_SUCCESS ? AUTOMOUNT_FAILED : AUTOMOUNT_DEAD);
 }
 
@@ -575,10 +578,13 @@ static void automount_enter_waiting(Automount *a) {
                 goto fail;
         }
 
-        if (pipe2(p, O_NONBLOCK|O_CLOEXEC) < 0) {
+        if (pipe2(p, O_CLOEXEC) < 0) {
                 r = -errno;
                 goto fail;
         }
+        r = fd_nonblock(p[0], true);
+        if (r < 0)
+                goto fail;
 
         xsprintf(options, "fd=%i,pgrp="PID_FMT",minproto=5,maxproto=5,direct", p[1], getpgrp());
         xsprintf(name, "systemd-"PID_FMT, getpid_cached());

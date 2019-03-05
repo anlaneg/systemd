@@ -579,6 +579,9 @@ global:
 
         sd_bus_error_move;
 
+        sd_bus_set_close_on_exit;
+        sd_bus_get_close_on_exit;
+
         sd_device_ref;
         sd_device_unref;
 
@@ -656,6 +659,7 @@ global:
         sd_device_monitor_attach_event;
         sd_device_monitor_detach_event;
         sd_device_monitor_get_event;
+        sd_device_monitor_get_event_source;
         sd_device_monitor_start;
         sd_device_monitor_stop;
 
@@ -663,4 +667,12 @@ global:
         sd_device_monitor_filter_add_match_tag;
         sd_device_monitor_filter_update;
         sd_device_monitor_filter_remove;
+
+        sd_event_source_get_floating;
+        sd_event_source_set_floating;
 } LIBSYSTEMD_239;
+
+LIBSYSTEMD_241 {
+global:
+        sd_bus_close_unref;
+} LIBSYSTEMD_240;

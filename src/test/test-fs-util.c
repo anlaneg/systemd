@@ -4,8 +4,6 @@
 
 #include "alloc-util.h"
 #include "fd-util.h"
-#include "fd-util.h"
-#include "fileio.h"
 #include "fs-util.h"
 #include "id128-util.h"
 #include "macro.h"
@@ -16,6 +14,7 @@
 #include "string-util.h"
 #include "strv.h"
 #include "tests.h"
+#include "tmpfile-util.h"
 #include "user-util.h"
 #include "util.h"
 #include "virt.h"
@@ -155,6 +154,30 @@ static void test_chase_symlinks(void) {
         assert_se(path_equal(result, q));
         result = mfree(result);
 
+        /* Paths underneath the "root" with different UIDs while using CHASE_SAFE */
+
+        if (geteuid() == 0) {
+                p = strjoina(temp, "/user");
+                assert_se(mkdir(p, 0755) >= 0);
+                assert_se(chown(p, UID_NOBODY, GID_NOBODY) >= 0);
+
+                q = strjoina(temp, "/user/root");
+                assert_se(mkdir(q, 0755) >= 0);
+
+                p = strjoina(q, "/link");
+                assert_se(symlink("/", p) >= 0);
+
+                /* Fail when user-owned directories contain root-owned subdirectories. */
+                r = chase_symlinks(p, temp, CHASE_SAFE, &result);
+                assert_se(r == -ENOLINK);
+                result = mfree(result);
+
+                /* Allow this when the user-owned directories are all in the "root". */
+                r = chase_symlinks(p, q, CHASE_SAFE, &result);
+                assert_se(r > 0);
+                result = mfree(result);
+        }
+
         /* Paths using . */
 
         r = chase_symlinks("/etc/./.././", NULL, 0, &result);
@@ -249,11 +272,11 @@ static void test_chase_symlinks(void) {
                 assert_se(chase_symlinks(q, NULL, CHASE_SAFE, NULL) >= 0);
 
                 assert_se(chown(q, 0, 0) >= 0);
-                assert_se(chase_symlinks(q, NULL, CHASE_SAFE, NULL) == -EPERM);
+                assert_se(chase_symlinks(q, NULL, CHASE_SAFE, NULL) == -ENOLINK);
 
                 assert_se(rmdir(q) >= 0);
                 assert_se(symlink("/etc/passwd", q) >= 0);
-                assert_se(chase_symlinks(q, NULL, CHASE_SAFE, NULL) == -EPERM);
+                assert_se(chase_symlinks(q, NULL, CHASE_SAFE, NULL) == -ENOLINK);
 
                 assert_se(chown(p, 0, 0) >= 0);
                 assert_se(chase_symlinks(q, NULL, CHASE_SAFE, NULL) >= 0);
@@ -362,11 +385,11 @@ static void test_unlink_noerrno(void) {
 
         {
                 PROTECT_ERRNO;
-                errno = -42;
+                errno = 42;
                 assert_se(unlink_noerrno(name) >= 0);
-                assert_se(errno == -42);
+                assert_se(errno == 42);
                 assert_se(unlink_noerrno(name) < 0);
-                assert_se(errno == -42);
+                assert_se(errno == 42);
         }
 }
 

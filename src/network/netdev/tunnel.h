@@ -3,6 +3,7 @@
 
 #include "in-addr-util.h"
 
+#include "conf-parser.h"
 #include "netdev/netdev.h"
 #include "netdev/fou-tunnel.h"
 
@@ -28,6 +29,8 @@ typedef struct Tunnel {
         int family;
         int ipv6_flowlabel;
         int allow_localremote;
+        int erspan_sequence;
+        int isatap;
 
         unsigned ttl;
         unsigned tos;
@@ -36,6 +39,7 @@ typedef struct Tunnel {
         uint32_t key;
         uint32_t ikey;
         uint32_t okey;
+        uint32_t erspan_index;
 
         union in_addr_union local;
         union in_addr_union remote;
@@ -50,6 +54,9 @@ typedef struct Tunnel {
 
         uint16_t encap_src_port;
         uint16_t fou_destination_port;
+
+        struct in6_addr sixrd_prefix;
+        uint8_t sixrd_prefixlen;
 } Tunnel;
 
 DEFINE_NETDEV_CAST(IPIP, Tunnel);
@@ -61,6 +68,7 @@ DEFINE_NETDEV_CAST(SIT, Tunnel);
 DEFINE_NETDEV_CAST(VTI, Tunnel);
 DEFINE_NETDEV_CAST(VTI6, Tunnel);
 DEFINE_NETDEV_CAST(IP6TNL, Tunnel);
+DEFINE_NETDEV_CAST(ERSPAN, Tunnel);
 extern const NetDevVTable ipip_vtable;
 extern const NetDevVTable sit_vtable;
 extern const NetDevVTable vti_vtable;
@@ -70,41 +78,14 @@ extern const NetDevVTable gretap_vtable;
 extern const NetDevVTable ip6gre_vtable;
 extern const NetDevVTable ip6gretap_vtable;
 extern const NetDevVTable ip6tnl_vtable;
+extern const NetDevVTable erspan_vtable;
 
 const char *ip6tnl_mode_to_string(Ip6TnlMode d) _const_;
 Ip6TnlMode ip6tnl_mode_from_string(const char *d) _pure_;
 
-int config_parse_ip6tnl_mode(const char *unit, const char *filename,
-                             unsigned line, const char *section,
-                             unsigned section_line, const char *lvalue,
-                             int ltype, const char *rvalue, void *data,
-                             void *userdata);
-
-int config_parse_tunnel_address(const char *unit,
-                                const char *filename,
-                                unsigned line,
-                                const char *section,
-                                unsigned section_line,
-                                const char *lvalue,
-                                int ltype,
-                                const char *rvalue,
-                                void *data,
-                                void *userdata);
-
-int config_parse_ipv6_flowlabel(const char *unit, const char *filename,
-                                unsigned line, const char *section,
-                                unsigned section_line, const char *lvalue,
-                                int ltype, const char *rvalue, void *data,
-                                void *userdata);
-
-int config_parse_encap_limit(const char *unit, const char *filename,
-                             unsigned line, const char *section,
-                             unsigned section_line, const char *lvalue,
-                             int ltype, const char *rvalue, void *data,
-                             void *userdata);
-
-int config_parse_tunnel_key(const char *unit, const char *filename,
-                            unsigned line, const char *section,
-                            unsigned section_line, const char *lvalue,
-                            int ltype, const char *rvalue, void *data,
-                            void *userdata);
+CONFIG_PARSER_PROTOTYPE(config_parse_ip6tnl_mode);
+CONFIG_PARSER_PROTOTYPE(config_parse_tunnel_address);
+CONFIG_PARSER_PROTOTYPE(config_parse_ipv6_flowlabel);
+CONFIG_PARSER_PROTOTYPE(config_parse_encap_limit);
+CONFIG_PARSER_PROTOTYPE(config_parse_tunnel_key);
+CONFIG_PARSER_PROTOTYPE(config_parse_6rd_prefix);

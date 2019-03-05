@@ -28,6 +28,7 @@
 #include "parse-util.h"
 #include "process-util.h"
 #include "reboot-util.h"
+#include "rlimit-util.h"
 #include "signal-util.h"
 #include "string-util.h"
 #include "switch-root.h"
@@ -137,10 +138,9 @@ static int parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option code.");
                 }
 
-        if (!arg_verb) {
-                log_error("Verb argument missing.");
-                return -EINVAL;
-        }
+        if (!arg_verb)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Verb argument missing.");
 
         return 0;
 }
@@ -442,15 +442,17 @@ int main(int argc, char *argv[]) {
         arguments[0] = NULL;
         arguments[1] = arg_verb;
         arguments[2] = NULL;
-        execute_directories(dirs, DEFAULT_TIMEOUT_USEC, NULL, NULL, arguments, NULL);
+        execute_directories(dirs, DEFAULT_TIMEOUT_USEC, NULL, NULL, arguments, NULL, EXEC_DIR_PARALLEL | EXEC_DIR_IGNORE_ERRORS);
+
+        (void) rlimit_nofile_safe();
 
         if (can_initrd) {
                 r = switch_root_initramfs();
                 if (r >= 0) {
                         argv[0] = (char*) "/shutdown";
 
-                        setsid();
-                        make_console_stdio();
+                        (void) setsid();
+                        (void) make_console_stdio();
 
                         log_info("Successfully changed into root pivot.\n"
                                  "Returning to initrd...");

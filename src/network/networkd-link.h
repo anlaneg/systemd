@@ -19,9 +19,7 @@
 
 typedef enum LinkState {
         LINK_STATE_PENDING,
-        LINK_STATE_ENSLAVING,
-        LINK_STATE_SETTING_ADDRESSES,
-        LINK_STATE_SETTING_ROUTES,
+        LINK_STATE_CONFIGURING,
         LINK_STATE_CONFIGURED,
         LINK_STATE_UNMANAGED,
         LINK_STATE_FAILED,
@@ -36,6 +34,7 @@ typedef enum LinkOperationalState {
         LINK_OPERSTATE_DORMANT,
         LINK_OPERSTATE_CARRIER,
         LINK_OPERSTATE_DEGRADED,
+        LINK_OPERSTATE_ENSLAVED,
         LINK_OPERSTATE_ROUTABLE,
         _LINK_OPERSTATE_MAX,
         _LINK_OPERSTATE_INVALID = -1
@@ -72,15 +71,21 @@ typedef struct Link {
 
         unsigned address_messages;
         unsigned address_label_messages;
+        unsigned neighbor_messages;
         unsigned route_messages;
         unsigned routing_policy_rule_messages;
         unsigned routing_policy_rule_remove_messages;
         unsigned enslaving;
+        /* link_is_enslaved() has additional checks. So, it is named _raw. */
+        bool enslaved_raw;
 
         Set *addresses;
         Set *addresses_foreign;
         Set *routes;
         Set *routes_foreign;
+
+        bool addresses_configured;
+        bool addresses_ready;
 
         sd_dhcp_client *dhcp_client;
         sd_dhcp_lease *dhcp_lease;
@@ -96,6 +101,8 @@ typedef struct Link {
         sd_ipv4ll *ipv4ll;
         bool ipv4ll_address:1;
         bool ipv4ll_route:1;
+
+        bool neighbors_configured;
 
         bool static_routes_configured;
         bool routing_policy_rules_configured;
@@ -124,31 +131,30 @@ typedef struct Link {
 
         Hashmap *bound_by_links;
         Hashmap *bound_to_links;
+        Hashmap *slaves;
 } Link;
+
+typedef int (*link_netlink_message_handler_t)(sd_netlink*, sd_netlink_message*, Link*);
 
 DUID *link_get_duid(Link *link);
 int get_product_uuid_handler(sd_bus_message *m, void *userdata, sd_bus_error *ret_error);
 
 Link *link_unref(Link *link);
 Link *link_ref(Link *link);
-void link_netlink_destroy_callback(void *userdata);
+DEFINE_TRIVIAL_DESTRUCTOR(link_netlink_destroy_callback, Link, link_unref);
 
 int link_get(Manager *m, int ifindex, Link **ret);
 int link_add(Manager *manager, sd_netlink_message *message, Link **ret);
 void link_drop(Link *link);
 
-int link_up(Link *link);
 int link_down(Link *link);
-
-int link_address_remove_handler(sd_netlink *rtnl, sd_netlink_message *m, void *userdata);
-int link_route_remove_handler(sd_netlink *rtnl, sd_netlink_message *m, void *userdata);
 
 void link_enter_failed(Link *link);
 int link_initialized(Link *link, sd_device *device);
 
 void link_check_ready(Link *link);
 
-void link_update_operstate(Link *link);
+void link_update_operstate(Link *link, bool also_update_bond_master);
 int link_update(Link *link, sd_netlink_message *message);
 
 void link_dirty(Link *link);
@@ -160,7 +166,7 @@ bool link_has_carrier(Link *link);
 
 int link_ipv6ll_gained(Link *link, const struct in6_addr *address);
 
-int link_set_mtu(Link *link, uint32_t mtu);
+int link_set_mtu(Link *link, uint32_t mtu, bool force);
 
 int ipv4ll_configure(Link *link);
 int dhcp4_configure(Link *link);
@@ -182,6 +188,10 @@ extern const sd_bus_vtable link_vtable[];
 int link_node_enumerator(sd_bus *bus, const char *path, void *userdata, char ***nodes, sd_bus_error *error);
 int link_object_find(sd_bus *bus, const char *path, const char *interface, void *userdata, void **found, sd_bus_error *error);
 int link_send_changed(Link *link, const char *property, ...) _sentinel_;
+
+uint32_t link_get_vrf_table(Link *link);
+uint32_t link_get_dhcp_route_table(Link *link);
+uint32_t link_get_ipv6_accept_ra_route_table(Link *link);
 
 /* Macros which append INTERFACE= to the message */
 

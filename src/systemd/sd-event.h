@@ -71,13 +71,13 @@ typedef int (*sd_event_handler_t)(sd_event_source *s, void *userdata);
 typedef int (*sd_event_io_handler_t)(sd_event_source *s, int fd, uint32_t revents, void *userdata);
 typedef int (*sd_event_time_handler_t)(sd_event_source *s, uint64_t usec, void *userdata);
 typedef int (*sd_event_signal_handler_t)(sd_event_source *s, const struct signalfd_siginfo *si, void *userdata);
-#if defined _GNU_SOURCE || _POSIX_C_SOURCE >= 199309L
+#if defined _GNU_SOURCE || (defined _POSIX_C_SOURCE && _POSIX_C_SOURCE >= 199309L)
 typedef int (*sd_event_child_handler_t)(sd_event_source *s, const siginfo_t *si, void *userdata);
 #else
 typedef void* sd_event_child_handler_t;
 #endif
 typedef int (*sd_event_inotify_handler_t)(sd_event_source *s, const struct inotify_event *event, void *userdata);
-typedef void (*sd_event_destroy_t)(void *userdata);
+typedef _sd_destroy_t sd_event_destroy_t;
 
 int sd_event_default(sd_event **e);
 
@@ -143,6 +143,8 @@ int sd_event_source_get_child_pid(sd_event_source *s, pid_t *pid);
 int sd_event_source_get_inotify_mask(sd_event_source *s, uint32_t *ret);
 int sd_event_source_set_destroy_callback(sd_event_source *s, sd_event_destroy_t callback);
 int sd_event_source_get_destroy_callback(sd_event_source *s, sd_event_destroy_t *ret);
+int sd_event_source_get_floating(sd_event_source *s);
+int sd_event_source_set_floating(sd_event_source *s, int b);
 
 /* Define helpers so that __attribute__((cleanup(sd_event_unrefp))) and similar may be used. */
 _SD_DEFINE_POINTER_CLEANUP_FUNC(sd_event, sd_event_unref);

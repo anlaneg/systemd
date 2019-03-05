@@ -17,12 +17,14 @@
 #include "fd-util.h"
 #include "format-util.h"
 #include "fs-util.h"
-#include "libudev-private.h"
+#include "libudev-util.h"
+#include "mkdir.h"
 #include "path-util.h"
 #include "selinux-util.h"
 #include "smack-util.h"
 #include "stdio-util.h"
 #include "string-util.h"
+#include "strxcpyx.h"
 #include "udev-node.h"
 
 static int node_symlink(sd_device *dev, const char *node, const char *slink) {
@@ -73,6 +75,8 @@ static int node_symlink(sd_device *dev, const char *node, const char *slink) {
                 } while (r == -ENOENT);
                 if (r == 0)
                         return 0;
+                if (r < 0)
+                        log_device_debug_errno(dev, r, "Failed to create symlink '%s' to '%s', trying to replace '%s': %m", slink, target, slink);
         }
 
         log_device_debug(dev, "Atomically replace '%s'", slink);
@@ -177,6 +181,9 @@ static int link_find_prioritized(sd_device *dev, bool add, const char *stackdir,
                 priority = db_prio;
         }
 
+        if (!target)
+                return -ENOENT;
+
         *ret = TAKE_PTR(target);
         return 0;
 }
@@ -196,10 +203,10 @@ static int link_update(sd_device *dev, const char *slink, bool add) {
                 return log_device_debug_errno(dev, r, "Failed to get id_filename: %m");
 
         util_path_encode(slink + STRLEN("/dev"), name_enc, sizeof(name_enc));
-        dirname = path_join(NULL, "/run/udev/links/", name_enc);
+        dirname = path_join("/run/udev/links/", name_enc);
         if (!dirname)
                 return log_oom();
-        filename = path_join(NULL, dirname, id_filename);
+        filename = path_join(dirname, id_filename);
         if (!filename)
                 return log_oom();
 
@@ -211,10 +218,8 @@ static int link_update(sd_device *dev, const char *slink, bool add) {
                 log_device_debug(dev, "No reference left, removing '%s'", slink);
                 if (unlink(slink) == 0)
                         (void) rmdir_parents(slink, "/");
-        } else {
-                log_device_debug(dev, "Creating link '%s' to '%s'", slink, target);
+        } else
                 (void) node_symlink(dev, target, slink);
-        }
 
         if (add)
                 do {
@@ -295,7 +300,7 @@ static int node_permissions_apply(sd_device *dev, bool apply,
                 return log_device_debug_errno(dev, errno, "cannot stat() node '%s' (%m)", devnode);
 
         if (((stats.st_mode & S_IFMT) != (mode & S_IFMT)) || (stats.st_rdev != devnum))
-                return log_device_debug_errno(dev, EEXIST, "Found node '%s' with non-matching devnum %s, skip handling",
+                return log_device_debug_errno(dev, SYNTHETIC_ERRNO(EEXIST), "Found node '%s' with non-matching devnum %s, skip handling",
                                               devnode, id_filename);
 
         if (apply) {

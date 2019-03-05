@@ -133,6 +133,7 @@ $1.LogsDirectoryMode,            config_parse_mode,                  0,         
 $1.LogsDirectory,                config_parse_exec_directories,      0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_LOGS].paths)
 $1.ConfigurationDirectoryMode,   config_parse_mode,                  0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_CONFIGURATION].mode)
 $1.ConfigurationDirectory,       config_parse_exec_directories,      0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_CONFIGURATION].paths)
+$1.ProtectHostname,              config_parse_bool,                  0,                             offsetof($1, exec_context.protect_hostname)
 m4_ifdef(`HAVE_PAM',
 `$1.PAMName,                     config_parse_unit_string_printf,    0,                             offsetof($1, exec_context.pam_name)',
 `$1.PAMName,                     config_parse_warn_compat,           DISABLED_CONFIGURATION,        0')
@@ -165,6 +166,7 @@ $1.StartupCPUWeight,             config_parse_cg_weight,             0,         
 $1.CPUShares,                    config_parse_cpu_shares,            0,                             offsetof($1, cgroup_context.cpu_shares)
 $1.StartupCPUShares,             config_parse_cpu_shares,            0,                             offsetof($1, cgroup_context.startup_cpu_shares)
 $1.CPUQuota,                     config_parse_cpu_quota,             0,                             offsetof($1, cgroup_context)
+$1.CPUQuotaPeriodSec,            config_parse_sec_def_infinity,      0,                             offsetof($1, cgroup_context.cpu_quota_period_usec)
 $1.MemoryAccounting,             config_parse_bool,                  0,                             offsetof($1, cgroup_context.memory_accounting)
 $1.MemoryMin,                    config_parse_memory_limit,          0,                             offsetof($1, cgroup_context)
 $1.MemoryLow,                    config_parse_memory_limit,          0,                             offsetof($1, cgroup_context)
@@ -192,6 +194,7 @@ $1.BlockIOWriteBandwidth,        config_parse_blockio_bandwidth,     0,         
 $1.TasksAccounting,              config_parse_bool,                  0,                             offsetof($1, cgroup_context.tasks_accounting)
 $1.TasksMax,                     config_parse_tasks_max,             0,                             offsetof($1, cgroup_context.tasks_max)
 $1.Delegate,                     config_parse_delegate,              0,                             offsetof($1, cgroup_context)
+$1.DisableControllers,           config_parse_disable_controllers,   0,                             offsetof($1, cgroup_context)
 $1.IPAccounting,                 config_parse_bool,                  0,                             offsetof($1, cgroup_context.ip_accounting)
 $1.IPAddressAllow,               config_parse_ip_address_access,     0,                             offsetof($1, cgroup_context.ip_address_allow)
 $1.IPAddressDeny,                config_parse_ip_address_access,     0,                             offsetof($1, cgroup_context.ip_address_deny)
@@ -239,6 +242,8 @@ Unit.StartLimitBurst,            config_parse_unsigned,              0,         
 Unit.StartLimitAction,           config_parse_emergency_action,      0,                             offsetof(Unit, start_limit_action)
 Unit.FailureAction,              config_parse_emergency_action,      0,                             offsetof(Unit, failure_action)
 Unit.SuccessAction,              config_parse_emergency_action,      0,                             offsetof(Unit, success_action)
+Unit.FailureActionExitStatus,    config_parse_exit_status,           0,                             offsetof(Unit, failure_action_exit_status)
+Unit.SuccessActionExitStatus,    config_parse_exit_status,           0,                             offsetof(Unit, success_action_exit_status)
 Unit.RebootArgument,             config_parse_unit_string_printf,    0,                             offsetof(Unit, reboot_arg)
 Unit.ConditionPathExists,        config_parse_unit_condition_path,   CONDITION_PATH_EXISTS,         offsetof(Unit, conditions)
 Unit.ConditionPathExistsGlob,    config_parse_unit_condition_path,   CONDITION_PATH_EXISTS_GLOB,    offsetof(Unit, conditions)
@@ -288,7 +293,7 @@ Unit.AssertControlGroupController,     config_parse_unit_condition_string, CONDI
 Unit.AssertNull,                 config_parse_unit_condition_null,   0,                             offsetof(Unit, asserts)
 Unit.CollectMode,                config_parse_collect_mode,          0,                             offsetof(Unit, collect_mode)
 m4_dnl
-Service.PIDFile,                 config_parse_unit_path_printf,      0,                             offsetof(Service, pid_file)
+Service.PIDFile,                 config_parse_pid_file,              0,                             offsetof(Service, pid_file)
 Service.ExecStartPre,            config_parse_exec,                  SERVICE_EXEC_START_PRE,        offsetof(Service, exec_command)
 Service.ExecStart,               config_parse_exec,                  SERVICE_EXEC_START,            offsetof(Service, exec_command)
 Service.ExecStartPost,           config_parse_exec,                  SERVICE_EXEC_START_POST,       offsetof(Service, exec_command)

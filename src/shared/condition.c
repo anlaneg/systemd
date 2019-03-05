@@ -30,7 +30,8 @@
 #include "ima-util.h"
 #include "list.h"
 #include "macro.h"
-#include "mount-util.h"
+#include "mountpoint-util.h"
+#include "env-file.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "proc-cmdline.h"
@@ -471,7 +472,7 @@ static int condition_test_needs_update(Condition *c) {
                 uint64_t timestamp;
                 int r;
 
-                r = parse_env_file(NULL, p, NULL, "TIMESTAMP_NSEC", &timestamp_str, NULL);
+                r = parse_env_file(NULL, p, "TIMESTAMP_NSEC", &timestamp_str);
                 if (r < 0) {
                         log_error_errno(r, "Failed to parse timestamp file '%s', using mtime: %m", p);
                         return true;

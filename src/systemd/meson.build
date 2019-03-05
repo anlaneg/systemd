@@ -52,8 +52,7 @@ if cc.has_argument('-std=iso9899:2017')
         opts += [['c', '-std=iso9899:2017']]
 endif
 
-cxx = find_program('c++', required : false)
-if cxx.found()
+if add_languages('cpp', required : false)
         opts += [['c++'],
                  ['c++', '-std=c++98'],
                  ['c++', '-std=c++11']]
@@ -65,11 +64,11 @@ if cxx.found()
         endif
 endif
 
-foreach header : _systemd_headers + _not_installed_headers
+foreach header : _systemd_headers + _not_installed_headers + ['../libudev/libudev.h']
         foreach opt : opts
-                name = ''.join([header, ':'] + opt)
+                name = ''.join(['cc-', header.split('/')[-1], ':'] + opt)
                 if want_tests != 'false'
-                        test('cc-' + name,
+                        test(name,
                              check_compilation_sh,
                              args : cc.cmd_array() + ['-c', '-x'] + opt +
                                     ['-Werror', '-include',

@@ -4,6 +4,7 @@
 #include "sd-device.h"
 
 #include "condition.h"
+#include "conf-parser.h"
 #include "ethtool-util.h"
 #include "list.h"
 #include "set.h"
@@ -21,6 +22,7 @@ typedef enum MACPolicy {
 
 typedef enum NamePolicy {
         NAMEPOLICY_KERNEL,
+        NAMEPOLICY_KEEP,
         NAMEPOLICY_DATABASE,
         NAMEPOLICY_ONBOARD,
         NAMEPOLICY_SLOT,
@@ -54,7 +56,7 @@ struct link_config {
         size_t speed;
         Duplex duplex;
         int autonegotiation;
-        uint32_t advertise;
+        uint32_t advertise[2];
         WakeOnLan wol;
         NetDevPort port;
         int features[_NET_DEV_FEAT_MAX];
@@ -65,7 +67,9 @@ struct link_config {
 
 int link_config_ctx_new(link_config_ctx **ret);
 void link_config_ctx_free(link_config_ctx *ctx);
+DEFINE_TRIVIAL_CLEANUP_FUNC(link_config_ctx*, link_config_ctx_free);
 
+int link_load_one(link_config_ctx *ctx, const char *filename);
 int link_config_load(link_config_ctx *ctx);
 bool link_config_should_reload(link_config_ctx *ctx);
 
@@ -82,5 +86,5 @@ MACPolicy mac_policy_from_string(const char *p) _pure_;
 /* gperf lookup function */
 const struct ConfigPerfItem* link_config_gperf_lookup(const char *key, GPERF_LEN_TYPE length);
 
-int config_parse_mac_policy(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_name_policy(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+CONFIG_PARSER_PROTOTYPE(config_parse_mac_policy);
+CONFIG_PARSER_PROTOTYPE(config_parse_name_policy);

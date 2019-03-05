@@ -20,6 +20,7 @@
 #include "missing.h"
 #include "mkdir.h"
 #include "mount-util.h"
+#include "mountpoint-util.h"
 #include "namespace.h"
 #include "path-util.h"
 #include "selinux-util.h"
@@ -235,10 +236,9 @@ static int append_access_mounts(MountEntry **p, char **strv, MountMode mode, boo
                         needs_prefix = true;
                 }
 
-                if (!path_is_absolute(e)) {
-                        log_debug("Path is not absolute: %s", e);
-                        return -EINVAL;
-                }
+                if (!path_is_absolute(e))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Path is not absolute: %s", e);
 
                 *((*p)++) = (MountEntry) {
                         .path_const = e,
@@ -306,10 +306,10 @@ static int append_tmpfs_mounts(MountEntry **p, const TemporaryFileSystem *tmpfs,
                 unsigned long flags;
                 bool ro = false;
 
-                if (!path_is_absolute(t->path)) {
-                        log_debug("Path is not absolute: %s", t->path);
-                        return -EINVAL;
-                }
+                if (!path_is_absolute(t->path))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Path is not absolute: %s",
+                                               t->path);
 
                 str = strjoin("mode=0755,", t->options);
                 if (!str)
@@ -575,10 +575,10 @@ static int clone_device_node(
         }
 
         if (!S_ISBLK(st.st_mode) &&
-            !S_ISCHR(st.st_mode)) {
-                log_debug("Device node '%s' to clone is not a device node, ignoring.", d);
-                return -EINVAL;
-        }
+            !S_ISCHR(st.st_mode))
+                return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Device node '%s' to clone is not a device node, ignoring.",
+                                       d);
 
         dn = strjoina(temporary_mount, d);
 
@@ -855,10 +855,10 @@ static int follow_symlink(
         if (r > 0) /* Reached the end, nothing more to resolve */
                 return 1;
 
-        if (m->n_followed >= CHASE_SYMLINKS_MAX) { /* put a boundary on things */
-                log_debug("Symlink loop on '%s'.", mount_entry_path(m));
-                return -ELOOP;
-        }
+        if (m->n_followed >= CHASE_SYMLINKS_MAX) /* put a boundary on things */
+                return log_debug_errno(SYNTHETIC_ERRNO(ELOOP),
+                                       "Symlink loop on '%s'.",
+                                       mount_entry_path(m));
 
         log_debug("Followed mount entry path symlink %s → %s.", mount_entry_path(m), target);
 
@@ -900,10 +900,9 @@ static int apply_mount(
                 }
 
                 what = mode_to_inaccessible_node(target.st_mode);
-                if (!what) {
-                        log_debug("File type not supported for inaccessible mounts. Note that symlinks are not allowed");
-                        return -ELOOP;
-                }
+                if (!what)
+                        return log_debug_errno(SYNTHETIC_ERRNO(ELOOP),
+                                               "File type not supported for inaccessible mounts. Note that symlinks are not allowed");
                 break;
         }
 
@@ -1118,6 +1117,7 @@ static size_t namespace_calculate_mounts(
                 (ns_info->protect_control_groups ? 1 : 0) +
                 (ns_info->protect_kernel_modules ? ELEMENTSOF(protect_kernel_modules_table) : 0) +
                 protect_home_cnt + protect_system_cnt +
+                (ns_info->protect_hostname ? 2 : 0) +
                 (namespace_info_mount_apivfs(ns_info) ? ELEMENTSOF(apivfs_table) : 0);
 }
 
@@ -1300,6 +1300,17 @@ int setup_namespace(
                         r = append_static_mounts(&m, apivfs_table, ELEMENTSOF(apivfs_table), ns_info->ignore_protect_paths);
                         if (r < 0)
                                 goto finish;
+                }
+
+                if (ns_info->protect_hostname) {
+                        *(m++) = (MountEntry) {
+                                .path_const = "/proc/sys/kernel/hostname",
+                                .mode = READONLY,
+                        };
+                        *(m++) = (MountEntry) {
+                                .path_const = "/proc/sys/kernel/domainname",
+                                .mode = READONLY,
+                        };
                 }
 
                 assert(mounts + n_mounts == m);
@@ -1629,7 +1640,7 @@ int setup_tmp_dirs(const char *id, char **tmp_dir, char **var_tmp_dir) {
         return 0;
 }
 
-int setup_netns(int netns_storage_socket[2]) {
+int setup_netns(int netns_storage_socket[static 2]) {
         _cleanup_close_ int netns = -1;
         int r, q;
 

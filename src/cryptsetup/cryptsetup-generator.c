@@ -4,7 +4,6 @@
 #include <stdio_ext.h>
 
 #include "alloc-util.h"
-#include "def.h"
 #include "dropin.h"
 #include "escape.h"
 #include "fd-util.h"
@@ -33,13 +32,17 @@ typedef struct crypto_device {
         bool create;
 } crypto_device;
 
-static const char *arg_dest = "/tmp";
+static const char *arg_dest = NULL;
 static bool arg_enabled = true;
 static bool arg_read_crypttab = true;
 static bool arg_whitelist = false;
 static Hashmap *arg_disks = NULL;
 static char *arg_default_options = NULL;
 static char *arg_default_keyfile = NULL;
+
+STATIC_DESTRUCTOR_REGISTER(arg_disks, hashmap_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_default_options, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_default_keyfile, freep);
 
 static int generate_keydev_mount(const char *name, const char *keydev, char **unit, char **mount) {
         _cleanup_free_ char *u = NULL, *what = NULL, *where = NULL, *name_escaped = NULL;
@@ -124,10 +127,10 @@ static int create_disk(
         swap = fstab_test_option(options, "swap\0");
         netdev = fstab_test_option(options, "_netdev\0");
 
-        if (tmp && swap) {
-                log_error("Device '%s' cannot be both 'tmp' and 'swap'. Ignoring.", name);
-                return -EINVAL;
-        }
+        if (tmp && swap)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Device '%s' cannot be both 'tmp' and 'swap'. Ignoring.",
+                                       name);
 
         name_escaped = specifier_escape(name);
         if (!name_escaped)
@@ -159,10 +162,9 @@ static int create_disk(
                         return log_oom();
         }
 
-        if (keydev && !password) {
-                log_error("Key device is specified, but path to the password file is missing.");
-                return -EINVAL;
-        }
+        if (keydev && !password)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Key device is specified, but path to the password file is missing.");
 
         r = generator_open_unit_file(arg_dest, NULL, n, &f);
         if (r < 0)
@@ -285,10 +287,6 @@ static int create_disk(
                 return log_error_errno(r, "Failed to write unit file %s: %m", n);
 
         if (!noauto) {
-                r = generator_add_symlink(arg_dest, d, "wants", n);
-                if (r < 0)
-                        return r;
-
                 r = generator_add_symlink(arg_dest,
                                           netdev ? "remote-cryptsetup.target" : "cryptsetup.target",
                                           nofail ? "wants" : "requires", n);
@@ -312,13 +310,16 @@ static int create_disk(
         return 0;
 }
 
-static void crypt_device_free(crypto_device *d) {
+static crypto_device* crypt_device_free(crypto_device *d) {
+        if (!d)
+                return NULL;
+
         free(d->uuid);
         free(d->keyfile);
         free(d->keydev);
         free(d->name);
         free(d->options);
-        free(d);
+        return mfree(d);
 }
 
 static crypto_device *get_crypto_device(const char *uuid) {
@@ -512,11 +513,9 @@ static int add_crypttab_devices(void) {
                         continue;
                 }
 
-                uuid = startswith(device, "UUID=");
+                uuid = STARTSWITH_SET(device, "UUID=", "luks-");
                 if (!uuid)
                         uuid = path_startswith(device, "/dev/disk/by-uuid/");
-                if (!uuid)
-                        uuid = startswith(name, "luks-");
                 if (uuid)
                         d = hashmap_get(arg_disks, uuid);
 
@@ -573,55 +572,34 @@ static int add_proc_cmdline_devices(void) {
         return 0;
 }
 
-int main(int argc, char *argv[]) {
+DEFINE_PRIVATE_HASH_OPS_WITH_VALUE_DESTRUCTOR(crypt_device_hash_ops, char, string_hash_func, string_compare_func,
+                                              crypto_device, crypt_device_free);
+
+static int run(const char *dest, const char *dest_early, const char *dest_late) {
         int r;
 
-        if (argc > 1 && argc != 4) {
-                log_error("This program takes three or no arguments.");
-                return EXIT_FAILURE;
-        }
+        assert_se(arg_dest = dest);
 
-        if (argc > 1)
-                arg_dest = argv[1];
-
-        log_set_prohibit_ipc(true);
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
-
-        umask(0022);
-
-        arg_disks = hashmap_new(&string_hash_ops);
-        if (!arg_disks) {
-                r = log_oom();
-                goto finish;
-        }
+        arg_disks = hashmap_new(&crypt_device_hash_ops);
+        if (!arg_disks)
+                return log_oom();
 
         r = proc_cmdline_parse(parse_proc_cmdline_item, NULL, PROC_CMDLINE_STRIP_RD_PREFIX);
-        if (r < 0) {
-                log_warning_errno(r, "Failed to parse kernel command line: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_warning_errno(r, "Failed to parse kernel command line: %m");
 
-        if (!arg_enabled) {
-                r = 0;
-                goto finish;
-        }
+        if (!arg_enabled)
+                return 0;
 
         r = add_crypttab_devices();
         if (r < 0)
-                goto finish;
+                return r;
 
         r = add_proc_cmdline_devices();
         if (r < 0)
-                goto finish;
+                return r;
 
-        r = 0;
-
-finish:
-        hashmap_free_with_destructor(arg_disks, crypt_device_free);
-        free(arg_default_options);
-        free(arg_default_keyfile);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return 0;
 }
+
+DEFINE_MAIN_GENERATOR_FUNCTION(run);

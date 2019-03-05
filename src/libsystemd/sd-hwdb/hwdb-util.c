@@ -5,7 +5,6 @@
 
 #include "alloc-util.h"
 #include "conf-files.h"
-#include "def.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
@@ -17,6 +16,7 @@
 #include "strbuf.h"
 #include "string-util.h"
 #include "strv.h"
+#include "tmpfile-util.h"
 
 static const char *default_hwdb_bin_dir = "/etc/udev";
 static const char * const conf_file_dirs[] = {
@@ -367,7 +367,7 @@ static int trie_store(struct trie *trie, const char *filename, bool compat) {
         int64_t size;
         struct trie_header_f h = {
                 .signature = HWDB_SIG,
-                .tool_version = htole64(atoi(PACKAGE_VERSION)),
+                .tool_version = htole64(PROJECT_VERSION),
                 .header_size = htole64(sizeof(struct trie_header_f)),
                 .node_size = htole64(sizeof(struct trie_node_f)),
                 .child_entry_size = htole64(sizeof(struct trie_child_entry_f)),

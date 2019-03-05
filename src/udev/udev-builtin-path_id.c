@@ -18,7 +18,7 @@
 #include "alloc-util.h"
 #include "dirent-util.h"
 #include "fd-util.h"
-#include "libudev-private.h"
+#include "libudev-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "sysexits.h"
@@ -109,7 +109,6 @@ static sd_device *handle_scsi_fibre_channel(sd_device *parent, char **path) {
 
         assert(parent);
         assert(path);
-
 
         if (sd_device_get_parent_with_subsystem_devtype(parent, "scsi", "scsi_target", &targetdev) < 0)
                 return NULL;

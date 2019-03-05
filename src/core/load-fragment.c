@@ -34,45 +34,42 @@
 #include "hexdecoct.h"
 #include "io-util.h"
 #include "ioprio.h"
+#include "ip-protocol-list.h"
 #include "journal-util.h"
 #include "load-fragment.h"
 #include "log.h"
 #include "missing.h"
-#include "mount-util.h"
+#include "mountpoint-util.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
 #if HAVE_SECCOMP
 #include "seccomp-util.h"
 #endif
-#include "securebits.h"
 #include "securebits-util.h"
 #include "signal-util.h"
-#include "socket-protocol-list.h"
 #include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "unit-name.h"
 #include "unit-printf.h"
 #include "user-util.h"
+#include "time-util.h"
 #include "web-util.h"
 
-static int supported_socket_protocol_from_string(const char *s) {
+static int parse_socket_protocol(const char *s) {
         int r;
 
-        if (isempty(s))
-                return IPPROTO_IP;
-
-        r = socket_protocol_from_name(s);
+        r = parse_ip_protocol(s);
         if (r < 0)
-                return -EINVAL;
+                return r;
         if (!IN_SET(r, IPPROTO_UDPLITE, IPPROTO_SCTP))
                 return -EPROTONOSUPPORT;
 
         return r;
 }
 
-DEFINE_CONFIG_PARSE(config_parse_socket_protocol, supported_socket_protocol_from_string, "Failed to parse socket protocol");
+DEFINE_CONFIG_PARSE(config_parse_socket_protocol, parse_socket_protocol, "Failed to parse socket protocol");
 DEFINE_CONFIG_PARSE(config_parse_exec_secure_bits, secure_bits_from_string, "Failed to parse secure bits");
 DEFINE_CONFIG_PARSE_ENUM(config_parse_collect_mode, collect_mode, CollectMode, "Failed to parse garbage collection mode");
 DEFINE_CONFIG_PARSE_ENUM(config_parse_device_policy, cgroup_device_policy, CGroupDevicePolicy, "Failed to parse device policy");
@@ -565,7 +562,8 @@ int config_parse_exec(
                 for (;;) {
                         /* We accept an absolute path as first argument.  If it's prefixed with - and the path doesn't
                          * exist, we ignore it instead of erroring out; if it's prefixed with @, we allow overriding of
-                         * argv[0]; if it's prefixed with +, it will be run with full privileges and no sandboxing; if
+                         * argv[0]; if it's prefixed with :, we will not do environment variable substitution;
+                         * if it's prefixed with +, it will be run with full privileges and no sandboxing; if
                          * it's prefixed with '!' we apply sandboxing, but do not change user/group credentials; if
                          * it's prefixed with '!!', then we apply user/group credentials if the kernel supports ambient
                          * capabilities -- if it doesn't we don't apply the credentials themselves, but do apply most
@@ -580,6 +578,8 @@ int config_parse_exec(
                                 ignore = true;
                         } else if (*f == '@' && !separate_argv0)
                                 separate_argv0 = true;
+                        else if (*f == ':' && !(flags & EXEC_COMMAND_NO_ENV_EXPAND))
+                                flags |= EXEC_COMMAND_NO_ENV_EXPAND;
                         else if (*f == '+' && !(flags & (EXEC_COMMAND_FULLY_PRIVILEGED|EXEC_COMMAND_NO_SETUID|EXEC_COMMAND_AMBIENT_MAGIC)))
                                 flags |= EXEC_COMMAND_FULLY_PRIVILEGED;
                         else if (*f == '!' && !(flags & (EXEC_COMMAND_FULLY_PRIVILEGED|EXEC_COMMAND_NO_SETUID|EXEC_COMMAND_AMBIENT_MAGIC)))
@@ -2872,8 +2872,8 @@ int config_parse_address_families(
                 }
 
                 af = af_from_name(word);
-                if (af <= 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, 0,
+                if (af < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, af,
                                    "Failed to parse address family, ignoring: %s", word);
                         continue;
                 }
@@ -3243,7 +3243,7 @@ int config_parse_device_allow(
                 return 0;
         }
 
-        if (!startswith(resolved, "block-") && !startswith(resolved, "char-")) {
+        if (!STARTSWITH_SET(resolved, "block-", "char-")) {
 
                 r = path_simplify_and_warn(resolved, 0, unit, filename, line, lvalue);
                 if (r < 0)
@@ -3754,7 +3754,7 @@ int config_parse_exec_directories(
 
                 if (path_startswith(k, "private")) {
                         log_syntax(unit, LOG_ERR, filename, line, 0,
-                                   "%s= path can't be 'private', ingoring assignment: %s", lvalue, word);
+                                   "%s= path can't be 'private', ignoring assignment: %s", lvalue, word);
                         continue;
                 }
 
@@ -4236,6 +4236,138 @@ int config_parse_emergency_action(
         return 0;
 }
 
+int config_parse_pid_file(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        _cleanup_free_ char *k = NULL, *n = NULL;
+        Unit *u = userdata;
+        char **s = data;
+        const char *e;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(u);
+
+        if (isempty(rvalue)) {
+                /* An empty assignment removes already set value. */
+                *s = mfree(*s);
+                return 0;
+        }
+
+        r = unit_full_printf(u, rvalue, &k);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to resolve unit specifiers in '%s', ignoring: %m", rvalue);
+                return 0;
+        }
+
+        /* If this is a relative path make it absolute by prefixing the /run */
+        n = path_make_absolute(k, u->manager->prefix[EXEC_DIRECTORY_RUNTIME]);
+        if (!n)
+                return log_oom();
+
+        /* Check that the result is a sensible path */
+        r = path_simplify_and_warn(n, PATH_CHECK_ABSOLUTE, unit, filename, line, lvalue);
+        if (r < 0)
+                return r;
+
+        e = path_startswith(n, "/var/run/");
+        if (e) {
+                char *z;
+
+                z = strjoin("/run/", e);
+                if (!z)
+                        return log_oom();
+
+                log_syntax(unit, LOG_NOTICE, filename, line, 0, "PIDFile= references path below legacy directory /var/run/, updating %s → %s; please update the unit file accordingly.", n, z);
+
+                free_and_replace(*s, z);
+        } else
+                free_and_replace(*s, n);
+
+        return 0;
+}
+
+int config_parse_exit_status(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        int *exit_status = data, r;
+        uint8_t u;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(exit_status);
+
+        if (isempty(rvalue)) {
+                *exit_status = -1;
+                return 0;
+        }
+
+        r = safe_atou8(rvalue, &u);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse exit status '%s', ignoring: %m", rvalue);
+                return 0;
+        }
+
+        *exit_status = u;
+        return 0;
+}
+
+int config_parse_disable_controllers(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        int r;
+        CGroupContext *c = data;
+        CGroupMask disabled_mask;
+
+        /* 1. If empty, make all controllers eligible for use again.
+         * 2. If non-empty, merge all listed controllers, space separated. */
+
+        if (isempty(rvalue)) {
+                c->disable_controllers = 0;
+                return 0;
+        }
+
+        r = cg_mask_from_string(rvalue, &disabled_mask);
+        if (r < 0 || disabled_mask <= 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r, "Invalid cgroup string: %s, ignoring", rvalue);
+                return 0;
+        }
+
+        c->disable_controllers |= disabled_mask;
+
+        return 0;
+}
+
 #define FOLLOW_MAX 8
 
 static int open_follow(char **filename, FILE **_f, Set *names, char **_final) {
@@ -4294,7 +4426,7 @@ static int open_follow(char **filename, FILE **_f, Set *names, char **_final) {
                 free_and_replace(*filename, target);
         }
 
-        f = fdopen(fd, "re");
+        f = fdopen(fd, "r");
         if (!f) {
                 safe_close(fd);
                 return -errno;
@@ -4415,7 +4547,6 @@ static int load_from_path(Unit *u, const char *path) {
                                 r = open_follow(&filename, &f, symlink_names, &id);
                         if (r >= 0)
                                 break;
-                        filename = mfree(filename);
 
                         /* ENOENT means that the file is missing or is a dangling symlink.
                          * ENOTDIR means that one of paths we expect to be is a directory
@@ -4427,6 +4558,7 @@ static int load_from_path(Unit *u, const char *path) {
                         else if (!IN_SET(r, -ENOENT, -ENOTDIR))
                                 return r;
 
+                        filename = mfree(filename);
                         /* Empty the symlink names for the next run */
                         set_clear_free(symlink_names);
                 }

@@ -17,6 +17,38 @@
 
 static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_cgroup_device_policy, cgroup_device_policy, CGroupDevicePolicy);
 
+static int property_get_cgroup_mask(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *error) {
+
+        CGroupMask *mask = userdata;
+        CGroupController ctrl;
+        int r;
+
+        assert(bus);
+        assert(reply);
+
+        r = sd_bus_message_open_container(reply, 'a', "s");
+        if (r < 0)
+                return r;
+
+        for (ctrl = 0; ctrl < _CGROUP_CONTROLLER_MAX; ctrl++) {
+                if ((*mask & CGROUP_CONTROLLER_TO_MASK(ctrl)) == 0)
+                        continue;
+
+                r = sd_bus_message_append(reply, "s", cgroup_controller_to_string(ctrl));
+                if (r < 0)
+                        return r;
+        }
+
+        return sd_bus_message_close_container(reply);
+}
+
 static int property_get_delegate_controllers(
                 sd_bus *bus,
                 const char *path,
@@ -27,8 +59,6 @@ static int property_get_delegate_controllers(
                 sd_bus_error *error) {
 
         CGroupContext *c = userdata;
-        CGroupController cc;
-        int r;
 
         assert(bus);
         assert(reply);
@@ -37,20 +67,7 @@ static int property_get_delegate_controllers(
         if (!c->delegate)
                 return sd_bus_message_append(reply, "as", 0);
 
-        r = sd_bus_message_open_container(reply, 'a', "s");
-        if (r < 0)
-                return r;
-
-        for (cc = 0; cc < _CGROUP_CONTROLLER_MAX; cc++) {
-                if ((c->delegate_controllers & CGROUP_CONTROLLER_TO_MASK(cc)) == 0)
-                        continue;
-
-                r = sd_bus_message_append(reply, "s", cgroup_controller_to_string(cc));
-                if (r < 0)
-                        return r;
-        }
-
-        return sd_bus_message_close_container(reply);
+        return property_get_cgroup_mask(bus, path, interface, property, reply, &c->delegate_controllers, error);
 }
 
 static int property_get_io_device_weight(
@@ -313,6 +330,7 @@ const sd_bus_vtable bus_cgroup_vtable[] = {
         SD_BUS_PROPERTY("CPUShares", "t", NULL, offsetof(CGroupContext, cpu_shares), 0),
         SD_BUS_PROPERTY("StartupCPUShares", "t", NULL, offsetof(CGroupContext, startup_cpu_shares), 0),
         SD_BUS_PROPERTY("CPUQuotaPerSecUSec", "t", bus_property_get_usec, offsetof(CGroupContext, cpu_quota_per_sec_usec), 0),
+        SD_BUS_PROPERTY("CPUQuotaPeriodUSec", "t", bus_property_get_usec, offsetof(CGroupContext, cpu_quota_period_usec), 0),
         SD_BUS_PROPERTY("IOAccounting", "b", bus_property_get_bool, offsetof(CGroupContext, io_accounting), 0),
         SD_BUS_PROPERTY("IOWeight", "t", NULL, offsetof(CGroupContext, io_weight), 0),
         SD_BUS_PROPERTY("StartupIOWeight", "t", NULL, offsetof(CGroupContext, startup_io_weight), 0),
@@ -342,6 +360,7 @@ const sd_bus_vtable bus_cgroup_vtable[] = {
         SD_BUS_PROPERTY("IPAccounting", "b", bus_property_get_bool, offsetof(CGroupContext, ip_accounting), 0),
         SD_BUS_PROPERTY("IPAddressAllow", "a(iayu)", property_get_ip_address_access, offsetof(CGroupContext, ip_address_allow), 0),
         SD_BUS_PROPERTY("IPAddressDeny", "a(iayu)", property_get_ip_address_access, offsetof(CGroupContext, ip_address_deny), 0),
+        SD_BUS_PROPERTY("DisableControllers", "as", property_get_cgroup_mask, offsetof(CGroupContext, disable_controllers), 0),
         SD_BUS_VTABLE_END
 };
 
@@ -603,7 +622,7 @@ int bus_cgroup_set_property(
         flags |= UNIT_PRIVATE;
 
         if (streq(name, "CPUAccounting"))
-                return bus_cgroup_set_boolean(u, name, &c->cpu_accounting, CGROUP_MASK_CPUACCT|CGROUP_MASK_CPU, message, flags, error);
+                return bus_cgroup_set_boolean(u, name, &c->cpu_accounting, get_cpu_accounting_mask(), message, flags, error);
 
         if (streq(name, "CPUWeight"))
                 return bus_cgroup_set_cpu_weight(u, name, &c->cpu_weight, message, flags, error);
@@ -695,6 +714,7 @@ int bus_cgroup_set_property(
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
                         c->cpu_quota_per_sec_usec = u64;
+                        u->warned_clamping_cpu_quota_period = false;
                         unit_invalidate_cgroup(u, CGROUP_MASK_CPU);
 
                         if (c->cpu_quota_per_sec_usec == USEC_INFINITY)
@@ -705,6 +725,29 @@ int bus_cgroup_set_property(
                                 unit_write_settingf(u, flags, "CPUQuota",
                                                     "CPUQuota=%0.f%%",
                                                     (double) (c->cpu_quota_per_sec_usec / 10000));
+                }
+
+                return 1;
+
+        } else if (streq(name, "CPUQuotaPeriodUSec")) {
+                uint64_t u64;
+
+                r = sd_bus_message_read(message, "t", &u64);
+                if (r < 0)
+                        return r;
+
+                if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        c->cpu_quota_period_usec = u64;
+                        u->warned_clamping_cpu_quota_period = false;
+                        unit_invalidate_cgroup(u, CGROUP_MASK_CPU);
+                        if (c->cpu_quota_period_usec == USEC_INFINITY)
+                                unit_write_setting(u, flags, "CPUQuotaPeriodSec", "CPUQuotaPeriodSec=");
+                        else {
+                                char v[FORMAT_TIMESPAN_MAX];
+                                unit_write_settingf(u, flags, "CPUQuotaPeriodSec",
+                                                    "CPUQuotaPeriodSec=%s",
+                                                    format_timespan(v, sizeof(v), c->cpu_quota_period_usec, 1));
+                        }
                 }
 
                 return 1;

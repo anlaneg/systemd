@@ -572,12 +572,11 @@ static int manager_setup_signals(Manager *m) {
         return 0;
 }
 
-static void manager_sanitize_environment(Manager *m) {
-        assert(m);
+static char** sanitize_environment(char **l) {
 
         /* Let's remove some environment variables that we need ourselves to communicate with our clients */
         strv_env_unset_many(
-                        m->environment,
+                        l,
                         "EXIT_CODE",
                         "EXIT_STATUS",
                         "INVOCATION_ID",
@@ -588,6 +587,7 @@ static void manager_sanitize_environment(Manager *m) {
                         "MAINPID",
                         "MANAGERPID",
                         "NOTIFY_SOCKET",
+                        "PIDFILE",
                         "REMOTE_ADDR",
                         "REMOTE_PORT",
                         "SERVICE_RESULT",
@@ -596,11 +596,15 @@ static void manager_sanitize_environment(Manager *m) {
                         NULL);
 
         /* Let's order the environment alphabetically, just to make it pretty */
-        strv_sort(m->environment);
+        strv_sort(l);
+
+        return l;
 }
 
-static int manager_default_environment(Manager *m) {
+int manager_default_environment(Manager *m) {
         assert(m);
+
+        m->transient_environment = strv_free(m->transient_environment);
 
         if (MANAGER_IS_SYSTEM(m)) {
                 /* The system manager always starts with a clean
@@ -610,20 +614,19 @@ static int manager_default_environment(Manager *m) {
                  * The initial passed environment is untouched to keep
                  * /proc/self/environ valid; it is used for tagging
                  * the init process inside containers. */
-                m->environment = strv_new("PATH=" DEFAULT_PATH,
-                                          NULL);
+                m->transient_environment = strv_new("PATH=" DEFAULT_PATH);
 
                 /* Import locale variables LC_*= from configuration */
-                locale_setup(&m->environment);
+                (void) locale_setup(&m->transient_environment);
         } else
                 /* The user manager passes its own environment
                  * along to its children. */
-                m->environment = strv_copy(environ);
+                m->transient_environment = strv_copy(environ);
 
-        if (!m->environment)
-                return -ENOMEM;
+        if (!m->transient_environment)
+                return log_oom();
 
-        manager_sanitize_environment(m);
+        sanitize_environment(m->transient_environment);
 
         return 0;
 }
@@ -1346,7 +1349,8 @@ Manager* manager_free(Manager *m) {
         free(m->notify_socket);
 
         lookup_paths_free(&m->lookup_paths);
-        strv_free(m->environment);
+        strv_free(m->transient_environment);
+        strv_free(m->client_environment);
 
         hashmap_free(m->cgroup_unit);
         set_free_free(m->unit_path_cache);
@@ -2150,7 +2154,7 @@ static int manager_dispatch_run_queue(sd_event_source *source, void *userdata) {
                 assert(j->installed);
                 assert(j->in_run_queue);
 
-                job_run_and_invalidate(j);
+                (void) job_run_and_invalidate(j);
         }
 
         if (m->n_running_jobs > 0)
@@ -2169,57 +2173,63 @@ static unsigned manager_dispatch_dbus_queue(Manager *m) {
 
         assert(m);
 
-        if (m->dispatching_dbus_queue)
-                return 0;
+        /* When we are reloading, let's not wait with generating signals, since we need to exit the manager as quickly
+         * as we can. There's no point in throttling generation of signals in that case. */
+        if (MANAGER_IS_RELOADING(m) || m->send_reloading_done || m->pending_reload_message)
+                budget = (unsigned) -1; /* infinite budget in this case */
+        else {
+                /* Anything to do at all? */
+                if (!m->dbus_unit_queue && !m->dbus_job_queue)
+                        return 0;
 
-        /* Anything to do at all? */
-        if (!m->dbus_unit_queue && !m->dbus_job_queue && !m->send_reloading_done && !m->queued_message)
-                return 0;
+                /* Do we have overly many messages queued at the moment? If so, let's not enqueue more on top, let's
+                 * sit this cycle out, and process things in a later cycle when the queues got a bit emptier. */
+                if (manager_bus_n_queued_write(m) > MANAGER_BUS_BUSY_THRESHOLD)
+                        return 0;
 
-        /* Do we have overly many messages queued at the moment? If so, let's not enqueue more on top, let's sit this
-         * cycle out, and process things in a later cycle when the queues got a bit emptier. */
-        if (manager_bus_n_queued_write(m) > MANAGER_BUS_BUSY_THRESHOLD)
-                return 0;
+                /* Only process a certain number of units/jobs per event loop iteration. Even if the bus queue wasn't
+                 * overly full before this call we shouldn't increase it in size too wildly in one step, and we
+                 * shouldn't monopolize CPU time with generating these messages. Note the difference in counting of
+                 * this "budget" and the "threshold" above: the "budget" is decreased only once per generated message,
+                 * regardless how many busses/direct connections it is enqueued on, while the "threshold" is applied to
+                 * each queued instance of bus message, i.e. if the same message is enqueued to five busses/direct
+                 * connections it will be counted five times. This difference in counting ("references"
+                 * vs. "instances") is primarily a result of the fact that it's easier to implement it this way,
+                 * however it also reflects the thinking that the "threshold" should put a limit on used queue memory,
+                 * i.e. space, while the "budget" should put a limit on time. Also note that the "threshold" is
+                 * currently chosen much higher than the "budget". */
+                budget = MANAGER_BUS_MESSAGE_BUDGET;
+        }
 
-        /* Only process a certain number of units/jobs per event loop iteration. Even if the bus queue wasn't overly
-         * full before this call we shouldn't increase it in size too wildly in one step, and we shouldn't monopolize
-         * CPU time with generating these messages. Note the difference in counting of this "budget" and the
-         * "threshold" above: the "budget" is decreased only once per generated message, regardless how many
-         * busses/direct connections it is enqueued on, while the "threshold" is applied to each queued instance of bus
-         * message, i.e. if the same message is enqueued to five busses/direct connections it will be counted five
-         * times. This difference in counting ("references" vs. "instances") is primarily a result of the fact that
-         * it's easier to implement it this way, however it also reflects the thinking that the "threshold" should put
-         * a limit on used queue memory, i.e. space, while the "budget" should put a limit on time. Also note that
-         * the "threshold" is currently chosen much higher than the "budget". */
-        budget = MANAGER_BUS_MESSAGE_BUDGET;
-
-        m->dispatching_dbus_queue = true;
-
-        while (budget > 0 && (u = m->dbus_unit_queue)) {
+        while (budget != 0 && (u = m->dbus_unit_queue)) {
 
                 assert(u->in_dbus_queue);
 
                 bus_unit_send_change_signal(u);
-                n++, budget--;
+                n++;
+
+                if (budget != (unsigned) -1)
+                        budget--;
         }
 
-        while (budget > 0 && (j = m->dbus_job_queue)) {
+        while (budget != 0 && (j = m->dbus_job_queue)) {
                 assert(j->in_dbus_queue);
 
                 bus_job_send_change_signal(j);
-                n++, budget--;
+                n++;
+
+                if (budget != (unsigned) -1)
+                        budget--;
         }
 
-        m->dispatching_dbus_queue = false;
-
-        if (budget > 0 && m->send_reloading_done) {
+        if (m->send_reloading_done) {
                 m->send_reloading_done = false;
                 bus_manager_send_reloading(m, false);
-                n++, budget--;
+                n++;
         }
 
-        if (budget > 0 && m->queued_message) {
-                bus_send_queued_message(m);
+        if (m->pending_reload_message) {
+                bus_send_pending_reload_message(m);
                 n++;
         }
 
@@ -2228,7 +2238,7 @@ static unsigned manager_dispatch_dbus_queue(Manager *m) {
 
 static int manager_dispatch_cgroups_agent_fd(sd_event_source *source, int fd, uint32_t revents, void *userdata) {
         Manager *m = userdata;
-        char buf[PATH_MAX+1];
+        char buf[PATH_MAX];
         ssize_t n;
 
         n = recv(fd, buf, sizeof(buf), 0);
@@ -2556,7 +2566,7 @@ static void manager_handle_ctrl_alt_del(Manager *m) {
         if (ratelimit_below(&m->ctrl_alt_del_ratelimit) || m->cad_burst_action == EMERGENCY_ACTION_NONE)
                 manager_start_target(m, SPECIAL_CTRL_ALT_DEL_TARGET, JOB_REPLACE_IRREVERSIBLY);
         else
-                emergency_action(m, m->cad_burst_action, EMERGENCY_ACTION_WARN, NULL,
+                emergency_action(m, m->cad_burst_action, EMERGENCY_ACTION_WARN, NULL, -1,
                                 "Ctrl-Alt-Del was pressed more than 7 times within 2s");
 }
 
@@ -2794,10 +2804,8 @@ static int manager_dispatch_timezone_change(
         log_debug("inotify event for /etc/localtime");
 
         changed = manager_read_timezone_stat(m);
-        if (changed < 0)
+        if (changed <= 0)
                 return changed;
-        if (!changed)
-                return 0;
 
         /* Something changed, restart the watch, to ensure we watch the new /etc/localtime if it changed */
         (void) manager_setup_timezone_change(m);
@@ -3160,7 +3168,7 @@ int manager_serialize(
         }
 
         if (!switching_root)
-                (void) serialize_strv(f, "env", m->environment);
+                (void) serialize_strv(f, "env", m->client_environment);
 
         if (m->notify_fd >= 0) {
                 r = serialize_fd(f, fds, "notify-fd", m->notify_fd);
@@ -3251,11 +3259,11 @@ static int manager_deserialize_one_unit(Manager *m, const char *name, FILE *f, F
 }
 
 static int manager_deserialize_units(Manager *m, FILE *f, FDSet *fds) {
-        _cleanup_free_ char *line = NULL;
         const char *unit_name;
         int r;
 
         for (;;) {
+                _cleanup_free_ char *line = NULL;
                 /* Start marker */
                 r = read_line(f, LONG_LINE_MAX, &line);
                 if (r < 0)
@@ -3393,7 +3401,7 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                                 manager_override_log_target(m, target);
 
                 } else if (startswith(l, "env=")) {
-                        r = deserialize_environment(l + 4, &m->environment);
+                        r = deserialize_environment(l + 4, &m->client_environment);
                         if (r < 0)
                                 log_notice_errno(r, "Failed to parse environment entry: \"%s\", ignoring: %m", l);
 
@@ -3470,17 +3478,6 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
         }
 
         return manager_deserialize_units(m, f, fds);
-}
-
-static void manager_flush_finished_jobs(Manager *m) {
-        Job *j;
-
-        while ((j = set_steal_first(m->pending_finished_jobs))) {
-                bus_job_send_removed_signal(j);
-                job_free(j);
-        }
-
-        m->pending_finished_jobs = set_free(m->pending_finished_jobs);
 }
 
 int manager_reload(Manager *m) {
@@ -3567,9 +3564,6 @@ int manager_reload(Manager *m) {
         m->n_reloading--;
 
         manager_ready(m);
-
-        if (!MANAGER_IS_RELOADING(m))
-                manager_flush_finished_jobs(m);
 
         m->send_reloading_done = true;
         return 0;
@@ -3816,7 +3810,12 @@ static const char* user_env_generator_binary_paths[] = {
 static int manager_run_environment_generators(Manager *m) {
         char **tmp = NULL; /* this is only used in the forked process, no cleanup here */
         const char **paths;
-        void* args[] = {&tmp, &tmp, &m->environment};
+        void* args[] = {
+                [STDOUT_GENERATE] = &tmp,
+                [STDOUT_COLLECT] = &tmp,
+                [STDOUT_CONSUME] = &m->transient_environment,
+        };
+        int r;
 
         if (MANAGER_IS_TEST_RUN(m) && !(m->test_run_flags & MANAGER_TEST_RUN_ENV_GENERATORS))
                 return 0;
@@ -3826,7 +3825,10 @@ static int manager_run_environment_generators(Manager *m) {
         if (!generator_path_any(paths))
                 return 0;
 
-        return execute_directories(paths, DEFAULT_TIMEOUT_USEC, gather_environment, args, NULL, m->environment);
+        RUN_WITH_UMASK(0022)
+                r = execute_directories(paths, DEFAULT_TIMEOUT_USEC, gather_environment,
+                                        args, NULL, m->transient_environment, EXEC_DIR_PARALLEL | EXEC_DIR_IGNORE_ERRORS);
+        return r;
 }
 
 static int manager_run_generators(Manager *m) {
@@ -3859,8 +3861,8 @@ static int manager_run_generators(Manager *m) {
         argv[4] = NULL;
 
         RUN_WITH_UMASK(0022)
-                (void) execute_directories((const char* const*) paths, DEFAULT_TIMEOUT_USEC,
-                                           NULL, NULL, (char**) argv, m->environment);
+                (void) execute_directories((const char* const*) paths, DEFAULT_TIMEOUT_USEC, NULL, NULL,
+                                           (char**) argv, m->transient_environment, EXEC_DIR_PARALLEL | EXEC_DIR_IGNORE_ERRORS);
 
         r = 0;
 
@@ -3869,11 +3871,36 @@ finish:
         return r;
 }
 
-int manager_environment_add(Manager *m, char **minus, char **plus) {
-        char **a = NULL, **b = NULL, **l;
+int manager_transient_environment_add(Manager *m, char **plus) {
+        char **a;
+
         assert(m);
 
-        l = m->environment;
+        if (strv_isempty(plus))
+                return 0;
+
+        a = strv_env_merge(2, m->transient_environment, plus);
+        if (!a)
+                return log_oom();
+
+        sanitize_environment(a);
+
+        return strv_free_and_replace(m->transient_environment, a);
+}
+
+int manager_client_environment_modify(
+                Manager *m,
+                char **minus,
+                char **plus) {
+
+        char **a = NULL, **b = NULL, **l;
+
+        assert(m);
+
+        if (strv_isempty(minus) && strv_isempty(plus))
+                return 0;
+
+        l = m->client_environment;
 
         if (!strv_isempty(minus)) {
                 a = strv_env_delete(l, 1, minus);
@@ -3893,16 +3920,29 @@ int manager_environment_add(Manager *m, char **minus, char **plus) {
                 l = b;
         }
 
-        if (m->environment != l)
-                strv_free(m->environment);
+        if (m->client_environment != l)
+                strv_free(m->client_environment);
+
         if (a != l)
                 strv_free(a);
         if (b != l)
                 strv_free(b);
 
-        m->environment = l;
-        manager_sanitize_environment(m);
+        m->client_environment = sanitize_environment(l);
+        return 0;
+}
 
+int manager_get_effective_environment(Manager *m, char ***ret) {
+        char **l;
+
+        assert(m);
+        assert(ret);
+
+        l = strv_env_merge(2, m->transient_environment, m->client_environment);
+        if (!l)
+                return -ENOMEM;
+
+        *ret = l;
         return 0;
 }
 
@@ -4118,7 +4158,7 @@ void manager_status_printf(Manager *m, StatusType type, const char *status, cons
                 return;
 
         va_start(ap, format);
-        status_vprintf(status, true, type == STATUS_TYPE_EPHEMERAL, format, ap);
+        status_vprintf(status, SHOW_STATUS_ELLIPSIZE|(type == STATUS_TYPE_EPHEMERAL ? SHOW_STATUS_EPHEMERAL : 0), format, ap);
         va_end(ap);
 }
 
@@ -4417,7 +4457,7 @@ static void manager_deserialize_uid_refs_one_internal(
 
         r = hashmap_replace(*uid_refs, UID_TO_PTR(uid), UINT32_TO_PTR(c));
         if (r < 0) {
-                log_debug("Failed to add UID reference entry");
+                log_debug_errno(r, "Failed to add UID reference entry: %m");
                 return;
         }
 }

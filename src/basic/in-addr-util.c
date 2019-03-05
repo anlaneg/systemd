@@ -11,6 +11,8 @@
 #include "in-addr-util.h"
 #include "macro.h"
 #include "parse-util.h"
+#include "random-util.h"
+#include "strxcpyx.h"
 #include "util.h"
 
 bool in4_addr_is_null(const struct in_addr *a) {
@@ -66,6 +68,14 @@ bool in4_addr_is_localhost(const struct in_addr *a) {
 
         /* All of 127.x.x.x is localhost. */
         return (be32toh(a->s_addr) & UINT32_C(0xFF000000)) == UINT32_C(127) << 24;
+}
+
+bool in4_addr_is_non_local(const struct in_addr *a) {
+        /* Whether the address is not null and not localhost.
+         *
+         * As such, it is suitable to configure as DNS/NTP server from DHCP. */
+        return !in4_addr_is_null(a) &&
+               !in4_addr_is_localhost(a);
 }
 
 int in_addr_is_localhost(int family, const union in_addr_union *u) {
@@ -207,8 +217,85 @@ int in_addr_prefix_next(int family, union in_addr_union *u, unsigned prefixlen) 
         return -EAFNOSUPPORT;
 }
 
+int in_addr_random_prefix(
+                int family,
+                union in_addr_union *u,
+                unsigned prefixlen_fixed_part,
+                unsigned prefixlen) {
+
+        assert(u);
+
+        /* Random network part of an address by one. */
+
+        if (prefixlen <= 0)
+                return 0;
+
+        if (family == AF_INET) {
+                uint32_t c, n;
+
+                if (prefixlen_fixed_part > 32)
+                        prefixlen_fixed_part = 32;
+                if (prefixlen > 32)
+                        prefixlen = 32;
+                if (prefixlen_fixed_part >= prefixlen)
+                        return -EINVAL;
+
+                c = be32toh(u->in.s_addr);
+                c &= ((UINT32_C(1) << prefixlen_fixed_part) - 1) << (32 - prefixlen_fixed_part);
+
+                random_bytes(&n, sizeof(n));
+                n &= ((UINT32_C(1) << (prefixlen - prefixlen_fixed_part)) - 1) << (32 - prefixlen);
+
+                u->in.s_addr = htobe32(n | c);
+                return 1;
+        }
+
+        if (family == AF_INET6) {
+                struct in6_addr n;
+                unsigned i, j;
+
+                if (prefixlen_fixed_part > 128)
+                        prefixlen_fixed_part = 128;
+                if (prefixlen > 128)
+                        prefixlen = 128;
+                if (prefixlen_fixed_part >= prefixlen)
+                        return -EINVAL;
+
+                random_bytes(&n, sizeof(n));
+
+                for (i = 0; i < 16; i++) {
+                        uint8_t mask_fixed_part = 0, mask = 0;
+
+                        if (i < (prefixlen_fixed_part + 7) / 8) {
+                                if (i < prefixlen_fixed_part / 8)
+                                        mask_fixed_part = 0xffu;
+                                else {
+                                        j = prefixlen_fixed_part % 8;
+                                        mask_fixed_part = ((UINT8_C(1) << (j + 1)) - 1) << (8 - j);
+                                }
+                        }
+
+                        if (i < (prefixlen + 7) / 8) {
+                                if (i < prefixlen / 8)
+                                        mask = 0xffu ^ mask_fixed_part;
+                                else {
+                                        j = prefixlen % 8;
+                                        mask = (((UINT8_C(1) << (j + 1)) - 1) << (8 - j)) ^ mask_fixed_part;
+                                }
+                        }
+
+                        u->in6.s6_addr[i] &= mask_fixed_part;
+                        u->in6.s6_addr[i] |= n.s6_addr[i] & mask;
+                }
+
+                return 1;
+        }
+
+        return -EAFNOSUPPORT;
+}
+
 int in_addr_to_string(int family, const union in_addr_union *u, char **ret) {
-        char *x;
+        _cleanup_free_ char *x = NULL;
         size_t l;
 
         assert(u);
@@ -226,18 +313,50 @@ int in_addr_to_string(int family, const union in_addr_union *u, char **ret) {
                 return -ENOMEM;
 
         errno = 0;
-        if (!inet_ntop(family, u, x, l)) {
-                free(x);
+        if (!inet_ntop(family, u, x, l))
                 return errno > 0 ? -errno : -EINVAL;
-        }
 
-        *ret = x;
+        *ret = TAKE_PTR(x);
+        return 0;
+}
+
+int in_addr_prefix_to_string(int family, const union in_addr_union *u, unsigned prefixlen, char **ret) {
+        _cleanup_free_ char *x = NULL;
+        char *p;
+        size_t l;
+
+        assert(u);
+        assert(ret);
+
+        if (family == AF_INET)
+                l = INET_ADDRSTRLEN + 3;
+        else if (family == AF_INET6)
+                l = INET6_ADDRSTRLEN + 4;
+        else
+                return -EAFNOSUPPORT;
+
+        if (prefixlen > FAMILY_ADDRESS_SIZE(family) * 8)
+                return -EINVAL;
+
+        x = new(char, l);
+        if (!x)
+                return -ENOMEM;
+
+        errno = 0;
+        if (!inet_ntop(family, u, x, l))
+                return errno > 0 ? -errno : -EINVAL;
+
+        p = x + strlen(x);
+        l -= strlen(x);
+        (void) strpcpyf(&p, l, "/%u", prefixlen);
+
+        *ret = TAKE_PTR(x);
         return 0;
 }
 
 int in_addr_ifindex_to_string(int family, const union in_addr_union *u, int ifindex, char **ret) {
+        _cleanup_free_ char *x = NULL;
         size_t l;
-        char *x;
         int r;
 
         assert(u);
@@ -263,14 +382,12 @@ int in_addr_ifindex_to_string(int family, const union in_addr_union *u, int ifin
                 return -ENOMEM;
 
         errno = 0;
-        if (!inet_ntop(family, u, x, l)) {
-                free(x);
+        if (!inet_ntop(family, u, x, l))
                 return errno > 0 ? -errno : -EINVAL;
-        }
 
         sprintf(strchr(x, 0), "%%%i", ifindex);
-        *ret = x;
 
+        *ret = TAKE_PTR(x);
         return 0;
 
 fallback:
@@ -314,6 +431,7 @@ int in_addr_from_string_auto(const char *s, int *ret_family, union in_addr_union
 }
 
 int in_addr_ifindex_from_string_auto(const char *s, int *family, union in_addr_union *ret, int *ifindex) {
+        _cleanup_free_ char *buf = NULL;
         const char *suffix;
         int r, ifi = 0;
 
@@ -341,7 +459,11 @@ int in_addr_ifindex_from_string_auto(const char *s, int *family, union in_addr_u
                         }
                 }
 
-                s = strndupa(s, suffix - s);
+                buf = strndup(s, suffix - s);
+                if (!buf)
+                        return -ENOMEM;
+
+                s = buf;
         }
 
         r = in_addr_from_string_auto(s, family, ret);
@@ -357,7 +479,7 @@ int in_addr_ifindex_from_string_auto(const char *s, int *family, union in_addr_u
 unsigned char in4_addr_netmask_to_prefixlen(const struct in_addr *addr) {
         assert(addr);
 
-        return 32 - u32ctz(be32toh(addr->s_addr));
+        return 32U - u32ctz(be32toh(addr->s_addr));
 }
 
 struct in_addr* in4_addr_prefixlen_to_netmask(struct in_addr *addr, unsigned char prefixlen) {
@@ -496,6 +618,7 @@ int in_addr_prefix_from_string(
                 union in_addr_union *ret_prefix,
                 unsigned char *ret_prefixlen) {
 
+        _cleanup_free_ char *str = NULL;
         union in_addr_union buffer;
         const char *e, *l;
         unsigned char k;
@@ -507,9 +630,13 @@ int in_addr_prefix_from_string(
                 return -EAFNOSUPPORT;
 
         e = strchr(p, '/');
-        if (e)
-                l = strndupa(p, e - p);
-        else
+        if (e) {
+                str = strndup(p, e - p);
+                if (!str)
+                        return -ENOMEM;
+
+                l = str;
+        } else
                 l = p;
 
         r = in_addr_from_string(family, l, &buffer);
@@ -531,12 +658,14 @@ int in_addr_prefix_from_string(
         return 0;
 }
 
-int in_addr_prefix_from_string_auto(
+int in_addr_prefix_from_string_auto_internal(
                 const char *p,
+                InAddrPrefixLenMode mode,
                 int *ret_family,
                 union in_addr_union *ret_prefix,
                 unsigned char *ret_prefixlen) {
 
+        _cleanup_free_ char *str = NULL;
         union in_addr_union buffer;
         const char *e, *l;
         unsigned char k;
@@ -545,9 +674,13 @@ int in_addr_prefix_from_string_auto(
         assert(p);
 
         e = strchr(p, '/');
-        if (e)
-                l = strndupa(p, e - p);
-        else
+        if (e) {
+                str = strndup(p, e - p);
+                if (!str)
+                        return -ENOMEM;
+
+                l = str;
+        } else
                 l = p;
 
         r = in_addr_from_string_auto(l, &family, &buffer);
@@ -559,7 +692,23 @@ int in_addr_prefix_from_string_auto(
                 if (r < 0)
                         return r;
         } else
-                k = FAMILY_ADDRESS_SIZE(family) * 8;
+                switch (mode) {
+                case PREFIXLEN_FULL:
+                        k = FAMILY_ADDRESS_SIZE(family) * 8;
+                        break;
+                case PREFIXLEN_REFUSE:
+                        return -ENOANO; /* To distinguish this error from others. */
+                case PREFIXLEN_LEGACY:
+                        if (family == AF_INET) {
+                                r = in4_addr_default_prefixlen(&buffer.in, &k);
+                                if (r < 0)
+                                        return r;
+                        } else
+                                k = 0;
+                        break;
+                default:
+                        assert_not_reached("Invalid prefixlen mode");
+                }
 
         if (ret_family)
                 *ret_family = family;
@@ -572,15 +721,12 @@ int in_addr_prefix_from_string_auto(
 
 }
 
-void in_addr_data_hash_func(const void *p, struct siphash *state) {
-        const struct in_addr_data *a = p;
-
+static void in_addr_data_hash_func(const struct in_addr_data *a, struct siphash *state) {
         siphash24_compress(&a->family, sizeof(a->family), state);
         siphash24_compress(&a->address, FAMILY_ADDRESS_SIZE(a->family), state);
 }
 
-int in_addr_data_compare_func(const void *a, const void *b) {
-        const struct in_addr_data *x = a, *y = b;
+static int in_addr_data_compare_func(const struct in_addr_data *x, const struct in_addr_data *y) {
         int r;
 
         r = CMP(x->family, y->family);
@@ -590,7 +736,4 @@ int in_addr_data_compare_func(const void *a, const void *b) {
         return memcmp(&x->address, &y->address, FAMILY_ADDRESS_SIZE(x->family));
 }
 
-const struct hash_ops in_addr_data_hash_ops = {
-        .hash = in_addr_data_hash_func,
-        .compare = in_addr_data_compare_func,
-};
+DEFINE_HASH_OPS(in_addr_data_hash_ops, struct in_addr_data, in_addr_data_hash_func, in_addr_data_compare_func);

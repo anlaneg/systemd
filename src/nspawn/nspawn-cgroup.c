@@ -8,6 +8,7 @@
 #include "fs-util.h"
 #include "mkdir.h"
 #include "mount-util.h"
+#include "mountpoint-util.h"
 #include "nspawn-cgroup.h"
 #include "nspawn-mount.h"
 #include "path-util.h"
@@ -122,7 +123,7 @@ int sync_cgroup(pid_t pid, CGroupUnified unified_requested, uid_t uid_shift) {
         (void) mkdir_parents(fn, 0755);
 
         sprintf(pid_string, PID_FMT, pid);
-        r = write_string_file(fn, pid_string, 0);
+        r = write_string_file(fn, pid_string, WRITE_STRING_FILE_DISABLE_BUFFER);
         if (r < 0) {
                 log_error_errno(r, "Failed to move process: %m");
                 goto finish;
@@ -189,7 +190,7 @@ int create_subcgroup(pid_t pid, bool keep_unit, CGroupUnified unified_requested)
         }
 
         /* Try to enable as many controllers as possible for the new payload. */
-        (void) cg_enable_everywhere(supported, supported, cgroup);
+        (void) cg_enable_everywhere(supported, supported, cgroup, NULL);
         return 0;
 }
 
@@ -525,8 +526,8 @@ static int mount_unified_cgroups(const char *dest) {
                 if (errno != ENOENT)
                         return log_error_errno(errno, "Failed to determine if mount point %s contains the unified cgroup hierarchy: %m", p);
 
-                log_error("%s is already mounted but not a unified cgroup hierarchy. Refusing.", p);
-                return -EINVAL;
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "%s is already mounted but not a unified cgroup hierarchy. Refusing.", p);
         }
 
         return mount_verbose(LOG_ERR, "cgroup", p, "cgroup2", MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL);

@@ -18,7 +18,7 @@
 #include "user-util.h"
 #include "util.h"
 
-_public_ char *sd_id128_to_string(sd_id128_t id, char s[SD_ID128_STRING_MAX]) {
+_public_ char *sd_id128_to_string(sd_id128_t id, char s[_SD_ARRAY_STATIC SD_ID128_STRING_MAX]) {
         unsigned n;
 
         assert_return(s, NULL);
@@ -272,7 +272,9 @@ _public_ int sd_id128_randomize(sd_id128_t *ret) {
 
         assert_return(ret, -EINVAL);
 
-        r = acquire_random_bytes(&t, sizeof t, true);
+        /* We allow usage if x86-64 RDRAND here. It might not be trusted enough for keeping secrets, but it should be
+         * fine for UUIDS. */
+        r = genuine_random_bytes(&t, sizeof t, RANDOM_ALLOW_RDRAND);
         if (r < 0)
                 return r;
 

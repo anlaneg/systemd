@@ -308,6 +308,7 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "io_cancel\0"
                 "io_destroy\0"
                 "io_getevents\0"
+                "io_pgetevents\0"
                 "io_setup\0"
                 "io_submit\0"
         },
@@ -370,8 +371,6 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 .value =
                 "lookup_dcookie\0"
                 "perf_event_open\0"
-                "process_vm_readv\0"
-                "process_vm_writev\0"
                 "ptrace\0"
                 "rtas\0"
 #ifdef __NR_s390_runtime_instr
@@ -619,7 +618,9 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "bpf\0"
                 "capset\0"
                 "chroot\0"
+                "fanotify_init\0"
                 "nfsservctl\0"
+                "open_by_handle_at\0"
                 "pivot_root\0"
                 "quotactl\0"
                 "setdomainname\0"
@@ -792,7 +793,6 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "ioprio_get\0"
                 "kcmp\0"
                 "madvise\0"
-                "mincore\0"
                 "mprotect\0"
                 "mremap\0"
                 "name_to_handle_at\0"
@@ -871,10 +871,10 @@ int seccomp_add_syscall_filter_item(scmp_filter_ctx *seccomp, const char *name, 
                 const SyscallFilterSet *other;
 
                 other = syscall_filter_set_find(name);
-                if (!other) {
-                        log_debug("Filter set %s is not known!", name);
-                        return -EINVAL;
-                }
+                if (!other)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Filter set %s is not known!",
+                                               name);
 
                 return seccomp_add_syscall_filter_set(seccomp, other, action, exclude, log_missing);
 
@@ -933,7 +933,7 @@ int seccomp_load_syscall_filter_set(uint32_t default_action, const SyscallFilter
         assert(set);
 
         /* The one-stop solution: allocate a seccomp object, add the specified filter to it, and apply it. Once for
-         * earch local arch. */
+         * each local arch. */
 
         SECCOMP_FOREACH_LOCAL_ARCH(arch) {
                 _cleanup_(seccomp_releasep) scmp_filter_ctx seccomp = NULL;
@@ -1758,6 +1758,43 @@ int seccomp_lock_personality(unsigned long personality) {
                         return r;
                 if (r < 0)
                         log_debug_errno(r, "Failed to enable personality lock for architecture %s, skipping: %m", seccomp_arch_to_string(arch));
+        }
+
+        return 0;
+}
+
+int seccomp_protect_hostname(void) {
+        uint32_t arch;
+        int r;
+
+        SECCOMP_FOREACH_LOCAL_ARCH(arch) {
+                _cleanup_(seccomp_releasep) scmp_filter_ctx seccomp = NULL;
+
+                r = seccomp_init_for_arch(&seccomp, arch, SCMP_ACT_ALLOW);
+                if (r < 0)
+                        return r;
+
+                r = seccomp_rule_add_exact(
+                                seccomp,
+                                SCMP_ACT_ERRNO(EPERM),
+                                SCMP_SYS(sethostname),
+                                0);
+                if (r < 0)
+                        continue;
+
+                r = seccomp_rule_add_exact(
+                                seccomp,
+                                SCMP_ACT_ERRNO(EPERM),
+                                SCMP_SYS(setdomainname),
+                                0);
+                if (r < 0)
+                        continue;
+
+                r = seccomp_load(seccomp);
+                if (IN_SET(r, -EPERM, -EACCES))
+                        return r;
+                if (r < 0)
+                        log_debug_errno(r, "Failed to apply hostname restrictions for architecture %s, skipping: %m", seccomp_arch_to_string(arch));
         }
 
         return 0;

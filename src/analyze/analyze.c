@@ -12,24 +12,29 @@
 #include "sd-bus.h"
 
 #include "alloc-util.h"
+#include "analyze-security.h"
 #include "analyze-verify.h"
+#include "build.h"
 #include "bus-error.h"
 #include "bus-unit-util.h"
 #include "bus-util.h"
 #include "calendarspec.h"
-#include "def.h"
 #include "conf-files.h"
 #include "copy.h"
+#include "def.h"
 #include "fd-util.h"
+#include "fileio.h"
 #include "glob-util.h"
 #include "hashmap.h"
 #include "locale-util.h"
 #include "log.h"
+#include "main-func.h"
 #include "pager.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "pretty-print.h"
 #if HAVE_SECCOMP
-#include "seccomp-util.h"
+#  include "seccomp-util.h"
 #endif
 #include "special.h"
 #include "strv.h"
@@ -66,13 +71,17 @@ static enum dot {
 static char** arg_dot_from_patterns = NULL;
 static char** arg_dot_to_patterns = NULL;
 static usec_t arg_fuzz = 0;
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
 static BusTransport arg_transport = BUS_TRANSPORT_LOCAL;
 static const char *arg_host = NULL;
 static UnitFileScope arg_scope = UNIT_FILE_SYSTEM;
 static bool arg_man = true;
 static bool arg_generators = false;
 static const char *arg_root = NULL;
+static unsigned arg_iterations = 1;
+
+STATIC_DESTRUCTOR_REGISTER(arg_dot_from_patterns, strv_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_dot_to_patterns, strv_freep);
 
 struct boot_times {
         usec_t firmware_time;
@@ -163,7 +172,7 @@ static int bus_get_uint64_property(sd_bus *bus, const char *path, const char *in
                         't', val);
 
         if (r < 0)
-                return log_error_errno(r, "Failed to parse reply: %s", bus_error_message(&error, -r));
+                return log_error_errno(r, "Failed to parse reply: %s", bus_error_message(&error, r));
 
         return 0;
 }
@@ -186,7 +195,7 @@ static int bus_get_unit_property_strv(sd_bus *bus, const char *path, const char 
                         &error,
                         strv);
         if (r < 0)
-                return log_error_errno(r, "Failed to get unit property %s: %s", property, bus_error_message(&error, -r));
+                return log_error_errno(r, "Failed to get unit property %s: %s", property, bus_error_message(&error, r));
 
         return 0;
 }
@@ -262,14 +271,13 @@ static int acquire_boot_times(sd_bus *bus, struct boot_times **bt) {
         if (r < 0)
                 return log_error_errno(r, "Failed to get timestamp properties: %s", bus_error_message(&error, r));
 
-        if (times.finish_time <= 0) {
-                log_error("Bootup is not yet finished (org.freedesktop.systemd1.Manager.FinishTimestampMonotonic=%"PRIu64").\n"
-                          "Please try again later.\n"
-                          "Hint: Use 'systemctl%s list-jobs' to see active jobs",
-                          times.finish_time,
-                          arg_scope == UNIT_FILE_SYSTEM ? "" : " --user");
-                return -EINPROGRESS;
-        }
+        if (times.finish_time <= 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINPROGRESS),
+                                       "Bootup is not yet finished (org.freedesktop.systemd1.Manager.FinishTimestampMonotonic=%"PRIu64").\n"
+                                       "Please try again later.\n"
+                                       "Hint: Use 'systemctl%s list-jobs' to see active jobs",
+                                       times.finish_time,
+                                       arg_scope == UNIT_FILE_SYSTEM ? "" : " --user");
 
         if (arg_scope == UNIT_FILE_SYSTEM && times.security_start_time > 0) {
                 /* security_start_time is set when systemd is not running under container environment. */
@@ -304,7 +312,6 @@ finish:
 }
 
 static void free_host_info(struct host_info *hi) {
-
         if (!hi)
                 return;
 
@@ -349,7 +356,7 @@ static int acquire_time_data(sd_bus *bus, struct unit_times **out) {
                         &error, &reply,
                         NULL);
         if (r < 0)
-                return log_error_errno(r, "Failed to list units: %s", bus_error_message(&error, -r));
+                return log_error_errno(r, "Failed to list units: %s", bus_error_message(&error, r));
 
         r = sd_bus_message_enter_container(reply, SD_BUS_TYPE_ARRAY, "(ssssssouso)");
         if (r < 0)
@@ -377,7 +384,8 @@ static int acquire_time_data(sd_bus *bus, struct unit_times **out) {
                                 NULL,
                                 t);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to get timestamp properties of unit %s: %s", u.id, bus_error_message(&error, r));
+                        return log_error_errno(r, "Failed to get timestamp properties of unit %s: %s",
+                                               u.id, bus_error_message(&error, r));
 
                 subtract_timestamp(&t->activating, boot_times->reverse_offset);
                 subtract_timestamp(&t->activated, boot_times->reverse_offset);
@@ -450,7 +458,8 @@ static int acquire_host_info(sd_bus *bus, struct host_info **hi) {
                                    NULL,
                                    host);
         if (r < 0) {
-                log_debug_errno(r, "Failed to get host information from systemd-hostnamed, ignoring: %s", bus_error_message(&error, r));
+                log_debug_errno(r, "Failed to get host information from systemd-hostnamed, ignoring: %s",
+                                bus_error_message(&error, r));
                 sd_bus_error_free(&error);
         }
 
@@ -464,10 +473,10 @@ manager:
                                    NULL,
                                    host);
         if (r < 0)
-                return log_error_errno(r, "Failed to get host information from systemd: %s", bus_error_message(&error, r));
+                return log_error_errno(r, "Failed to get host information from systemd: %s",
+                                       bus_error_message(&error, r));
 
         *hi = TAKE_PTR(host);
-
         return 0;
 }
 
@@ -689,7 +698,7 @@ static int analyze_plot(int argc, char *argv[], void *userdata) {
             "<!-- that render these files properly but much slower are ImageMagick,   -->\n"
             "<!-- gimp, inkscape, etc. To display the files on your system, just      -->\n"
             "<!-- point your browser to this file.                                    -->\n\n"
-            "<!-- This plot was generated by systemd-analyze version %-16.16s -->\n\n", PACKAGE_VERSION);
+            "<!-- This plot was generated by systemd-analyze version %-16.16s -->\n\n", GIT_VERSION);
 
         /* style sheet */
         svg("<defs>\n  <style type=\"text/css\">\n    <![CDATA[\n"
@@ -816,9 +825,9 @@ static int list_dependencies_print(const char *name, unsigned level, unsigned br
         char ts[FORMAT_TIMESPAN_MAX], ts2[FORMAT_TIMESPAN_MAX];
 
         for (i = level; i != 0; i--)
-                printf("%s", special_glyph(branches & (1 << (i-1)) ? TREE_VERTICAL : TREE_SPACE));
+                printf("%s", special_glyph(branches & (1 << (i-1)) ? SPECIAL_GLYPH_TREE_VERTICAL : SPECIAL_GLYPH_TREE_SPACE));
 
-        printf("%s", special_glyph(last ? TREE_RIGHT : TREE_BRANCH));
+        printf("%s", special_glyph(last ? SPECIAL_GLYPH_TREE_RIGHT : SPECIAL_GLYPH_TREE_BRANCH));
 
         if (times) {
                 if (times->time > 0)
@@ -972,7 +981,7 @@ static int list_dependencies(sd_bus *bus, const char *name) {
                         &reply,
                         "s");
         if (r < 0)
-                return log_error_errno(r, "Failed to get ID: %s", bus_error_message(&error, -r));
+                return log_error_errno(r, "Failed to get ID: %s", bus_error_message(&error, r));
 
         r = sd_bus_message_read(reply, "s", &id);
         if (r < 0)
@@ -1023,7 +1032,7 @@ static int analyze_critical_chain(int argc, char *argv[], void *userdata) {
         }
         unit_times_hashmap = h;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         puts("The time after the unit is active or started is printed after the \"@\" character.\n"
              "The time the unit takes to start is printed after the \"+\" character.\n");
@@ -1055,7 +1064,7 @@ static int analyze_blame(int argc, char *argv[], void *userdata) {
 
         typesafe_qsort(times, n, compare_unit_time);
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         for (u = times; u->has_data; u++) {
                 char ts[FORMAT_TIMESPAN_MAX];
@@ -1232,7 +1241,7 @@ static int dot(int argc, char *argv[], void *userdata) {
                        &reply,
                        "");
         if (r < 0)
-                log_error_errno(r, "Failed to list units: %s", bus_error_message(&error, -r));
+                log_error_errno(r, "Failed to list units: %s", bus_error_message(&error, r));
 
         r = sd_bus_message_enter_container(reply, SD_BUS_TYPE_ARRAY, "(ssssssouso)");
         if (r < 0)
@@ -1303,7 +1312,7 @@ static int dump(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return log_error_errno(r, "Failed to create bus connection: %m");
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         if (!sd_bus_can_send(bus, SD_BUS_TYPE_UNIX_FD))
                 return dump_fallback(bus);
@@ -1320,7 +1329,8 @@ static int dump(int argc, char *argv[], void *userdata) {
         if (r < 0) {
                 /* fall back to Dump if DumpByFileDescriptor is not supported */
                 if (!IN_SET(r, -EACCES, -EBADR))
-                        return log_error_errno(r, "Failed to issue method call DumpByFileDescriptor: %s", bus_error_message(&error, r));
+                        return log_error_errno(r, "Failed to issue method call DumpByFileDescriptor: %s",
+                                               bus_error_message(&error, r));
 
                 return dump_fallback(bus);
         }
@@ -1334,15 +1344,16 @@ static int dump(int argc, char *argv[], void *userdata) {
 }
 
 static int cat_config(int argc, char *argv[], void *userdata) {
-        char **arg;
+        char **arg, **list;
         int r;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
-        STRV_FOREACH(arg, argv + 1) {
+        list = strv_skip(argv, 1);
+        STRV_FOREACH(arg, list) {
                 const char *t = NULL;
 
-                if (arg != argv + 1)
+                if (arg != list)
                         print_separator();
 
                 if (path_is_absolute(*arg)) {
@@ -1354,10 +1365,9 @@ static int cat_config(int argc, char *argv[], void *userdata) {
                                         break;
                         }
 
-                        if (!t) {
-                                log_error("Path %s does not start with any known prefix.", *arg);
-                                return -EINVAL;
-                        }
+                        if (!t)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Path %s does not start with any known prefix.", *arg);
                 } else
                         t = *arg;
 
@@ -1497,28 +1507,113 @@ static int dump_unit_paths(int argc, char *argv[], void *userdata) {
 }
 
 #if HAVE_SECCOMP
+
+static int load_kernel_syscalls(Set **ret) {
+        _cleanup_(set_free_freep) Set *syscalls = NULL;
+        _cleanup_fclose_ FILE *f = NULL;
+        int r;
+
+        /* Let's read the available system calls from the list of available tracing events. Slightly dirty, but good
+         * enough for analysis purposes. */
+
+        f = fopen("/sys/kernel/debug/tracing/available_events", "re");
+        if (!f)
+                return log_full_errno(IN_SET(errno, EPERM, EACCES, ENOENT) ? LOG_DEBUG : LOG_WARNING, errno, "Can't read open /sys/kernel/debug/tracing/available_events: %m");
+
+        for (;;) {
+                _cleanup_free_ char *line = NULL;
+                const char *e;
+
+                r = read_line(f, LONG_LINE_MAX, &line);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to read system call list: %m");
+                if (r == 0)
+                        break;
+
+                e = startswith(line, "syscalls:sys_enter_");
+                if (!e)
+                        continue;
+
+                /* These are named differently inside the kernel than their external name for historical reasons. Let's hide them here. */
+                if (STR_IN_SET(e, "newuname", "newfstat", "newstat", "newlstat", "sysctl"))
+                        continue;
+
+                r = set_ensure_allocated(&syscalls, &string_hash_ops);
+                if (r < 0)
+                        return log_oom();
+
+                r = set_put_strdup(syscalls, e);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to add system call to list: %m");
+        }
+
+        *ret = TAKE_PTR(syscalls);
+        return 0;
+}
+
+static void kernel_syscalls_remove(Set *s, const SyscallFilterSet *set) {
+        const char *syscall;
+
+        NULSTR_FOREACH(syscall, set->value) {
+                if (syscall[0] == '@')
+                        continue;
+
+                (void) set_remove(s, syscall);
+        }
+}
+
 static void dump_syscall_filter(const SyscallFilterSet *set) {
         const char *syscall;
 
-        printf("%s\n", set->name);
-        printf("    # %s\n", set->help);
+        printf("%s%s%s\n"
+               "    # %s\n",
+               ansi_highlight(),
+               set->name,
+               ansi_normal(),
+               set->help);
+
         NULSTR_FOREACH(syscall, set->value)
-                printf("    %s\n", syscall);
+                printf("    %s%s%s\n",
+                       syscall[0] == '@' ? ansi_underline() : "",
+                       syscall,
+                       ansi_normal());
 }
 
 static int dump_syscall_filters(int argc, char *argv[], void *userdata) {
         bool first = true;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         if (strv_isempty(strv_skip(argv, 1))) {
-                int i;
+                _cleanup_(set_free_freep) Set *kernel = NULL;
+                int i, k;
+
+                k = load_kernel_syscalls(&kernel);
 
                 for (i = 0; i < _SYSCALL_FILTER_SET_MAX; i++) {
+                        const SyscallFilterSet *set = syscall_filter_sets + i;
                         if (!first)
                                 puts("");
-                        dump_syscall_filter(syscall_filter_sets + i);
+
+                        dump_syscall_filter(set);
+                        kernel_syscalls_remove(kernel, set);
                         first = false;
+                }
+
+                if (k < 0) {
+                        fputc('\n', stdout);
+                        fflush(stdout);
+                        log_notice_errno(k, "# Not showing unlisted system calls, couldn't retrieve kernel system call list: %m");
+                } else if (!set_isempty(kernel)) {
+                        const char *syscall;
+                        Iterator j;
+
+                        printf("\n"
+                               "# %sUnlisted System Calls%s (supported by the local kernel, but not included in any of the groups listed above):\n",
+                               ansi_highlight(), ansi_normal());
+
+                        SET_FOREACH(syscall, kernel, j)
+                                printf("#   %s\n", syscall);
                 }
         } else {
                 char **name;
@@ -1534,8 +1629,8 @@ static int dump_syscall_filters(int argc, char *argv[], void *userdata) {
                                 /* make sure the error appears below normal output */
                                 fflush(stdout);
 
-                                log_error("Filter set \"%s\" not found.", *name);
-                                return -ENOENT;
+                                return log_error_errno(SYNTHETIC_ERRNO(ENOENT),
+                                                       "Filter set \"%s\" not found.", *name);
                         }
 
                         dump_syscall_filter(set);
@@ -1548,8 +1643,8 @@ static int dump_syscall_filters(int argc, char *argv[], void *userdata) {
 
 #else
 static int dump_syscall_filters(int argc, char *argv[], void *userdata) {
-        log_error("Not compiled with syscall filters, sorry.");
-        return -EOPNOTSUPP;
+        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                               "Not compiled with syscall filters, sorry.");
 }
 #endif
 
@@ -1566,7 +1661,7 @@ static int dump_timespan(int argc, char *argv[], void *userdata) {
                         return log_error_errno(r, "Failed to parse time span '%s': %m", *input_timespan);
 
                 printf("Original: %s\n", *input_timespan);
-                printf("      %ss: %" PRIu64 "\n", special_glyph(MU), output_usecs);
+                printf("      %ss: %" PRIu64 "\n", special_glyph(SPECIAL_GLYPH_MU), output_usecs);
                 printf("   Human: %s\n", format_timespan(ft_buf, sizeof(ft_buf), output_usecs, usec_magnitude));
 
                 if (input_timespan[1])
@@ -1576,57 +1671,80 @@ static int dump_timespan(int argc, char *argv[], void *userdata) {
         return EXIT_SUCCESS;
 }
 
+static int test_calendar_one(usec_t n, const char *p) {
+        _cleanup_(calendar_spec_freep) CalendarSpec *spec = NULL;
+        _cleanup_free_ char *t = NULL;
+        int r;
+
+        r = calendar_spec_from_string(p, &spec);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse calendar specification '%s': %m", p);
+
+        r = calendar_spec_normalize(spec);
+        if (r < 0)
+                return log_error_errno(r, "Failed to normalize calendar specification '%s': %m", p);
+
+        r = calendar_spec_to_string(spec, &t);
+        if (r < 0)
+                return log_error_errno(r, "Failed to format calendar specification '%s': %m", p);
+
+        if (!streq(t, p))
+                printf("  Original form: %s\n", p);
+
+        printf("Normalized form: %s\n", t);
+
+        for (unsigned i = 0; i < arg_iterations; i++) {
+                char buffer[CONST_MAX(FORMAT_TIMESTAMP_MAX, FORMAT_TIMESTAMP_RELATIVE_MAX)];
+                usec_t next;
+
+                r = calendar_spec_next_usec(spec, n, &next);
+                if (r == -ENOENT) {
+                        if (i == 0)
+                                printf("    Next elapse: %snever%s\n",
+                                       ansi_highlight_yellow(), ansi_normal());
+                        return 0;
+                }
+                if (r < 0)
+                        return log_error_errno(r, "Failed to determine next elapse for '%s': %m", p);
+
+                if (i == 0)
+                        printf("    Next elapse: %s%s%s\n",
+                               ansi_highlight_blue(), format_timestamp(buffer, sizeof(buffer), next), ansi_normal());
+                else {
+                        int k = DECIMAL_STR_WIDTH(i+1);
+
+                        if (k < 8)
+                                k = 8 - k;
+                        else
+                                k = 0;
+
+                        printf("%*sIter. #%u: %s%s%s\n",
+                               k, "", i+1,
+                               ansi_highlight_blue(), format_timestamp(buffer, sizeof(buffer), next), ansi_normal());
+                }
+
+                if (!in_utc_timezone())
+                        printf("       (in UTC): %s\n", format_timestamp_utc(buffer, sizeof(buffer), next));
+
+                printf("       From now: %s\n", format_timestamp_relative(buffer, sizeof(buffer), next));
+
+                n = next;
+        }
+
+        return 0;
+}
+
 static int test_calendar(int argc, char *argv[], void *userdata) {
         int ret = 0, r;
         char **p;
         usec_t n;
 
-        n = now(CLOCK_REALTIME);
+        n = now(CLOCK_REALTIME); /* We want to use the same "base" for all expressions */
 
         STRV_FOREACH(p, strv_skip(argv, 1)) {
-                _cleanup_(calendar_spec_freep) CalendarSpec *spec = NULL;
-                _cleanup_free_ char *t = NULL;
-                usec_t next;
-
-                r = calendar_spec_from_string(*p, &spec);
-                if (r < 0) {
-                        ret = log_error_errno(r, "Failed to parse calendar specification '%s': %m", *p);
-                        continue;
-                }
-
-                r = calendar_spec_normalize(spec);
-                if (r < 0) {
-                        ret = log_error_errno(r, "Failed to normalize calendar specification '%s': %m", *p);
-                        continue;
-                }
-
-                r = calendar_spec_to_string(spec, &t);
-                if (r < 0) {
-                        ret = log_error_errno(r, "Failed to format calendar specification '%s': %m", *p);
-                        continue;
-                }
-
-                if (!streq(t, *p))
-                        printf("  Original form: %s\n", *p);
-
-                printf("Normalized form: %s\n", t);
-
-                r = calendar_spec_next_usec(spec, n, &next);
-                if (r == -ENOENT)
-                        printf("    Next elapse: never\n");
-                else if (r < 0) {
-                        ret = log_error_errno(r, "Failed to determine next elapse for '%s': %m", *p);
-                        continue;
-                } else {
-                        char buffer[CONST_MAX(FORMAT_TIMESTAMP_MAX, FORMAT_TIMESTAMP_RELATIVE_MAX)];
-
-                        printf("    Next elapse: %s\n", format_timestamp(buffer, sizeof(buffer), next));
-
-                        if (!in_utc_timezone())
-                                printf("       (in UTC): %s\n", format_timestamp_utc(buffer, sizeof(buffer), next));
-
-                        printf("       From now: %s\n", format_timestamp_relative(buffer, sizeof(buffer), next));
-                }
+                r = test_calendar_one(n, *p);
+                if (ret == 0 && r < 0)
+                        ret = r;
 
                 if (*(p+1))
                         putchar('\n');
@@ -1692,11 +1810,24 @@ static int do_verify(int argc, char *argv[], void *userdata) {
         return verify_units(strv_skip(argv, 1), arg_scope, arg_man, arg_generators);
 }
 
+static int do_security(int argc, char *argv[], void *userdata) {
+        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+        int r;
+
+        r = acquire_bus(&bus, NULL);
+        if (r < 0)
+                return log_error_errno(r, "Failed to create bus connection: %m");
+
+        (void) pager_open(arg_pager_flags);
+
+        return analyze_security(bus, strv_skip(argv, 1), 0);
+}
+
 static int help(int argc, char *argv[], void *userdata) {
         _cleanup_free_ char *link = NULL;
         int r;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         r = terminal_urlify_man("systemd-analyze", "1", &link);
         if (r < 0)
@@ -1718,9 +1849,10 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --to-pattern=GLOB     Show only destinations in the graph\n"
                "     --fuzz=SECONDS        Also print also services which finished SECONDS\n"
                "                           earlier than the latest in the branch\n"
-               "     --man[=BOOL]          Do [not] check for existence of man pages\n\n"
-               "     --generators[=BOOL]   Do [not] run unit generators (requires privileges)\n\n"
-               "Commands:\n"
+               "     --man[=BOOL]          Do [not] check for existence of man pages\n"
+               "     --generators[=BOOL]   Do [not] run unit generators (requires privileges)\n"
+               "     --iterations=N        Show the specified number of iterations\n"
+               "\nCommands:\n"
                "  time                     Print time spent in the kernel\n"
                "  blame                    Print list of running units ordered by time to init\n"
                "  critical-chain [UNIT...] Print a tree of the time critical chain of units\n"
@@ -1736,6 +1868,7 @@ static int help(int argc, char *argv[], void *userdata) {
                "  calendar SPEC...         Validate repetitive calendar time events\n"
                "  service-watchdogs [BOOL] Get/set service watchdog state\n"
                "  timespan SPAN...         Validate a time span\n"
+               "  security [UNIT...]       Analyze security of unit\n"
                "\nSee the %s for details.\n"
                , program_invocation_short_name
                , link
@@ -1762,6 +1895,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_NO_PAGER,
                 ARG_MAN,
                 ARG_GENERATORS,
+                ARG_ITERATIONS,
         };
 
         static const struct option options[] = {
@@ -1781,6 +1915,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "generators",   optional_argument, NULL, ARG_GENERATORS       },
                 { "host",         required_argument, NULL, 'H'                  },
                 { "machine",      required_argument, NULL, 'M'                  },
+                { "iterations",   required_argument, NULL, ARG_ITERATIONS       },
                 {}
         };
 
@@ -1841,7 +1976,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case 'H':
@@ -1857,10 +1992,9 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_MAN:
                         if (optarg) {
                                 r = parse_boolean(optarg);
-                                if (r < 0) {
-                                        log_error("Failed to parse --man= argument.");
-                                        return -EINVAL;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Failed to parse --man= argument.");
 
                                 arg_man = r;
                         } else
@@ -1871,14 +2005,20 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_GENERATORS:
                         if (optarg) {
                                 r = parse_boolean(optarg);
-                                if (r < 0) {
-                                        log_error("Failed to parse --generators= argument.");
-                                        return -EINVAL;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Failed to parse --generators= argument.");
 
                                 arg_generators = r;
                         } else
                                 arg_generators = true;
+
+                        break;
+
+                case ARG_ITERATIONS:
+                        r = safe_atou(optarg, &arg_iterations);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse iterations: %s", optarg);
 
                         break;
 
@@ -1890,20 +2030,22 @@ static int parse_argv(int argc, char *argv[]) {
                 }
 
         if (arg_scope == UNIT_FILE_GLOBAL &&
-            !STR_IN_SET(argv[optind] ?: "time", "dot", "unit-paths", "verify")) {
-                log_error("Option --global only makes sense with verbs dot, unit-paths, verify.");
-                return -EINVAL;
-        }
+            !STR_IN_SET(argv[optind] ?: "time", "dot", "unit-paths", "verify"))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Option --global only makes sense with verbs dot, unit-paths, verify.");
 
-        if (arg_root && !streq_ptr(argv[optind], "cat-config")) {
-                log_error("Option --root is only supported for cat-config right now.");
-                return -EINVAL;
-        }
+        if (streq_ptr(argv[optind], "cat-config") && arg_scope == UNIT_FILE_USER)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Option --user is not supported for cat-config right now.");
+
+        if (arg_root && !streq_ptr(argv[optind], "cat-config"))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Option --root is only supported for cat-config right now.");
 
         return 1; /* work to do */
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
 
         static const Verb verbs[] = {
                 { "help",              VERB_ANY, VERB_ANY, 0,            help                   },
@@ -1927,6 +2069,7 @@ int main(int argc, char *argv[]) {
                 { "calendar",          2,        VERB_ANY, 0,            test_calendar          },
                 { "service-watchdogs", VERB_ANY, 2,        0,            service_watchdogs      },
                 { "timespan",          2,        VERB_ANY, 0,            dump_timespan          },
+                { "security",          VERB_ANY, VERB_ANY, 0,            do_security            },
                 {}
         };
 
@@ -1940,15 +2083,9 @@ int main(int argc, char *argv[]) {
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
-        r = dispatch_verb(argc, argv, verbs, NULL);
-
-finish:
-        pager_close();
-
-        strv_free(arg_dot_from_patterns);
-        strv_free(arg_dot_to_patterns);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return dispatch_verb(argc, argv, verbs, NULL);
 }
+
+DEFINE_MAIN_FUNCTION(run);

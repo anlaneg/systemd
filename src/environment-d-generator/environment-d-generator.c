@@ -4,8 +4,8 @@
 
 #include "conf-files.h"
 #include "def.h"
+#include "env-file.h"
 #include "escape.h"
-#include "fileio.h"
 #include "log.h"
 #include "path-lookup.h"
 
@@ -14,7 +14,7 @@ static int environment_dirs(char ***ret) {
         _cleanup_free_ char *c = NULL;
         int r;
 
-        dirs = strv_split_nulstr(CONF_PATHS_NULSTR("environment.d"));
+        dirs = strv_new(CONF_PATHS_USR("environment.d"), NULL);
         if (!dirs)
                 return -ENOMEM;
 

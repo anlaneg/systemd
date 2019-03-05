@@ -10,6 +10,7 @@
 #include "fileio.h"
 #include "fs-util.h"
 #include "io-util.h"
+#include "nscd-flush.h"
 #include "parse-util.h"
 #include "random-util.h"
 #include "serialize.h"
@@ -34,7 +35,7 @@ static DynamicUser* dynamic_user_free(DynamicUser *d) {
         return mfree(d);
 }
 
-static int dynamic_user_add(Manager *m, const char *name, int storage_socket[2], DynamicUser **ret) {
+static int dynamic_user_add(Manager *m, const char *name, int storage_socket[static 2], DynamicUser **ret) {
         DynamicUser *d;
         int r;
 
@@ -178,7 +179,7 @@ static int pick_uid(char **suggested_paths, const char *name, uid_t *ret_uid) {
          *
          * 1. Initially, we try to read the UID of a number of specified paths. If any of these UIDs works, we use
          *    them. We use in order to increase the chance of UID reuse, if StateDirectory=, CacheDirectory= or
-         *    LogDirectory= are used, as reusing the UID these directories are owned by saves us from having to
+         *    LogsDirectory= are used, as reusing the UID these directories are owned by saves us from having to
          *    recursively chown() them to new users.
          *
          * 2. If that didn't yield a currently unused UID, we hash the user name, and try to use that. This should be
@@ -383,6 +384,7 @@ static int dynamic_user_realize(
         _cleanup_close_ int etc_passwd_lock_fd = -1;
         uid_t num = UID_INVALID; /* a uid if is_user, and a gid otherwise */
         gid_t gid = GID_INVALID; /* a gid if is_user, ignored otherwise */
+        bool flush_cache = false;
         int r;
 
         assert(d);
@@ -471,6 +473,7 @@ static int dynamic_user_realize(
                         }
 
                         /* Great! Nothing is stored here, still. Store our newly acquired data. */
+                        flush_cache = true;
                 } else {
                         /* Hmm, so as it appears there's now something stored in the storage socket. Throw away what we
                          * acquired, and use what's stored now. */
@@ -499,6 +502,14 @@ static int dynamic_user_realize(
         r = dynamic_user_push(d, num, uid_lock_fd);
         if (r < 0)
                 return r;
+
+        if (flush_cache) {
+                /* If we allocated a new dynamic UID, refresh nscd, so that it forgets about potentially cached
+                 * negative entries. But let's do so after we release the /etc/passwd lock, so that there's no
+                 * potential for nscd wanting to lock that for completing the invalidation. */
+                etc_passwd_lock_fd = safe_close(etc_passwd_lock_fd);
+                (void) nscd_flush_cache(STRV_MAKE("passwd", "group"));
+        }
 
         if (is_user) {
                 *ret_uid = num;
@@ -572,6 +583,8 @@ static int dynamic_user_close(DynamicUser *d) {
 
         /* This dynamic user was realized and dynamically allocated. In this case, let's remove the lock file. */
         unlink_uid_lock(lock_fd, uid, d->name);
+
+        (void) nscd_flush_cache(STRV_MAKE("passwd", "group"));
         return 1;
 }
 
@@ -694,7 +707,7 @@ int dynamic_user_lookup_uid(Manager *m, uid_t uid, char **ret) {
 
         xsprintf(lock_path, "/run/systemd/dynamic-uid/" UID_FMT, uid);
         r = read_one_line_file(lock_path, &user);
-        if (r == -ENOENT)
+        if (IN_SET(r, -ENOENT, 0))
                 return -ESRCH;
         if (r < 0)
                 return r;

@@ -30,8 +30,10 @@
 #include "hashmap.h"
 #include "io-util.h"
 #include "macro.h"
+#include "main-func.h"
 #include "mkdir.h"
 #include "path-util.h"
+#include "pretty-print.h"
 #include "process-util.h"
 #include "signal-util.h"
 #include "socket-util.h"
@@ -306,10 +308,9 @@ static int parse_password(const char *filename, char **wall) {
         if (r < 0)
                 return r;
 
-        if (!socket_name) {
-                log_error("Invalid password file %s", filename);
-                return -EBADMSG;
-        }
+        if (!socket_name)
+                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "Invalid password file %s", filename);
 
         if (not_after > 0 && now(CLOCK_MONOTONIC) > not_after)
                 return 0;
@@ -519,8 +520,12 @@ static int watch_passwords(void) {
         if (notify < 0)
                 return log_error_errno(errno, "Failed to allocate directory watch: %m");
 
-        if (inotify_add_watch(notify, "/run/systemd/ask-password", IN_CLOSE_WRITE|IN_MOVED_TO) < 0)
-                return log_error_errno(errno, "Failed to add /run/systemd/ask-password to directory watch: %m");
+        if (inotify_add_watch(notify, "/run/systemd/ask-password", IN_CLOSE_WRITE|IN_MOVED_TO) < 0) {
+                if (errno == ENOSPC)
+                        return log_error_errno(errno, "Failed to add /run/systemd/ask-password to directory watch: inotify watch limit reached");
+                else
+                        return log_error_errno(errno, "Failed to add /run/systemd/ask-password to directory watch: %m");
+        }
 
         assert_se(sigemptyset(&mask) >= 0);
         assert_se(sigset_add_many(&mask, SIGINT, SIGTERM, -1) >= 0);
@@ -646,10 +651,9 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_console = true;
                         if (optarg) {
 
-                                if (isempty(optarg)) {
-                                        log_error("Empty console device path is not allowed.");
-                                        return -EINVAL;
-                                }
+                                if (isempty(optarg))
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Empty console device path is not allowed.");
 
                                 arg_device = optarg;
                         }
@@ -662,22 +666,19 @@ static int parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        if (optind != argc) {
-                log_error("%s takes no arguments.", program_invocation_short_name);
-                return -EINVAL;
-        }
+        if (optind != argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "%s takes no arguments.", program_invocation_short_name);
 
         if (arg_plymouth || arg_console) {
 
-                if (!IN_SET(arg_action, ACTION_QUERY, ACTION_WATCH)) {
-                        log_error("Options --query and --watch conflict.");
-                        return -EINVAL;
-                }
+                if (!IN_SET(arg_action, ACTION_QUERY, ACTION_WATCH))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Options --query and --watch conflict.");
 
-                if (arg_plymouth && arg_console) {
-                        log_error("Options --plymouth and --console conflict.");
-                        return -EINVAL;
-                }
+                if (arg_plymouth && arg_console)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Options --plymouth and --console conflict.");
         }
 
         return 1;
@@ -832,42 +833,37 @@ static int ask_on_consoles(int argc, char *argv[]) {
         return 0;
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         int r;
 
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        log_setup_service();
 
         umask(0022);
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
         if (arg_console && !arg_device)
                 /*
-                 * Spawn for each console device a separate process.
+                 * Spawn a separate process for each console device.
                  */
-                r = ask_on_consoles(argc, argv);
-        else {
+                return ask_on_consoles(argc, argv);
 
-                if (arg_device) {
-                        /*
-                         * Later on, a controlling terminal will be acquired,
-                         * therefore the current process has to become a session
-                         * leader and should not have a controlling terminal already.
-                         */
-                        (void) setsid();
-                        (void) release_terminal();
-                }
-
-                if (IN_SET(arg_action, ACTION_WATCH, ACTION_WALL))
-                        r = watch_passwords();
-                else
-                        r = show_passwords();
+        if (arg_device) {
+                /*
+                 * Later on, a controlling terminal will be acquired,
+                 * therefore the current process has to become a session
+                 * leader and should not have a controlling terminal already.
+                 */
+                (void) setsid();
+                (void) release_terminal();
         }
 
-finish:
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        if (IN_SET(arg_action, ACTION_WATCH, ACTION_WALL))
+                return watch_passwords();
+        else
+                return show_passwords();
 }
+
+DEFINE_MAIN_FUNCTION(run);

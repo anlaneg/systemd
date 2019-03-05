@@ -15,9 +15,11 @@
 #include "hexdecoct.h"
 #include "hostname-util.h"
 #include "in-addr-util.h"
+#include "ip-protocol-list.h"
 #include "list.h"
 #include "locale-util.h"
-#include "mount-util.h"
+#include "missing_fs.h"
+#include "mountpoint-util.h"
 #include "nsflags.h"
 #include "parse-util.h"
 #include "path-util.h"
@@ -25,7 +27,6 @@
 #include "rlimit-util.h"
 #include "securebits-util.h"
 #include "signal-util.h"
-#include "socket-protocol-list.h"
 #include "string-util.h"
 #include "syslog-util.h"
 #include "terminal-util.h"
@@ -83,10 +84,8 @@ int bus_parse_unit_info(sd_bus_message *message, UnitInfo *u) {
                 int r;                                                  \
                                                                         \
                 r = parse_func(eq);                                     \
-                if (r < 0) {                                            \
-                        log_error("Failed to parse %s: %s", field, eq); \
-                        return -EINVAL;                                 \
-                }                                                       \
+                if (r < 0)                                              \
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Failed to parse %s: %s", field, eq);                                 \
                                                                         \
                 r = sd_bus_message_append(m, "(sv)", field,             \
                                           bus_type, (int32_t) r);       \
@@ -105,7 +104,7 @@ DEFINE_BUS_APPEND_PARSE("i", parse_errno);
 DEFINE_BUS_APPEND_PARSE("i", sched_policy_from_string);
 DEFINE_BUS_APPEND_PARSE("i", secure_bits_from_string);
 DEFINE_BUS_APPEND_PARSE("i", signal_from_string);
-DEFINE_BUS_APPEND_PARSE("i", socket_protocol_from_name);
+DEFINE_BUS_APPEND_PARSE("i", parse_ip_protocol);
 DEFINE_BUS_APPEND_PARSE_PTR("i", int32_t, int, ioprio_parse_priority);
 DEFINE_BUS_APPEND_PARSE_PTR("i", int32_t, int, parse_nice);
 DEFINE_BUS_APPEND_PARSE_PTR("i", int32_t, int, safe_atoi);
@@ -119,7 +118,7 @@ DEFINE_BUS_APPEND_PARSE_PTR("u", uint32_t, mode_t, parse_mode);
 DEFINE_BUS_APPEND_PARSE_PTR("u", uint32_t, unsigned, safe_atou);
 DEFINE_BUS_APPEND_PARSE_PTR("x", int64_t, int64_t, safe_atoi64);
 
-static inline int bus_append_string(sd_bus_message *m, const char *field, const char *eq) {
+static int bus_append_string(sd_bus_message *m, const char *field, const char *eq) {
         int r;
 
         r = sd_bus_message_append(m, "(sv)", field, "s", eq);
@@ -277,8 +276,8 @@ static int bus_append_exec_command(sd_bus_message *m, const char *field, const c
                 case '+':
                 case '!':
                         /* The bus API doesn't support +, ! and !! currently, unfortunately. :-( */
-                        log_error("Sorry, but +, ! and !! are currently not supported for transient services.");
-                        return -EOPNOTSUPP;
+                        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                               "Sorry, but +, ! and !! are currently not supported for transient services.");
 
                 default:
                         done = true;
@@ -450,16 +449,29 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                         r = sd_bus_message_append(m, "(sv)", "CPUQuotaPerSecUSec", "t", USEC_INFINITY);
                 else {
                         r = parse_permille_unbounded(eq);
-                        if (r == 0) {
-                                log_error("CPU quota too small.");
-                                return -ERANGE;
-                        }
+                        if (r == 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(ERANGE),
+                                                       "CPU quota too small.");
                         if (r < 0)
                                 return log_error_errno(r, "CPU quota '%s' invalid.", eq);
 
                         r = sd_bus_message_append(m, "(sv)", "CPUQuotaPerSecUSec", "t", (((uint64_t) r * USEC_PER_SEC) / 1000U));
                 }
 
+                if (r < 0)
+                        return bus_log_create_error(r);
+
+                return 1;
+        }
+
+        if (streq(field, "CPUQuotaPeriodSec")) {
+                usec_t u = USEC_INFINITY;
+
+                r = parse_sec_def_infinity(eq, &u);
+                if (r < 0)
+                        return log_error_errno(r, "CPU quota period '%s' invalid.", eq);
+
+                r = sd_bus_message_append(m, "(sv)", "CPUQuotaPeriodUSec", "t", u);
                 if (r < 0)
                         return bus_log_create_error(r);
 
@@ -497,10 +509,10 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                         uint64_t bytes;
 
                         e = strchr(eq, ' ');
-                        if (!e) {
-                                log_error("Failed to parse %s value %s.", field, eq);
-                                return -EINVAL;
-                        }
+                        if (!e)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Failed to parse %s value %s.",
+                                                       field, eq);
 
                         path = strndupa(eq, e - eq);
                         bandwidth = e+1;
@@ -531,10 +543,10 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                         uint64_t u;
 
                         e = strchr(eq, ' ');
-                        if (!e) {
-                                log_error("Failed to parse %s value %s.", field, eq);
-                                return -EINVAL;
-                        }
+                        if (!e)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Failed to parse %s value %s.",
+                                                       field, eq);
 
                         path = strndupa(eq, e - eq);
                         weight = e+1;
@@ -562,10 +574,10 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                         usec_t usec;
 
                         e = strchr(eq, ' ');
-                        if (!e) {
-                                log_error("Failed to parse %s value %s.", field, eq);
-                                return -EINVAL;
-                        }
+                        if (!e)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Failed to parse %s value %s.",
+                                                       field, eq);
 
                         path = strndupa(eq, e - eq);
                         target = e+1;
@@ -742,7 +754,7 @@ static int bus_append_execute_property(sd_bus_message *m, const char *field, con
                        "PrivateMounts", "NoNewPrivileges", "SyslogLevelPrefix",
                        "MemoryDenyWriteExecute", "RestrictRealtime", "DynamicUser", "RemoveIPC",
                        "ProtectKernelTunables", "ProtectKernelModules", "ProtectControlGroups",
-                       "MountAPIVFS", "CPUSchedulingResetOnFork", "LockPersonality"))
+                       "MountAPIVFS", "CPUSchedulingResetOnFork", "LockPersonality", "ProtectHostname"))
 
                 return bus_append_parse_boolean(m, field, eq);
 
@@ -876,9 +888,11 @@ static int bus_append_execute_property(sd_bus_message *m, const char *field, con
                 } else if ((n = startswith(eq, "file:"))) {
                         appended = strjoina(field, "File");
                         r = sd_bus_message_append(m, "(sv)", appended, "s", n);
+                } else if ((n = startswith(eq, "append:"))) {
+                        appended = strjoina(field, "FileToAppend");
+                        r = sd_bus_message_append(m, "(sv)", appended, "s", n);
                 } else
                         r = sd_bus_message_append(m, "(sv)", field, "s", eq);
-
                 if (r < 0)
                         return bus_log_create_error(r);
 
@@ -1125,10 +1139,10 @@ static int bus_append_execute_property(sd_bus_message *m, const char *field, con
                                 r = extract_first_word(&p, &destination, ":" WHITESPACE, EXTRACT_QUOTES|EXTRACT_DONT_COALESCE_SEPARATORS);
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to parse argument: %m");
-                                if (r == 0) {
-                                        log_error("Missing argument after ':': %s", eq);
-                                        return -EINVAL;
-                                }
+                                if (r == 0)
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Missing argument after ':': %s",
+                                                               eq);
 
                                 d = destination;
 
@@ -1143,10 +1157,10 @@ static int bus_append_execute_property(sd_bus_message *m, const char *field, con
                                                 flags = MS_REC;
                                         else if (streq(options, "norbind"))
                                                 flags = 0;
-                                        else {
-                                                log_error("Unknown options: %s", eq);
-                                                return -EINVAL;
-                                        }
+                                        else
+                                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                                       "Unknown options: %s",
+                                                                       eq);
                                 }
                         } else
                                 d = s;
@@ -1204,10 +1218,10 @@ static int bus_append_execute_property(sd_bus_message *m, const char *field, con
                         r = extract_first_word(&w, &path, ":", EXTRACT_DONT_COALESCE_SEPARATORS);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to parse argument: %m");
-                        if (r == 0) {
-                                log_error("Failed to parse argument: %s", p);
-                                return -EINVAL;
-                        }
+                        if (r == 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Failed to parse argument: %s",
+                                                       p);
 
                         r = sd_bus_message_append(m, "(ss)", path, w);
                         if (r < 0)
@@ -1467,7 +1481,7 @@ static int bus_append_socket_property(sd_bus_message *m, const char *field, cons
 
         if (streq(field, "SocketProtocol"))
 
-                return bus_append_socket_protocol_from_name(m, field, eq);
+                return bus_append_parse_ip_protocol(m, field, eq);
 
         if (STR_IN_SET(field,
                        "ListenStream", "ListenDatagram", "ListenSequentialPacket", "ListenNetlink",
@@ -1558,6 +1572,25 @@ static int bus_append_unit_property(sd_bus_message *m, const char *field, const 
 
                 return bus_append_safe_atou(m, field, eq);
 
+        if (STR_IN_SET(field, "SuccessActionExitStatus", "FailureActionExitStatus")) {
+
+                if (isempty(eq))
+                        r = sd_bus_message_append(m, "(sv)", field, "i", -1);
+                else {
+                        uint8_t u;
+
+                        r = safe_atou8(eq, &u);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse %s=%s", field, eq);
+
+                        r = sd_bus_message_append(m, "(sv)", field, "i", (int) u);
+                }
+                if (r < 0)
+                        return bus_log_create_error(r);
+
+                return 1;
+        }
+
         if (unit_dependency_from_string(field) >= 0 ||
             STR_IN_SET(field, "Documentation", "RequiresMountsFor"))
 
@@ -1603,10 +1636,9 @@ int bus_append_unit_property_assignment(sd_bus_message *m, UnitType t, const cha
         assert(assignment);
 
         eq = strchr(assignment, '=');
-        if (!eq) {
-                log_error("Not an assignment: %s", assignment);
-                return -EINVAL;
-        }
+        if (!eq)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Not an assignment: %s", assignment);
 
         field = strndupa(assignment, eq - assignment);
         eq++;
@@ -1709,20 +1741,20 @@ int bus_append_unit_property_assignment(sd_bus_message *m, UnitType t, const cha
         case UNIT_TARGET:
         case UNIT_DEVICE:
         case UNIT_SWAP:
-                log_error("Not supported unit type");
-                return -EINVAL;
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Not supported unit type");
 
         default:
-                log_error("Invalid unit type");
-                return -EINVAL;
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Invalid unit type");
         }
 
         r = bus_append_unit_property(m, field, eq);
         if (r != 0)
                 return r;
 
-        log_error("Unknown assignment: %s", assignment);
-        return -EINVAL;
+        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                               "Unknown assignment: %s", assignment);
 }
 
 int bus_append_unit_property_assignment_many(sd_bus_message *m, UnitType t, char **l) {
@@ -2006,8 +2038,8 @@ static int check_wait_response(BusWaitForJobs *d, bool quiet, const char* const*
         else if (STR_IN_SET(d->result, "done", "skipped"))
                 return 0;
 
-        log_debug("Unexpected job result, assuming server side newer than us: %s", d->result);
-        return -EIO;
+        return log_debug_errno(SYNTHETIC_ERRNO(EIO),
+                               "Unexpected job result, assuming server side newer than us: %s", d->result);
 }
 
 int bus_wait_for_jobs(BusWaitForJobs *d, bool quiet, const char* const* extra_args) {
@@ -2287,7 +2319,7 @@ static int dump_processes(
                         }
 
                         more = i+1 < n || cg->children;
-                        special = special_glyph(more ? TREE_BRANCH : TREE_RIGHT);
+                        special = special_glyph(more ? SPECIAL_GLYPH_TREE_BRANCH : SPECIAL_GLYPH_TREE_RIGHT);
 
                         fprintf(stdout, "%s%s%*"PID_PRI" %s\n",
                                 prefix,
@@ -2324,14 +2356,14 @@ static int dump_processes(
                         name++;
 
                         more = i+1 < n;
-                        special = special_glyph(more ? TREE_BRANCH : TREE_RIGHT);
+                        special = special_glyph(more ? SPECIAL_GLYPH_TREE_BRANCH : SPECIAL_GLYPH_TREE_RIGHT);
 
                         fputs(prefix, stdout);
                         fputs(special, stdout);
                         fputs(name, stdout);
                         fputc('\n', stdout);
 
-                        special = special_glyph(more ? TREE_VERTICAL : TREE_SPACE);
+                        special = special_glyph(more ? SPECIAL_GLYPH_TREE_VERTICAL : SPECIAL_GLYPH_TREE_SPACE);
 
                         pp = strappend(prefix, special);
                         if (!pp)
@@ -2415,7 +2447,7 @@ static int dump_extra_processes(
 
                 fprintf(stdout, "%s%s %*" PID_PRI " %s\n",
                         prefix,
-                        special_glyph(TRIANGULAR_BULLET),
+                        special_glyph(SPECIAL_GLYPH_TRIANGULAR_BULLET),
                         width, pids[k],
                         name);
         }

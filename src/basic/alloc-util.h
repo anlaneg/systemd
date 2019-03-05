@@ -8,22 +8,36 @@
 
 #include "macro.h"
 
+#if HAS_FEATURE_MEMORY_SANITIZER
+#  include <sanitizer/msan_interface.h>
+#endif
+
+typedef void (*free_func_t)(void *p);
+
+/* If for some reason more than 4M are allocated on the stack, let's abort immediately. It's better than
+ * proceeding and smashing the stack limits. Note that by default RLIMIT_STACK is 8M on Linux. */
+#define ALLOCA_MAX (4U*1024U*1024U)
+
 //申请n个t类型大小的内存
 #define new(t, n) ((t*) malloc_multiply(sizeof(t), (n)))
 
 //申请n个t类型大小的内存（并清０)
-#define new0(t, n) ((t*) calloc((n), sizeof(t)))
+#define new0(t, n) ((t*) calloc((n) ?: 1, sizeof(t)))
 
-#define newa(t, n)                                              \
-        ({                                                      \
-                assert(!size_multiply_overflow(sizeof(t), n));  \
-                (t*) alloca(sizeof(t)*(n));                     \
+#define newa(t, n)                                                      \
+        ({                                                              \
+                size_t _n_ = n;                                         \
+                assert(!size_multiply_overflow(sizeof(t), _n_));        \
+                assert(sizeof(t)*_n_ <= ALLOCA_MAX);                    \
+                (t*) alloca(sizeof(t)*_n_);                             \
         })
 
-#define newa0(t, n)                                             \
-        ({                                                      \
-                assert(!size_multiply_overflow(sizeof(t), n));  \
-                (t*) alloca0(sizeof(t)*(n));                    \
+#define newa0(t, n)                                                     \
+        ({                                                              \
+                size_t _n_ = n;                                         \
+                assert(!size_multiply_overflow(sizeof(t), _n_));        \
+                assert(sizeof(t)*_n_ <= ALLOCA_MAX);                    \
+                (t*) alloca0(sizeof(t)*_n_);                            \
         })
 
 #define newdup(t, p, n) ((t*) memdup_multiply(p, sizeof(t), (n)))
@@ -51,16 +65,20 @@ void* memdup_suffix0(const void *p, size_t l) _alloc_(2);
 #define memdupa(p, l)                           \
         ({                                      \
                 void *_q_;                      \
-                _q_ = alloca(l);                \
-                memcpy(_q_, p, l);              \
+                size_t _l_ = l;                 \
+                assert(_l_ <= ALLOCA_MAX);      \
+                _q_ = alloca(_l_);              \
+                memcpy(_q_, p, _l_);            \
         })
 
 #define memdupa_suffix0(p, l)                   \
         ({                                      \
                 void *_q_;                      \
-                _q_ = alloca(l + 1);            \
-                ((uint8_t*) _q_)[l] = 0;        \
-                memcpy(_q_, p, l);              \
+                size_t _l_ = l;                 \
+                assert(_l_ <= ALLOCA_MAX);      \
+                _q_ = alloca(_l_ + 1);          \
+                ((uint8_t*) _q_)[_l_] = 0;      \
+                memcpy(_q_, p, _l_);            \
         })
 
 static inline void freep(void *p) {
@@ -79,7 +97,7 @@ _malloc_  _alloc_(1, 2) static inline void *malloc_multiply(size_t size, size_t 
         if (size_multiply_overflow(size, need))
                 return NULL;
 
-        return malloc(size * need);
+        return malloc(size * need ?: 1);
 }
 
 #if !HAVE_REALLOCARRAY
@@ -88,7 +106,7 @@ _alloc_(2, 3) static inline void *reallocarray(void *p, size_t need, size_t size
                 return NULL;
 
         //增大p指针的指向的空间长度为size*need
-        return realloc(p, size * need);
+        return realloc(p, size * need ?: 1);
 }
 #endif
 
@@ -119,6 +137,7 @@ void* greedy_realloc0(void **p, size_t *allocated, size_t need, size_t size);
         ({                                              \
                 char *_new_;                            \
                 size_t _len_ = n;                       \
+                assert(_len_ <= ALLOCA_MAX);            \
                 _new_ = alloca(_len_);                  \
                 (void *) memset(_new_, 0, _len_);       \
         })
@@ -128,16 +147,18 @@ void* greedy_realloc0(void **p, size_t *allocated, size_t need, size_t size);
         ({                                                              \
                 void *_ptr_;                                            \
                 size_t _mask_ = (align) - 1;                            \
-                _ptr_ = alloca((size) + _mask_);                        \
+                size_t _size_ = size;                                   \
+                assert(_size_ <= ALLOCA_MAX);                           \
+                _ptr_ = alloca(_size_ + _mask_);                        \
                 (void*)(((uintptr_t)_ptr_ + _mask_) & ~_mask_);         \
         })
 
 #define alloca0_align(size, align)                                      \
         ({                                                              \
                 void *_new_;                                            \
-                size_t _size_ = (size);                                 \
-                _new_ = alloca_align(_size_, (align));                  \
-                (void*)memset(_new_, 0, _size_);                        \
+                size_t _xsize_ = (size);                                \
+                _new_ = alloca_align(_xsize_, (align));                 \
+                (void*)memset(_new_, 0, _xsize_);                       \
         })
 
 /* Takes inspiration from Rusts's Option::take() method: reads and returns a pointer, but at the same time resets it to
@@ -148,3 +169,9 @@ void* greedy_realloc0(void **p, size_t *allocated, size_t need, size_t size);
                 (ptr) = NULL;                   \
                 _ptr_;                          \
         })
+
+#if HAS_FEATURE_MEMORY_SANITIZER
+#  define msan_unpoison(r, s) __msan_unpoison(r, s)
+#else
+#  define msan_unpoison(r, s)
+#endif

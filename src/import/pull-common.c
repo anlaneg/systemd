@@ -14,6 +14,7 @@
 #include "process-util.h"
 #include "pull-common.h"
 #include "pull-job.h"
+#include "rlimit-util.h"
 #include "rm-rf.h"
 #include "signal-util.h"
 #include "siphash24.h"
@@ -338,10 +339,9 @@ static int verify_one(PullJob *checksum_job, PullJob *job) {
         if (r < 0)
                 return log_oom();
 
-        if (!filename_is_valid(fn)) {
-                log_error("Cannot verify checksum, could not determine server-side file name.");
-                return -EBADMSG;
-        }
+        if (!filename_is_valid(fn))
+                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "Cannot verify checksum, could not determine server-side file name.");
 
         line = strjoina(job->checksum, " *", fn, "\n");
 
@@ -359,10 +359,9 @@ static int verify_one(PullJob *checksum_job, PullJob *job) {
                         strlen(line));
         }
 
-        if (!p || (p != (char*) checksum_job->payload && p[-1] != '\n')) {
-                log_error("DOWNLOAD INVALID: Checksum of %s file did not checkout, file has been tampered with.", fn);
-                return -EBADMSG;
-        }
+        if (!p || (p != (char*) checksum_job->payload && p[-1] != '\n'))
+                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "DOWNLOAD INVALID: Checksum of %s file did not checkout, file has been tampered with.", fn);
 
         log_info("SHA256 checksum of %s is valid.", job->url);
         return 1;
@@ -473,6 +472,8 @@ int pull_verify(PullJob *main_job,
                         log_error_errno(r, "Failed to rearrange stdin/stdout: %m");
                         _exit(EXIT_FAILURE);
                 }
+
+                (void) rlimit_nofile_safe();
 
                 cmd[k++] = strjoina("--homedir=", gpg_home);
 

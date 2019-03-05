@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include "def.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "hostname-util.h"
@@ -13,12 +12,12 @@
 /* Recheck /etc/hosts at most once every 2s */
 #define ETC_HOSTS_RECHECK_USEC (2*USEC_PER_SEC)
 
-static inline void etc_hosts_item_free(EtcHostsItem *item) {
+static void etc_hosts_item_free(EtcHostsItem *item) {
         strv_free(item->names);
         free(item);
 }
 
-static inline void etc_hosts_item_by_name_free(EtcHostsItemByName *item) {
+static void etc_hosts_item_by_name_free(EtcHostsItemByName *item) {
         free(item->name);
         free(item->addresses);
         free(item);
@@ -47,19 +46,20 @@ static int parse_line(EtcHosts *hosts, unsigned nr, const char *line) {
 
         r = extract_first_word(&line, &address_str, NULL, EXTRACT_RELAX);
         if (r < 0)
-                return log_error_errno(r, "Couldn't extract address, in line /etc/hosts:%u.", nr);
-        if (r == 0) {
-                log_error("Premature end of line, in line /etc/hosts:%u.", nr);
-                return -EINVAL;
-        }
+                return log_error_errno(r, "/etc/hosts:%u: failed to extract address: %m", nr);
+        assert(r > 0); /* We already checked that the line is not empty, so it should contain *something* */
 
         r = in_addr_ifindex_from_string_auto(address_str, &address.family, &address.address, NULL);
-        if (r < 0)
-                return log_error_errno(r, "Address '%s' is invalid, in line /etc/hosts:%u.", address_str, nr);
+        if (r < 0) {
+                log_warning_errno(r, "/etc/hosts:%u: address '%s' is invalid, ignoring: %m", nr, address_str);
+                return 0;
+        }
 
         r = in_addr_is_null(address.family, &address.address);
-        if (r < 0)
-                return r;
+        if (r < 0) {
+                log_warning_errno(r, "/etc/hosts:%u: address '%s' is invalid, ignoring: %m", nr, address_str);
+                return 0;
+        }
         if (r > 0)
                 /* This is an 0.0.0.0 or :: item, which we assume means that we shall map the specified hostname to
                  * nothing. */
@@ -93,15 +93,17 @@ static int parse_line(EtcHosts *hosts, unsigned nr, const char *line) {
 
                 r = extract_first_word(&line, &name, NULL, EXTRACT_RELAX);
                 if (r < 0)
-                        return log_error_errno(r, "Couldn't extract host name, in line /etc/hosts:%u.", nr);
+                        return log_error_errno(r, "/etc/hosts:%u: couldn't extract host name: %m", nr);
                 if (r == 0)
                         break;
 
-                r = dns_name_is_valid(name);
-                if (r <= 0)
-                        return log_error_errno(r, "Hostname %s is not valid, ignoring, in line /etc/hosts:%u.", name, nr);
-
                 found = true;
+
+                r = dns_name_is_valid_ldh(name);
+                if (r <= 0) {
+                        log_warning_errno(r, "/etc/hosts:%u: hostname \"%s\" is not valid, ignoring.", nr, name);
+                        continue;
+                }
 
                 if (is_localhost(name))
                         /* Suppress the "localhost" line that is often seen */
@@ -152,10 +154,8 @@ static int parse_line(EtcHosts *hosts, unsigned nr, const char *line) {
                 bn->addresses[bn->n_addresses++] = &item->address;
         }
 
-        if (!found) {
-                log_error("Line is missing any host names, in line /etc/hosts:%u.", nr);
-                return -EINVAL;
-        }
+        if (!found)
+                log_warning("/etc/hosts:%u: line is missing any host names", nr);
 
         return 0;
 }
@@ -177,10 +177,12 @@ int etc_hosts_parse(EtcHosts *hosts, FILE *f) {
 
                 nr++;
 
+                l = strchr(line, '#');
+                if (l)
+                        *l = '\0';
+
                 l = strstrip(line);
                 if (isempty(l))
-                        continue;
-                if (l[0] == '#')
                         continue;
 
                 r = parse_line(&t, nr, l);

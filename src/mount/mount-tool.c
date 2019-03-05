@@ -15,10 +15,13 @@
 #include "fileio.h"
 #include "fs-util.h"
 #include "fstab-util.h"
+#include "main-func.h"
 #include "mount-util.h"
+#include "mountpoint-util.h"
 #include "pager.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "pretty-print.h"
 #include "spawn-polkit-agent.h"
 #include "stat-util.h"
 #include "strv.h"
@@ -36,7 +39,7 @@ enum {
 } arg_action = ACTION_DEFAULT;
 
 static bool arg_no_block = false;
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
 static bool arg_ask_password = true;
 static bool arg_quiet = false;
 static BusTransport arg_transport = BUS_TRANSPORT_LOCAL;
@@ -57,6 +60,14 @@ static uid_t arg_uid = UID_INVALID;
 static gid_t arg_gid = GID_INVALID;
 static bool arg_fsck = true;
 static bool arg_aggressive_gc = false;
+
+STATIC_DESTRUCTOR_REGISTER(arg_mount_what, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_mount_where, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_mount_type, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_mount_options, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_description, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_property, strv_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_automount_property, strv_freep);
 
 static int help(void) {
         _cleanup_free_ char *link = NULL;
@@ -177,7 +188,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case ARG_NO_ASK_PASSWORD:
@@ -299,46 +310,39 @@ static int parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        if (arg_user && arg_transport != BUS_TRANSPORT_LOCAL) {
-                log_error("Execution in user context is not supported on non-local systems.");
-                return -EINVAL;
-        }
+        if (arg_user && arg_transport != BUS_TRANSPORT_LOCAL)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Execution in user context is not supported on non-local systems.");
 
         if (arg_action == ACTION_LIST) {
-                if (optind < argc) {
-                        log_error("Too many arguments.");
-                        return -EINVAL;
-                }
+                if (optind < argc)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Too many arguments.");
 
-                if (arg_transport != BUS_TRANSPORT_LOCAL) {
-                        log_error("Listing devices only supported locally.");
-                        return -EOPNOTSUPP;
-                }
+                if (arg_transport != BUS_TRANSPORT_LOCAL)
+                        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                               "Listing devices only supported locally.");
         } else if (arg_action == ACTION_UMOUNT) {
-                if (optind >= argc) {
-                        log_error("At least one argument required.");
-                        return -EINVAL;
-                }
+                if (optind >= argc)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "At least one argument required.");
 
                 if (arg_transport != BUS_TRANSPORT_LOCAL) {
                         int i;
 
                         for (i = optind; i < argc; i++)
-                                if (!path_is_absolute(argv[i]) ) {
-                                        log_error("Only absolute path is supported: %s", argv[i]);
-                                        return -EINVAL;
-                                }
+                                if (!path_is_absolute(argv[i]) )
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Only absolute path is supported: %s", argv[i]);
                 }
         } else {
-                if (optind >= argc) {
-                        log_error("At least one argument required.");
-                        return -EINVAL;
-                }
+                if (optind >= argc)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "At least one argument required.");
 
-                if (argc > optind+2) {
-                        log_error("At most two arguments required.");
-                        return -EINVAL;
-                }
+                if (argc > optind+2)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "At most two arguments required.");
 
                 if (arg_mount_type && (fstype_is_api_vfs(arg_mount_type) || fstype_is_network(arg_mount_type))) {
                         arg_mount_what = strdup(argv[optind]);
@@ -362,10 +366,9 @@ static int parse_argv(int argc, char *argv[]) {
 
                         path_simplify(arg_mount_what, false);
 
-                        if (!path_is_absolute(arg_mount_what)) {
-                                log_error("Only absolute path is supported: %s", arg_mount_what);
-                                return -EINVAL;
-                        }
+                        if (!path_is_absolute(arg_mount_what))
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Only absolute path is supported: %s", arg_mount_what);
                 }
 
                 if (argc > optind+1) {
@@ -380,18 +383,16 @@ static int parse_argv(int argc, char *argv[]) {
 
                                 path_simplify(arg_mount_where, false);
 
-                                if (!path_is_absolute(arg_mount_where)) {
-                                        log_error("Only absolute path is supported: %s", arg_mount_where);
-                                        return -EINVAL;
-                                }
+                                if (!path_is_absolute(arg_mount_where))
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Only absolute path is supported: %s", arg_mount_where);
                         }
                 } else
                         arg_discover = true;
 
-                if (arg_discover && arg_transport != BUS_TRANSPORT_LOCAL) {
-                        log_error("Automatic mount location discovery is only supported locally.");
-                        return -EOPNOTSUPP;
-                }
+                if (arg_discover && arg_transport != BUS_TRANSPORT_LOCAL)
+                        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                               "Automatic mount location discovery is only supported locally.");
         }
 
         return 1;
@@ -899,15 +900,13 @@ static int stop_mounts(
 
         int r;
 
-        if (path_equal(where, "/")) {
-                log_error("Refusing to operate on root directory: %s", where);
-                return -EINVAL;
-        }
+        if (path_equal(where, "/"))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Refusing to operate on root directory: %s", where);
 
-        if (!path_is_normalized(where)) {
-                log_error("Path contains non-normalized components: %s", where);
-                return -EINVAL;
-        }
+        if (!path_is_normalized(where))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Path contains non-normalized components: %s", where);
 
         r = stop_mount(bus, where, ".mount");
         if (r < 0)
@@ -1154,13 +1153,14 @@ static int acquire_mount_where_for_loop_dev(const char *loop_dev) {
         r = find_mount_points(loop_dev, &list);
         if (r < 0)
                 return r;
-        else if (r == 0) {
-                log_error("Can't find mount point of %s. It is expected that %s is already mounted on a place.", loop_dev, loop_dev);
-                return -EINVAL;
-        } else if (r >= 2) {
-                log_error("%s is mounted on %d places. It is expected that %s is mounted on a place.", loop_dev, r, loop_dev);
-                return -EINVAL;
-        }
+        else if (r == 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Can't find mount point of %s. It is expected that %s is already mounted on a place.",
+                                       loop_dev, loop_dev);
+        else if (r >= 2)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "%s is mounted on %d places. It is expected that %s is mounted on a place.",
+                                       loop_dev, r, loop_dev);
 
         arg_mount_where = strdup(list[0]);
         if (!arg_mount_where)
@@ -1485,7 +1485,7 @@ static int list_devices(void) {
 
         typesafe_qsort(items, n, compare_item);
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         fputs(ansi_underline(), stdout);
         for (c = 0; c < _COLUMN_MAX; c++) {
@@ -1518,8 +1518,8 @@ finish:
         return r;
 }
 
-int main(int argc, char* argv[]) {
-        sd_bus *bus = NULL;
+static int run(int argc, char* argv[]) {
+        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         int r;
 
         log_parse_environment();
@@ -1527,52 +1527,42 @@ int main(int argc, char* argv[]) {
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
-        if (arg_action == ACTION_LIST) {
-                r = list_devices();
-                goto finish;
-        }
+        if (arg_action == ACTION_LIST)
+                return list_devices();
 
         r = bus_connect_transport_systemd(arg_transport, arg_host, arg_user, &bus);
-        if (r < 0) {
-                log_error_errno(r, "Failed to create bus connection: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to create bus connection: %m");
 
-        if (arg_action == ACTION_UMOUNT) {
-                r = action_umount(bus, argc, argv);
-                goto finish;
-        }
+        if (arg_action == ACTION_UMOUNT)
+                return action_umount(bus, argc, argv);
 
         if (!path_is_normalized(arg_mount_what)) {
                 log_error("Path contains non-normalized components: %s", arg_mount_what);
-                r = -EINVAL;
-                goto finish;
+                return -EINVAL;
         }
 
         if (arg_discover) {
                 r = discover_device();
                 if (r < 0)
-                        goto finish;
+                        return r;
         }
 
         if (!arg_mount_where) {
                 log_error("Can't figure out where to mount %s.", arg_mount_what);
-                r = -EINVAL;
-                goto finish;
+                return -EINVAL;
         }
 
         if (path_equal(arg_mount_where, "/")) {
                 log_error("Refusing to operate on root directory.");
-                r = -EINVAL;
-                goto finish;
+                return -EINVAL;
         }
 
         if (!path_is_normalized(arg_mount_where)) {
                 log_error("Path contains non-normalized components: %s", arg_mount_where);
-                r = -EINVAL;
-                goto finish;
+                return -EINVAL;
         }
 
         if (streq_ptr(arg_mount_type, "auto"))
@@ -1606,8 +1596,7 @@ int main(int argc, char* argv[]) {
             !fstype_can_uid_gid(arg_mount_type)) {
                 log_error("File system type %s is not known to support uid=/gid=, refusing.",
                           arg_mount_type);
-                r = -EOPNOTSUPP;
-                goto finish;
+                return -EOPNOTSUPP;
         }
 
         switch (arg_action) {
@@ -1625,19 +1614,7 @@ int main(int argc, char* argv[]) {
                 assert_not_reached("Unexpected action.");
         }
 
-finish:
-        /* make sure we terminate the bus connection first, and then close the
-         * pager, see issue #3543 for the details. */
-        bus = sd_bus_flush_close_unref(bus);
-        pager_close();
-
-        free(arg_mount_what);
-        free(arg_mount_where);
-        free(arg_mount_type);
-        free(arg_mount_options);
-        free(arg_description);
-        strv_free(arg_property);
-        strv_free(arg_automount_property);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return r;
 }
+
+DEFINE_MAIN_FUNCTION(run);

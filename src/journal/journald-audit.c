@@ -162,7 +162,7 @@ static int map_generic_field(const char *prefix, const char **p, struct iovec **
         if (e <= *p || e >= *p + 16)
                 return 0;
 
-        c = alloca(strlen(prefix) + (e - *p) + 2);
+        c = newa(char, strlen(prefix) + (e - *p) + 2);
 
         t = stpcpy(c, prefix);
         for (f = *p; f < e; f++) {
@@ -313,7 +313,7 @@ static int map_all_fields(
         }
 }
 
-static void process_audit_string(Server *s, int type, const char *data, size_t size) {
+void process_audit_string(Server *s, int type, const char *data, size_t size) {
         size_t n_iov_allocated = 0, n_iov = 0, z;
         _cleanup_free_ struct iovec *iov = NULL;
         uint64_t seconds, msec, id;
@@ -341,11 +341,12 @@ static void process_audit_string(Server *s, int type, const char *data, size_t s
         if (!p)
                 return;
 
+        k = 0;
         if (sscanf(p, "(%" PRIu64 ".%" PRIu64 ":%" PRIu64 "):%n",
                    &seconds,
                    &msec,
                    &id,
-                   &k) != 3)
+                   &k) != 3 || k == 0)
                 return;
 
         p += k;

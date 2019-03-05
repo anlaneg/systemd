@@ -217,7 +217,7 @@
             actual execution of the service program is delayed until all active jobs are dispatched. This may be used
             to avoid interleaving of output of shell services with the status output on the console. Note that this
             type is useful only to improve console output, it is not useful as a general unit ordering tool, and the
-            effect of this service type is subject to a 5s time-out, after which the service program is invoked
+            effect of this service type is subject to a 5s timeout, after which the service program is invoked
             anyway.</para></listitem>
           </itemizedlist>
 
@@ -272,14 +272,15 @@
       <varlistentry>
         <term><varname>PIDFile=</varname></term>
 
-        <listitem><para>Takes an absolute path referring to the PID file of the service. Usage of this option is
-        recommended for services where <varname>Type=</varname> is set to <option>forking</option>. The service manager
-        will read the PID of the main process of the service from this file after start-up of the service. The service
-        manager will not write to the file configured here, although it will remove the file after the service has shut
-        down if it still exists. The PID file does not need to be owned by a privileged user, but if it is owned by an
-        unprivileged user additional safety restrictions are enforced: the file may not be a symlink to a file owned by
-        a different user (neither directly nor indirectly), and the PID file must refer to a process already belonging
-        to the service.</para></listitem>
+        <listitem><para>Takes a path referring to the PID file of the service. Usage of this option is recommended for
+        services where <varname>Type=</varname> is set to <option>forking</option>. The path specified typically points
+        to a file below <filename>/run/</filename>. If a relative path is specified it is hence prefixed with
+        <filename>/run/</filename>. The service manager will read the PID of the main process of the service from this
+        file after start-up of the service. The service manager will not write to the file configured here, although it
+        will remove the file after the service has shut down if it still exists. The PID file does not need to be owned
+        by a privileged user, but if it is owned by an unprivileged user additional safety restrictions are enforced:
+        the file may not be a symlink to a file owned by a different user (neither directly nor indirectly), and the
+        PID file must refer to a process already belonging to the service.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -338,6 +339,11 @@
               </row>
 
               <row>
+                <entry><literal>:</literal></entry>
+                <entry>If the executable path is prefixed with <literal>:</literal>, environment variable substitution (as described by the "Command Lines" section below) is not applied.</entry>
+              </row>
+
+              <row>
                 <entry><literal>+</literal></entry>
                 <entry>If the executable path is prefixed with <literal>+</literal> then the process is executed with full privileges. In this mode privilege restrictions configured with <varname>User=</varname>, <varname>Group=</varname>, <varname>CapabilityBoundingSet=</varname> or the various file system namespacing options (such as <varname>PrivateDevices=</varname>, <varname>PrivateTmp=</varname>) are not applied to the invoked command line (but still affect any other <varname>ExecStart=</varname>, <varname>ExecStop=</varname>, … lines).</entry>
               </row>
@@ -357,7 +363,7 @@
           </tgroup>
         </table>
 
-        <para><literal>@</literal>, <literal>-</literal>, and one of
+        <para><literal>@</literal>, <literal>-</literal>, <literal>:</literal>, and one of
         <literal>+</literal>/<literal>!</literal>/<literal>!!</literal> may be used together and they can appear in any
         order. However, only one of <literal>+</literal>, <literal>!</literal>, <literal>!!</literal> may be used at a
         time. Note that these prefixes are also supported for the other command line settings,
@@ -829,24 +835,6 @@
         with <varname>Restart=</varname>. The argument format is
         similar to
         <varname>RestartPreventExitStatus=</varname>.</para></listitem>
-      </varlistentry>
-
-      <varlistentry>
-        <term><varname>PermissionsStartOnly=</varname></term>
-        <listitem><para>Takes a boolean argument. If true, the
-        permission-related execution options, as configured with
-        <varname>User=</varname> and similar options (see
-        <citerefentry><refentrytitle>systemd.exec</refentrytitle><manvolnum>5</manvolnum></citerefentry>
-        for more information), are only applied to the process started
-        with
-        <varname>ExecStart=</varname>, and not to the various other
-        <varname>ExecStartPre=</varname>,
-        <varname>ExecStartPost=</varname>,
-        <varname>ExecReload=</varname>,
-        <varname>ExecStop=</varname>, and
-        <varname>ExecStopPost=</varname>
-        commands. If false, the setting is applied to all configured
-        commands the same way. Defaults to false.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -1433,6 +1421,7 @@ WantedBy=multi-user.target</programlisting>
       <para>
         <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
         <citerefentry><refentrytitle>systemctl</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
+        <citerefentry><refentrytitle>systemd-system.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
         <citerefentry><refentrytitle>systemd.unit</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
         <citerefentry><refentrytitle>systemd.exec</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
         <citerefentry><refentrytitle>systemd.resource-control</refentrytitle><manvolnum>5</manvolnum></citerefentry>,

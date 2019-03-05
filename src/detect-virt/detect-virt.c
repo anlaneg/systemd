@@ -6,8 +6,9 @@
 #include <stdlib.h>
 
 #include "alloc-util.h"
+#include "main-func.h"
+#include "pretty-print.h"
 #include "string-table.h"
-#include "terminal-util.h"
 #include "util.h"
 #include "virt.h"
 
@@ -112,15 +113,15 @@ static int parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        if (optind < argc) {
-                log_error("%s takes no arguments.", program_invocation_short_name);
-                return -EINVAL;
-        }
+        if (optind < argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "%s takes no arguments.",
+                                       program_invocation_short_name);
 
         return 1;
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         int r;
 
         /* This is mostly intended to be used for scripts which want
@@ -132,59 +133,45 @@ int main(int argc, char *argv[]) {
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+                return r;
 
         switch (arg_mode) {
-
         case ONLY_VM:
                 r = detect_vm();
-                if (r < 0) {
-                        log_error_errno(r, "Failed to check for VM: %m");
-                        return EXIT_FAILURE;
-                }
-
+                if (r < 0)
+                        return log_error_errno(r, "Failed to check for VM: %m");
                 break;
 
         case ONLY_CONTAINER:
                 r = detect_container();
-                if (r < 0) {
-                        log_error_errno(r, "Failed to check for container: %m");
-                        return EXIT_FAILURE;
-                }
-
+                if (r < 0)
+                        return log_error_errno(r, "Failed to check for container: %m");
                 break;
 
         case ONLY_CHROOT:
                 r = running_in_chroot();
-                if (r < 0) {
-                        log_error_errno(r, "Failed to check for chroot() environment: %m");
-                        return EXIT_FAILURE;
-                }
-
-                return r ? EXIT_SUCCESS : EXIT_FAILURE;
+                if (r < 0)
+                        return log_error_errno(r, "Failed to check for chroot() environment: %m");
+                return !r;
 
         case ONLY_PRIVATE_USERS:
                 r = running_in_userns();
-                if (r < 0) {
-                        log_error_errno(r, "Failed to check for user namespace: %m");
-                        return EXIT_FAILURE;
-                }
-
-                return r ? EXIT_SUCCESS : EXIT_FAILURE;
+                if (r < 0)
+                        return log_error_errno(r, "Failed to check for user namespace: %m");
+                return !r;
 
         case ANY_VIRTUALIZATION:
         default:
                 r = detect_virtualization();
-                if (r < 0) {
-                        log_error_errno(r, "Failed to check for virtualization: %m");
-                        return EXIT_FAILURE;
-                }
-
+                if (r < 0)
+                        return log_error_errno(r, "Failed to check for virtualization: %m");
                 break;
         }
 
         if (!arg_quiet)
                 puts(virtualization_to_string(r));
 
-        return r != VIRTUALIZATION_NONE ? EXIT_SUCCESS : EXIT_FAILURE;
+        return r == VIRTUALIZATION_NONE;
 }
+
+DEFINE_MAIN_FUNCTION_WITH_POSITIVE_FAILURE(run);

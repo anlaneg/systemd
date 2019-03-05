@@ -17,6 +17,7 @@
 #include "device-nodes.h"
 #include "device-util.h"
 #include "dissect-image.h"
+#include "env-file.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
@@ -27,6 +28,7 @@
 #include "linux-3.13/dm-ioctl.h"
 #include "missing.h"
 #include "mount-util.h"
+#include "mountpoint-util.h"
 #include "os-util.h"
 #include "path-util.h"
 #include "process-util.h"
@@ -37,6 +39,8 @@
 #include "string-table.h"
 #include "string-util.h"
 #include "strv.h"
+#include "tmpfile-util.h"
+#include "udev-util.h"
 #include "user-util.h"
 #include "xattr-util.h"
 
@@ -98,6 +102,8 @@ not_found:
 static bool device_is_mmc_special_partition(sd_device *d) {
         const char *sysname;
 
+        assert(d);
+
         if (sd_device_get_sysname(d, &sysname) < 0)
                 return false;
 
@@ -108,11 +114,158 @@ static bool device_is_mmc_special_partition(sd_device *d) {
 static bool device_is_block(sd_device *d) {
         const char *ss;
 
+        assert(d);
+
         if (sd_device_get_subsystem(d, &ss) < 0)
                 return false;
 
         return streq(ss, "block");
 }
+
+static int enumerator_for_parent(sd_device *d, sd_device_enumerator **ret) {
+        _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
+        int r;
+
+        assert(d);
+        assert(ret);
+
+        r = sd_device_enumerator_new(&e);
+        if (r < 0)
+                return r;
+
+        r = sd_device_enumerator_allow_uninitialized(e);
+        if (r < 0)
+                return r;
+
+        r = sd_device_enumerator_add_match_parent(e, d);
+        if (r < 0)
+                return r;
+
+        *ret = TAKE_PTR(e);
+        return 0;
+}
+
+/* how many times to wait for the device nodes to appear */
+#define N_DEVICE_NODE_LIST_ATTEMPTS 10
+
+static int wait_for_partitions_to_appear(
+                int fd,
+                sd_device *d,
+                unsigned num_partitions,
+                DissectImageFlags flags,
+                sd_device_enumerator **ret_enumerator) {
+
+        _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
+        sd_device *q;
+        unsigned n;
+        int r;
+
+        assert(fd >= 0);
+        assert(d);
+        assert(ret_enumerator);
+
+        r = enumerator_for_parent(d, &e);
+        if (r < 0)
+                return r;
+
+        /* Count the partitions enumerated by the kernel */
+        n = 0;
+        FOREACH_DEVICE(e, q) {
+                if (sd_device_get_devnum(q, NULL) < 0)
+                        continue;
+                if (!device_is_block(q))
+                        continue;
+                if (device_is_mmc_special_partition(q))
+                        continue;
+
+                if (!FLAGS_SET(flags, DISSECT_IMAGE_NO_UDEV)) {
+                        r = device_wait_for_initialization(q, "block", NULL);
+                        if (r < 0)
+                                return r;
+                }
+
+                n++;
+        }
+
+        if (n == num_partitions + 1) {
+                *ret_enumerator = TAKE_PTR(e);
+                return 0; /* success! */
+        }
+        if (n > num_partitions + 1)
+                return log_debug_errno(SYNTHETIC_ERRNO(EIO),
+                                       "blkid and kernel partition lists do not match.");
+
+        /* The kernel has probed fewer partitions than blkid? Maybe the kernel prober is still running or it
+         * got EBUSY because udev already opened the device. Let's reprobe the device, which is a synchronous
+         * call that waits until probing is complete. */
+
+        for (unsigned j = 0; ; j++) {
+                if (j++ > 20)
+                        return -EBUSY;
+
+                if (ioctl(fd, BLKRRPART, 0) >= 0)
+                        break;
+                r = -errno;
+                if (r == -EINVAL) {
+                        struct loop_info64 info;
+
+                        /* If we are running on a loop device that has partition scanning off, return
+                         * an explicit recognizable error about this, so that callers can generate a
+                         * proper message explaining the situation. */
+
+                        if (ioctl(fd, LOOP_GET_STATUS64, &info) >= 0 && (info.lo_flags & LO_FLAGS_PARTSCAN) == 0) {
+                                log_debug("Device is a loop device and partition scanning is off!");
+                                return -EPROTONOSUPPORT;
+                        }
+                }
+                if (r != -EBUSY)
+                        return r;
+
+                /* If something else has the device open, such as an udev rule, the ioctl will return
+                 * EBUSY. Since there's no way to wait until it isn't busy anymore, let's just wait a bit,
+                 * and try again.
+                 *
+                 * This is really something they should fix in the kernel! */
+                (void) usleep(50 * USEC_PER_MSEC);
+
+        }
+
+        return -EAGAIN; /* no success yet, try again */
+}
+
+static int loop_wait_for_partitions_to_appear(
+                int fd,
+                sd_device *d,
+                unsigned num_partitions,
+                DissectImageFlags flags,
+                sd_device_enumerator **ret_enumerator) {
+        _cleanup_(sd_device_unrefp) sd_device *device = NULL;
+        int r;
+
+        assert(fd >= 0);
+        assert(d);
+        assert(ret_enumerator);
+
+        log_debug("Waiting for device (parent + %d partitions) to appear...", num_partitions);
+
+        if (!FLAGS_SET(flags, DISSECT_IMAGE_NO_UDEV)) {
+                r = device_wait_for_initialization(d, "block", &device);
+                if (r < 0)
+                        return r;
+        } else
+                device = sd_device_ref(d);
+
+        for (unsigned i = 0; i < N_DEVICE_NODE_LIST_ATTEMPTS; i++) {
+                r = wait_for_partitions_to_appear(fd, device, num_partitions, flags, ret_enumerator);
+                if (r != -EAGAIN)
+                        return r;
+        }
+
+        return log_debug_errno(SYNTHETIC_ERRNO(ENXIO),
+                               "Kernel partitions dit not appear within %d attempts",
+                               N_DEVICE_NODE_LIST_ATTEMPTS);
+}
+
 #endif
 
 int dissect_image(
@@ -190,16 +343,18 @@ int dissect_image(
 
         errno = 0;
         r = blkid_do_safeprobe(b);
-        if (IN_SET(r, -2, 1)) {
-                log_debug("Failed to identify any partition table.");
-                return -ENOPKG;
-        }
+        if (IN_SET(r, -2, 1))
+                return log_debug_errno(SYNTHETIC_ERRNO(ENOPKG), "Failed to identify any partition table.");
         if (r != 0)
                 return -errno ?: -EIO;
 
         m = new0(DissectedImage, 1);
         if (!m)
                 return -ENOMEM;
+
+        r = sd_device_new_from_devnum(&d, 'b', st.st_rdev);
+        if (r < 0)
+                return r;
 
         if (!(flags & DISSECT_IMAGE_GPT_ONLY) &&
             (flags & DISSECT_IMAGE_REQUIRE_ROOT)) {
@@ -219,8 +374,9 @@ int dissect_image(
                                         return -ENOMEM;
                         }
 
-                        if (asprintf(&n, "/dev/block/%u:%u", major(st.st_rdev), minor(st.st_rdev)) < 0)
-                                return -ENOMEM;
+                        r = device_path_make_major_minor(st.st_mode, st.st_rdev, &n);
+                        if (r < 0)
+                                return r;
 
                         m->partitions[PARTITION_ROOT] = (DissectedPartition) {
                                 .found = true,
@@ -232,6 +388,10 @@ int dissect_image(
                         };
 
                         m->encrypted = streq_ptr(fstype, "crypto_LUKS");
+
+                        r = loop_wait_for_partitions_to_appear(fd, d, 0, flags, &e);
+                        if (r < 0)
+                                return r;
 
                         *ret = TAKE_PTR(m);
 
@@ -254,95 +414,9 @@ int dissect_image(
         if (!pl)
                 return -errno ?: -ENOMEM;
 
-        r = sd_device_new_from_devnum(&d, 'b', st.st_rdev);
+        r = loop_wait_for_partitions_to_appear(fd, d, blkid_partlist_numof_partitions(pl), flags, &e);
         if (r < 0)
                 return r;
-
-        for (i = 0;; i++) {
-                int n, z;
-
-                if (i >= 10) {
-                        log_debug("Kernel partitions never appeared.");
-                        return -ENXIO;
-                }
-
-                r = sd_device_enumerator_new(&e);
-                if (r < 0)
-                        return r;
-
-                r = sd_device_enumerator_allow_uninitialized(e);
-                if (r < 0)
-                        return r;
-
-                r = sd_device_enumerator_add_match_parent(e, d);
-                if (r < 0)
-                        return r;
-
-                /* Count the partitions enumerated by the kernel */
-                n = 0;
-                FOREACH_DEVICE(e, q) {
-                        if (sd_device_get_devnum(q, NULL) < 0)
-                                continue;
-
-                        if (!device_is_block(q))
-                                continue;
-
-                        if (device_is_mmc_special_partition(q))
-                                continue;
-                        n++;
-                }
-
-                /* Count the partitions enumerated by blkid */
-                z = blkid_partlist_numof_partitions(pl);
-                if (n == z + 1)
-                        break;
-                if (n > z + 1) {
-                        log_debug("blkid and kernel partition list do not match.");
-                        return -EIO;
-                }
-                if (n < z + 1) {
-                        unsigned j = 0;
-
-                        /* The kernel has probed fewer partitions than blkid? Maybe the kernel prober is still running
-                         * or it got EBUSY because udev already opened the device. Let's reprobe the device, which is a
-                         * synchronous call that waits until probing is complete. */
-
-                        for (;;) {
-                                if (j++ > 20)
-                                        return -EBUSY;
-
-                                if (ioctl(fd, BLKRRPART, 0) < 0) {
-                                        r = -errno;
-
-                                        if (r == -EINVAL) {
-                                                struct loop_info64 info;
-
-                                                /* If we are running on a loop device that has partition scanning off,
-                                                 * return an explicit recognizable error about this, so that callers
-                                                 * can generate a proper message explaining the situation. */
-
-                                                if (ioctl(fd, LOOP_GET_STATUS64, &info) >= 0 && (info.lo_flags & LO_FLAGS_PARTSCAN) == 0) {
-                                                        log_debug("Device is loop device and partition scanning is off!");
-                                                        return -EPROTONOSUPPORT;
-                                                }
-                                        }
-                                        if (r != -EBUSY)
-                                                return r;
-                                } else
-                                        break;
-
-                                /* If something else has the device open, such as an udev rule, the ioctl will return
-                                 * EBUSY. Since there's no way to wait until it isn't busy anymore, let's just wait a
-                                 * bit, and try again.
-                                 *
-                                 * This is really something they should fix in the kernel! */
-
-                                (void) usleep(50 * USEC_PER_MSEC);
-                        }
-                }
-
-                e = sd_device_enumerator_unref(e);
-        }
 
         FOREACH_DEVICE(e, q) {
                 unsigned long long pflags;
@@ -421,6 +495,14 @@ int dissect_image(
 
                                 designator = PARTITION_ESP;
                                 fstype = "vfat";
+
+                        } else if (sd_id128_equal(type_id, GPT_XBOOTLDR)) {
+
+                                if (pflags & GPT_FLAG_NO_AUTO)
+                                        continue;
+
+                                designator = PARTITION_XBOOTLDR;
+                                rw = !(pflags & GPT_FLAG_READ_ONLY);
                         }
 #ifdef GPT_ROOT_NATIVE
                         else if (sd_id128_equal(type_id, GPT_ROOT_NATIVE)) {
@@ -536,21 +618,53 @@ int dissect_image(
 
                 } else if (is_mbr) {
 
-                        if (pflags != 0x80) /* Bootable flag */
-                                continue;
+                        switch (blkid_partition_get_type(pp)) {
 
-                        if (blkid_partition_get_type(pp) != 0x83) /* Linux partition */
-                                continue;
+                        case 0x83: /* Linux partition */
 
-                        if (generic_node)
-                                multiple_generic = true;
-                        else {
-                                generic_nr = nr;
-                                generic_rw = true;
-                                generic_node = strdup(node);
-                                if (!generic_node)
+                                if (pflags != 0x80) /* Bootable flag */
+                                        continue;
+
+                                if (generic_node)
+                                        multiple_generic = true;
+                                else {
+                                        generic_nr = nr;
+                                        generic_rw = true;
+                                        generic_node = strdup(node);
+                                        if (!generic_node)
+                                                return -ENOMEM;
+                                }
+
+                                break;
+
+                        case 0xEA: { /* Boot Loader Spec extended $BOOT partition */
+                                _cleanup_free_ char *n = NULL;
+                                sd_id128_t id = SD_ID128_NULL;
+                                const char *sid;
+
+                                /* First one wins */
+                                if (m->partitions[PARTITION_XBOOTLDR].found)
+                                        continue;
+
+                                sid = blkid_partition_get_uuid(pp);
+                                if (sid)
+                                        (void) sd_id128_from_string(sid, &id);
+
+                                n = strdup(node);
+                                if (!n)
                                         return -ENOMEM;
-                        }
+
+                                m->partitions[PARTITION_XBOOTLDR] = (DissectedPartition) {
+                                        .found = true,
+                                        .partno = nr,
+                                        .rw = true,
+                                        .architecture = _ARCHITECTURE_INVALID,
+                                        .node = TAKE_PTR(n),
+                                        .uuid = id,
+                                };
+
+                                break;
+                        }}
                 }
         }
 
@@ -743,11 +857,15 @@ static int mount_partition(
                         return -ENOMEM;
         }
 
-        return mount_verbose(LOG_DEBUG, node, p, fstype, MS_NODEV|(rw ? 0 : MS_RDONLY), options);
+        r = mount_verbose(LOG_DEBUG, node, p, fstype, MS_NODEV|(rw ? 0 : MS_RDONLY), options);
+        if (r < 0)
+                return r;
+
+        return 1;
 }
 
 int dissected_image_mount(DissectedImage *m, const char *where, uid_t uid_shift, DissectImageFlags flags) {
-        int r;
+        int r, boot_mounted;
 
         assert(m);
         assert(where);
@@ -769,7 +887,7 @@ int dissected_image_mount(DissectedImage *m, const char *where, uid_t uid_shift,
                 }
         }
 
-        if ((flags & DISSECT_IMAGE_MOUNT_ROOT_ONLY))
+        if (flags & DISSECT_IMAGE_MOUNT_ROOT_ONLY)
                 return 0;
 
         r = mount_partition(m->partitions + PARTITION_HOME, where, "/home", uid_shift, flags);
@@ -780,21 +898,26 @@ int dissected_image_mount(DissectedImage *m, const char *where, uid_t uid_shift,
         if (r < 0)
                 return r;
 
+        boot_mounted = mount_partition(m->partitions + PARTITION_XBOOTLDR, where, "/boot", uid_shift, flags);
+        if (boot_mounted < 0)
+                return boot_mounted;
+
         if (m->partitions[PARTITION_ESP].found) {
-                const char *mp;
+                /* Mount the ESP to /efi if it exists. If it doesn't exist, use /boot instead, but only if it
+                 * exists and is empty, and we didn't already mount the XBOOTLDR partition into it. */
 
-                /* Mount the ESP to /efi if it exists and is empty. If it doesn't exist, use /boot instead. */
+                r = chase_symlinks("/efi", where, CHASE_PREFIX_ROOT, NULL);
+                if (r >= 0) {
+                        r = mount_partition(m->partitions + PARTITION_ESP, where, "/efi", uid_shift, flags);
+                        if (r < 0)
+                                return r;
 
-                FOREACH_STRING(mp, "/efi", "/boot") {
+                } else if (boot_mounted <= 0) {
                         _cleanup_free_ char *p = NULL;
 
-                        r = chase_symlinks(mp, where, CHASE_PREFIX_ROOT, &p);
-                        if (r < 0)
-                                continue;
-
-                        r = dir_is_empty(p);
-                        if (r > 0) {
-                                r = mount_partition(m->partitions + PARTITION_ESP, where, mp, uid_shift, flags);
+                        r = chase_symlinks("/boot", where, CHASE_PREFIX_ROOT, &p);
+                        if (r >= 0 && dir_is_empty(p) > 0) {
+                                r = mount_partition(m->partitions + PARTITION_ESP, where, "/boot", uid_shift, flags);
                                 if (r < 0)
                                         return r;
                         }
@@ -1086,10 +1209,9 @@ int dissected_image_decrypt_interactively(
                 else if (r != -ENOKEY)
                         return log_error_errno(r, "Failed to decrypt image: %m");
 
-                if (--n < 0) {
-                        log_error("Too many retries.");
-                        return -EKEYREJECTED;
-                }
+                if (--n < 0)
+                        return log_error_errno(SYNTHETIC_ERRNO(EKEYREJECTED),
+                                               "Too many retries.");
 
                 z = strv_free(z);
 
@@ -1103,7 +1225,6 @@ int dissected_image_decrypt_interactively(
 
 #if HAVE_LIBCRYPTSETUP
 static int deferred_remove(DecryptedPartition *p) {
-
         struct dm_ioctl dm = {
                 .version = {
                         DM_VERSION_MAJOR,
@@ -1123,6 +1244,9 @@ static int deferred_remove(DecryptedPartition *p) {
         fd = open("/dev/mapper/control", O_RDWR|O_CLOEXEC);
         if (fd < 0)
                 return -errno;
+
+        if (strlen(p->name) > sizeof(dm.name))
+                return -ENAMETOOLONG;
 
         strncpy(dm.name, p->name, sizeof(dm.name));
 
@@ -1297,7 +1421,7 @@ int dissected_image_acquire_metadata(DissectedImage *m) {
 
                 fds[2*k+1] = safe_close(fds[2*k+1]);
 
-                f = fdopen(fds[2*k], "re");
+                f = fdopen(fds[2*k], "r");
                 if (!f) {
                         r = -errno;
                         goto finish;
@@ -1333,14 +1457,14 @@ int dissected_image_acquire_metadata(DissectedImage *m) {
                 }
 
                 case META_MACHINE_INFO:
-                        r = load_env_file_pairs(f, "machine-info", NULL, &machine_info);
+                        r = load_env_file_pairs(f, "machine-info", &machine_info);
                         if (r < 0)
                                 log_debug_errno(r, "Failed to read /etc/machine-info: %m");
 
                         break;
 
                 case META_OS_RELEASE:
-                        r = load_env_file_pairs(f, "os-release", NULL, &os_release);
+                        r = load_env_file_pairs(f, "os-release", &os_release);
                         if (r < 0)
                                 log_debug_errno(r, "Failed to read OS release file: %m");
 
@@ -1422,6 +1546,7 @@ static const char *const partition_designator_table[] = {
         [PARTITION_HOME] = "home",
         [PARTITION_SRV] = "srv",
         [PARTITION_ESP] = "esp",
+        [PARTITION_XBOOTLDR] = "xbootldr",
         [PARTITION_SWAP] = "swap",
         [PARTITION_ROOT_VERITY] = "root-verity",
         [PARTITION_ROOT_SECONDARY_VERITY] = "root-secondary-verity",

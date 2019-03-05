@@ -17,6 +17,7 @@
 #include "signal-util.h"
 #include "string-util.h"
 #include "udevadm.h"
+#include "virt.h"
 
 static bool arg_show_property = false;
 static bool arg_print_kernel = false;
@@ -67,7 +68,7 @@ static int setup_monitor(MonitorNetlinkGroup sender, sd_event *event, sd_device_
 
         (void) sd_device_monitor_set_receive_buffer_size(monitor, 128*1024*1024);
 
-        r = sd_device_monitor_attach_event(monitor, event, 0);
+        r = sd_device_monitor_attach_event(monitor, event);
         if (r < 0)
                 return log_error_errno(r, "Failed to attach event: %m");
 
@@ -84,9 +85,12 @@ static int setup_monitor(MonitorNetlinkGroup sender, sd_event *event, sd_device_
                         return log_error_errno(r, "Failed to apply tag filter '%s': %m", tag);
         }
 
-        r = sd_device_monitor_start(monitor, device_monitor_handler, INT_TO_PTR(sender), sender == MONITOR_GROUP_UDEV ? "device-monitor-udev" : "device-monitor-kernel");
+        r = sd_device_monitor_start(monitor, device_monitor_handler, INT_TO_PTR(sender));
         if (r < 0)
                 return log_error_errno(r, "Failed to start device monitor: %m");
+
+        (void) sd_event_source_set_description(sd_device_monitor_get_event_source(monitor),
+                                               sender == MONITOR_GROUP_UDEV ? "device-monitor-udev" : "device-monitor-kernel");
 
         *ret = TAKE_PTR(monitor);
         return 0;
@@ -140,11 +144,11 @@ static int parse_argv(int argc, char *argv[]) {
 
                         slash = strchr(optarg, '/');
                         if (slash) {
-                                devtype = strdup(devtype + 1);
+                                devtype = strdup(slash + 1);
                                 if (!devtype)
                                         return -ENOMEM;
 
-                                subsystem = strndup(optarg, devtype - optarg);
+                                subsystem = strndup(optarg, slash - optarg);
                         } else
                                 subsystem = strdup(optarg);
 
@@ -206,6 +210,11 @@ int monitor_main(int argc, char *argv[], void *userdata) {
         r = parse_argv(argc, argv);
         if (r <= 0)
                 goto finalize;
+
+        if (running_in_chroot() > 0) {
+                log_info("Running in chroot, ignoring request.");
+                return 0;
+        }
 
         /* Callers are expecting to see events as they happen: Line buffering */
         setlinebuf(stdout);

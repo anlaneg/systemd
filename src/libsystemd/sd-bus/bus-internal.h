@@ -13,7 +13,6 @@
 #include "hashmap.h"
 #include "list.h"
 #include "prioq.h"
-#include "refcnt.h"
 #include "socket-util.h"
 #include "util.h"
 
@@ -171,15 +170,7 @@ enum bus_auth {
 };
 
 struct sd_bus {
-        /* We use atomic ref counting here since sd_bus_message
-           objects retain references to their originating sd_bus but
-           we want to allow them to be processed in a different
-           thread. We won't provide full thread safety, but only the
-           bare minimum that makes it possible to use sd_bus and
-           sd_bus_message objects independently and on different
-           threads as long as each object is used only once at the
-           same time. */
-        RefCount n_ref;
+        unsigned n_ref;
 
         enum bus_state state;
         int input_fd, output_fd;
@@ -211,6 +202,7 @@ struct sd_bus {
         bool accept_fd:1;
         bool attach_timestamp:1;
         bool connected_signal:1;
+        bool close_on_exit:1;
 
         int use_memfd;
 
@@ -218,11 +210,11 @@ struct sd_bus {
         size_t rbuffer_size;
 
         sd_bus_message **rqueue;
-        unsigned rqueue_size;
+        size_t rqueue_size;
         size_t rqueue_allocated;
 
         sd_bus_message **wqueue;
-        unsigned wqueue_size;
+        size_t wqueue_size;
         size_t windex;
         size_t wqueue_allocated;
 
@@ -304,8 +296,6 @@ struct sd_bus {
         sd_bus **default_bus_ptr;
         pid_t tid;
 
-        char *cgroup_root;
-
         char *description;
         char *patch_sender;
 
@@ -321,7 +311,7 @@ struct sd_bus {
         usec_t method_call_timeout;
 };
 
-/* For method calls we time-out at 25s, like in the D-Bus reference implementation */
+/* For method calls we timeout at 25s, like in the D-Bus reference implementation */
 #define BUS_DEFAULT_TIMEOUT ((usec_t) (25 * USEC_PER_SEC))
 
 /* For the authentication phase we grant 90s, to provide extra room during boot, when RNGs and such are not filled up
@@ -333,6 +323,10 @@ struct sd_bus {
 
 #define BUS_MESSAGE_SIZE_MAX (128*1024*1024)
 #define BUS_AUTH_SIZE_MAX (64*1024)
+/* Note that the D-Bus specification states that bus paths shall have no size limit. We enforce here one
+ * anyway, since truly unbounded strings are a security problem. The limit we pick is relatively large however,
+ * to not clash unnecessarily with real-life applications. */
+#define BUS_PATH_SIZE_MAX (64*1024)
 
 #define BUS_CONTAINER_DEPTH 128
 
@@ -345,7 +339,6 @@ struct sd_bus {
 
 bool interface_name_is_valid(const char *p) _pure_;
 bool service_name_is_valid(const char *p) _pure_;
-char* service_name_startswith(const char *a, const char *b);
 bool member_name_is_valid(const char *p) _pure_;
 bool object_path_is_valid(const char *p) _pure_;
 char *object_path_startswith(const char *a, const char *b) _pure_;
@@ -395,8 +388,6 @@ int bus_set_address_system(sd_bus *bus);
 int bus_set_address_user(sd_bus *bus);
 int bus_set_address_system_remote(sd_bus *b, const char *host);
 int bus_set_address_system_machine(sd_bus *b, const char *machine);
-
-int bus_get_root_path(sd_bus *bus);
 
 int bus_maybe_reply_error(sd_bus_message *m, int r, sd_bus_error *error);
 

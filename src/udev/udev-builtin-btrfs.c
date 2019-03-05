@@ -4,10 +4,6 @@
 #include <stdlib.h>
 #include <sys/ioctl.h>
 
-#if HAVE_LINUX_BTRFS_H
-#include <linux/btrfs.h>
-#endif
-
 #include "device-util.h"
 #include "fd-util.h"
 #include "missing.h"
@@ -22,7 +18,7 @@ static int builtin_btrfs(sd_device *dev, int argc, char *argv[], bool test) {
         int r;
 
         if (argc != 3 || !streq(argv[1], "ready"))
-                return log_device_error_errno(dev, EINVAL, "Invalid arguments");
+                return log_device_error_errno(dev, SYNTHETIC_ERRNO(EINVAL), "Invalid arguments");
 
         fd = open("/dev/btrfs-control", O_RDWR|O_CLOEXEC);
         if (fd < 0)

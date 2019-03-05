@@ -15,19 +15,21 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "locale-util.h"
+#include "main-func.h"
 #include "pager.h"
+#include "pretty-print.h"
+#include "proc-cmdline.h"
 #include "set.h"
 #include "spawn-polkit-agent.h"
 #include "strv.h"
-#include "terminal-util.h"
 #include "util.h"
 #include "verbs.h"
 #include "virt.h"
 
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
 static bool arg_ask_password = true;
 static BusTransport arg_transport = BUS_TRANSPORT_LOCAL;
-static char *arg_host = NULL;
+static const char *arg_host = NULL;
 static bool arg_convert = true;
 
 typedef struct StatusInfo {
@@ -48,34 +50,33 @@ static void status_info_clear(StatusInfo *info) {
 }
 
 static void print_overridden_variables(void) {
-        int r;
-        char *variables[_VARIABLE_LC_MAX] = {};
-        LocaleVariable j;
+        _cleanup_(locale_variables_freep) char *variables[_VARIABLE_LC_MAX] = {};
         bool print_warning = true;
+        LocaleVariable j;
+        int r;
 
-        if (detect_container() > 0 || arg_host)
+        if (arg_transport != BUS_TRANSPORT_LOCAL)
                 return;
 
-        r = parse_env_file(NULL, "/proc/cmdline", WHITESPACE,
-                           "locale.LANG",              &variables[VARIABLE_LANG],
-                           "locale.LANGUAGE",          &variables[VARIABLE_LANGUAGE],
-                           "locale.LC_CTYPE",          &variables[VARIABLE_LC_CTYPE],
-                           "locale.LC_NUMERIC",        &variables[VARIABLE_LC_NUMERIC],
-                           "locale.LC_TIME",           &variables[VARIABLE_LC_TIME],
-                           "locale.LC_COLLATE",        &variables[VARIABLE_LC_COLLATE],
-                           "locale.LC_MONETARY",       &variables[VARIABLE_LC_MONETARY],
-                           "locale.LC_MESSAGES",       &variables[VARIABLE_LC_MESSAGES],
-                           "locale.LC_PAPER",          &variables[VARIABLE_LC_PAPER],
-                           "locale.LC_NAME",           &variables[VARIABLE_LC_NAME],
-                           "locale.LC_ADDRESS",        &variables[VARIABLE_LC_ADDRESS],
-                           "locale.LC_TELEPHONE",      &variables[VARIABLE_LC_TELEPHONE],
-                           "locale.LC_MEASUREMENT",    &variables[VARIABLE_LC_MEASUREMENT],
-                           "locale.LC_IDENTIFICATION", &variables[VARIABLE_LC_IDENTIFICATION],
-                           NULL);
-
+        r = proc_cmdline_get_key_many(
+                        PROC_CMDLINE_STRIP_RD_PREFIX,
+                        "locale.LANG",              &variables[VARIABLE_LANG],
+                        "locale.LANGUAGE",          &variables[VARIABLE_LANGUAGE],
+                        "locale.LC_CTYPE",          &variables[VARIABLE_LC_CTYPE],
+                        "locale.LC_NUMERIC",        &variables[VARIABLE_LC_NUMERIC],
+                        "locale.LC_TIME",           &variables[VARIABLE_LC_TIME],
+                        "locale.LC_COLLATE",        &variables[VARIABLE_LC_COLLATE],
+                        "locale.LC_MONETARY",       &variables[VARIABLE_LC_MONETARY],
+                        "locale.LC_MESSAGES",       &variables[VARIABLE_LC_MESSAGES],
+                        "locale.LC_PAPER",          &variables[VARIABLE_LC_PAPER],
+                        "locale.LC_NAME",           &variables[VARIABLE_LC_NAME],
+                        "locale.LC_ADDRESS",        &variables[VARIABLE_LC_ADDRESS],
+                        "locale.LC_TELEPHONE",      &variables[VARIABLE_LC_TELEPHONE],
+                        "locale.LC_MEASUREMENT",    &variables[VARIABLE_LC_MEASUREMENT],
+                        "locale.LC_IDENTIFICATION", &variables[VARIABLE_LC_IDENTIFICATION]);
         if (r < 0 && r != -ENOENT) {
                 log_warning_errno(r, "Failed to read /proc/cmdline: %m");
-                goto finish;
+                return;
         }
 
         for (j = 0; j < _VARIABLE_LC_MAX; j++)
@@ -88,9 +89,6 @@ static void print_overridden_variables(void) {
                         } else
                                 log_warning("                  %s=%s", locale_variable_to_string(j), variables[j]);
                 }
- finish:
-        for (j = 0; j < _VARIABLE_LC_MAX; j++)
-                free(variables[j]);
 }
 
 static void print_status_info(StatusInfo *i) {
@@ -199,7 +197,7 @@ static int list_locales(int argc, char **argv, void *userdata) {
         if (r < 0)
                 return log_error_errno(r, "Failed to read list of locales: %m");
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
         strv_print(l);
 
         return 0;
@@ -241,7 +239,7 @@ static int list_vconsole_keymaps(int argc, char **argv, void *userdata) {
         if (r < 0)
                 return log_error_errno(r, "Failed to read list of keymaps: %m");
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         strv_print(l);
 
@@ -365,15 +363,14 @@ static int list_x11_keymaps(int argc, char **argv, void *userdata) {
                         return log_oom();
         }
 
-        if (strv_isempty(list)) {
-                log_error("Couldn't find any entries.");
-                return -ENOENT;
-        }
+        if (strv_isempty(list))
+                return log_error_errno(SYNTHETIC_ERRNO(ENOENT),
+                                       "Couldn't find any entries.");
 
         strv_sort(list);
         strv_uniq(list);
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         strv_print(list);
         return 0;
@@ -461,7 +458,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case ARG_NO_ASK_PASSWORD:
@@ -508,8 +505,8 @@ static int localectl_main(sd_bus *bus, int argc, char *argv[]) {
         return dispatch_verb(argc, argv, verbs, bus);
 }
 
-int main(int argc, char*argv[]) {
-        sd_bus *bus = NULL;
+static int run(int argc, char *argv[]) {
+        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         int r;
 
         setlocale(LC_ALL, "");
@@ -518,21 +515,13 @@ int main(int argc, char*argv[]) {
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
         r = bus_connect_transport(arg_transport, arg_host, false, &bus);
-        if (r < 0) {
-                log_error_errno(r, "Failed to create bus connection: %m");
-                goto finish;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to create bus connection: %m");
 
-        r = localectl_main(bus, argc, argv);
-
-finish:
-        /* make sure we terminate the bus connection first, and then close the
-         * pager, see issue #3543 for the details. */
-        sd_bus_flush_close_unref(bus);
-        pager_close();
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return localectl_main(bus, argc, argv);
 }
+
+DEFINE_MAIN_FUNCTION(run);

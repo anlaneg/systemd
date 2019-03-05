@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <linux/fs.h>
@@ -17,9 +18,9 @@
 #include "copy.h"
 #include "dirent-util.h"
 #include "dissect-image.h"
+#include "env-file.h"
 #include "env-util.h"
 #include "fd-util.h"
-#include "fileio.h"
 #include "fs-util.h"
 #include "hashmap.h"
 #include "hostname-util.h"
@@ -70,6 +71,8 @@ static Image *image_free(Image *i) {
 }
 
 DEFINE_TRIVIAL_REF_UNREF_FUNC(Image, image, image_free);
+DEFINE_HASH_OPS_WITH_VALUE_DESTRUCTOR(image_hash_ops, char, string_hash_func, string_compare_func,
+                                      Image, image_unref);
 
 static char **image_settings_path(Image *image) {
         _cleanup_strv_free_ char **l = NULL;
@@ -867,7 +870,7 @@ int image_clone(Image *i, const char *new_name, bool read_only) {
         case IMAGE_RAW:
                 new_path = strjoina("/var/lib/machines/", new_name, ".raw");
 
-                r = copy_file_atomic(i->path, new_path, read_only ? 0444 : 0644, FS_NOCOW_FL, COPY_REFLINK);
+                r = copy_file_atomic(i->path, new_path, read_only ? 0444 : 0644, FS_NOCOW_FL, COPY_REFLINK|COPY_CRTIME);
                 break;
 
         case IMAGE_BLOCK:
@@ -1114,7 +1117,7 @@ int image_read_metadata(Image *i) {
                 if (r < 0 && r != -ENOENT)
                         log_debug_errno(r, "Failed to chase /etc/machine-info in image %s: %m", i->name);
                 else if (r >= 0) {
-                        r = load_env_file_pairs(NULL, path, NULL, &machine_info);
+                        r = load_env_file_pairs(NULL, path, &machine_info);
                         if (r < 0)
                                 log_debug_errno(r, "Failed to parse machine-info data of %s: %m", i->name);
                 }

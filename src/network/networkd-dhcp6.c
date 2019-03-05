@@ -11,6 +11,7 @@
 
 #include "hashmap.h"
 #include "hostname-util.h"
+#include "missing_network.h"
 #include "network-internal.h"
 #include "networkd-link.h"
 #include "networkd-manager.h"
@@ -24,13 +25,9 @@ static bool dhcp6_get_prefix_delegation(Link *link) {
         if (!link->network)
                 return false;
 
-        if (!IN_SET(link->network->router_prefix_delegation,
-                            RADV_PREFIX_DELEGATION_DHCP6,
-                            RADV_PREFIX_DELEGATION_BOTH)) {
-                return false;
-        }
-
-        return true;
+        return IN_SET(link->network->router_prefix_delegation,
+                      RADV_PREFIX_DELEGATION_DHCP6,
+                      RADV_PREFIX_DELEGATION_BOTH);
 }
 
 static bool dhcp6_enable_prefix_delegation(Link *dhcp6_link) {
@@ -100,8 +97,7 @@ static int dhcp6_pd_prefix_assign(Link *link, struct in6_addr *prefix,
         return sd_radv_start(radv);
 }
 
-static int dhcp6_route_remove_handler(sd_netlink *nl, sd_netlink_message *m, void *userdata) {
-        Link *link = userdata;
+static int dhcp6_route_remove_handler(sd_netlink *nl, sd_netlink_message *m, Link *link) {
         int r;
 
         assert(link);
@@ -146,10 +142,15 @@ int dhcp6_lease_pd_prefix_lost(sd_dhcp6_client *client, Link* link) {
                                 continue;
                         }
 
-                        route_add(link, AF_INET6, &pd_prefix, pd_prefix_len,
-                                  0, 0, 0, &route);
-                        route_update(route, NULL, 0, NULL, NULL, 0, 0,
-                                     RTN_UNREACHABLE);
+                        r = route_add(link, AF_INET6, &pd_prefix, pd_prefix_len, 0, 0, 0, &route);
+                        if (r < 0) {
+                                log_link_warning_errno(link, r, "Failed to add unreachable route to delete for DHCPv6 delegated subnet %s/%u: %m",
+                                                       strnull(buf),
+                                                       pd_prefix_len);
+                                continue;
+                        }
+
+                        route_update(route, NULL, 0, NULL, NULL, 0, 0, RTN_UNREACHABLE);
 
                         r = route_remove(route, link, dhcp6_route_remove_handler);
                         if (r < 0) {
@@ -247,8 +248,7 @@ static int dhcp6_pd_prefix_distribute(Link *dhcp6_link, Iterator *i,
         return 0;
 }
 
-static int dhcp6_route_handler(sd_netlink *nl, sd_netlink_message *m, void *userdata) {
-        Link *link = userdata;
+static int dhcp6_route_handler(sd_netlink *nl, sd_netlink_message *m, Link *link) {
         int r;
 
         assert(link);
@@ -259,7 +259,6 @@ static int dhcp6_route_handler(sd_netlink *nl, sd_netlink_message *m, void *user
 
         return 1;
 }
-
 
 static int dhcp6_lease_pd_prefix_acquired(sd_dhcp6_client *client, Link *link) {
         int r;
@@ -294,7 +293,8 @@ static int dhcp6_lease_pd_prefix_acquired(sd_dhcp6_client *client, Link *link) {
                 }
 
                 if (pd_prefix_len < 64) {
-                        Route *route = NULL;
+                        _cleanup_(route_freep) Route *route = NULL;
+                        uint32_t table;
 
                         (void) in_addr_to_string(AF_INET6, &pd_prefix, &buf);
 
@@ -306,21 +306,25 @@ static int dhcp6_lease_pd_prefix_acquired(sd_dhcp6_client *client, Link *link) {
                                 continue;
                         }
 
-                        route_add(link, AF_INET6, &pd_prefix, pd_prefix_len,
-                                  0, 0, 0, &route);
-                        route_update(route, NULL, 0, NULL, NULL, 0, 0,
-                                     RTN_UNREACHABLE);
+                        table = link_get_dhcp_route_table(link);
+
+                        r = route_add(link, AF_INET6, &pd_prefix, pd_prefix_len, 0, 0, table, &route);
+                        if (r < 0) {
+                                log_link_warning_errno(link, r, "Failed to add unreachable route for DHCPv6 delegated subnet %s/%u: %m",
+                                                       strnull(buf),
+                                                       pd_prefix_len);
+                                continue;
+                        }
+
+                        route_update(route, NULL, 0, NULL, NULL, 0, 0, RTN_UNREACHABLE);
 
                         r = route_configure(route, link, dhcp6_route_handler);
                         if (r < 0) {
                                 log_link_warning_errno(link, r, "Cannot configure unreachable route for delegated subnet %s/%u: %m",
                                                        strnull(buf),
                                                        pd_prefix_len);
-                                route_free(route);
                                 continue;
                         }
-
-                        route_free(route);
 
                         log_link_debug(link, "Configuring unreachable route for %s/%u",
                                        strnull(buf), pd_prefix_len);
@@ -406,9 +410,7 @@ int dhcp6_request_prefix_delegation(Link *link) {
         return 0;
 }
 
-static int dhcp6_address_handler(sd_netlink *rtnl, sd_netlink_message *m,
-                                 void *userdata) {
-        Link *link = userdata;
+static int dhcp6_address_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
         int r;
 
         assert(link);
@@ -663,9 +665,11 @@ int dhcp6_configure(Link *link) {
         if (r < 0)
                 return log_link_error_errno(link, r, "DHCP6 CLIENT: Failed to set MAC address: %m");
 
-        r = sd_dhcp6_client_set_iaid(client, link->network->iaid);
-        if (r < 0)
-                return log_link_error_errno(link, r, "DHCP6 CLIENT: Failed to set IAID: %m");
+        if (link->network->iaid_set) {
+                r = sd_dhcp6_client_set_iaid(client, link->network->iaid);
+                if (r < 0)
+                        return log_link_error_errno(link, r, "DHCP6 CLIENT: Failed to set IAID: %m");
+        }
 
         duid = link_get_duid(link);
         if (duid->type == DUID_TYPE_LLT && duid->raw_data_len == 0)

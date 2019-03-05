@@ -20,8 +20,8 @@ typedef struct Manager Manager;
 #include "resolved-dns-trust-anchor.h"
 #include "resolved-link.h"
 
-#define MANAGER_SEARCH_DOMAINS_MAX 32
-#define MANAGER_DNS_SERVERS_MAX 32
+#define MANAGER_SEARCH_DOMAINS_MAX 256
+#define MANAGER_DNS_SERVERS_MAX 256
 
 typedef struct EtcHosts {
         Hashmap *by_address;
@@ -54,7 +54,7 @@ struct Manager {
         unsigned n_dns_queries;
 
         LIST_HEAD(DnsStream, dns_streams);
-        unsigned n_dns_streams;
+        unsigned n_dns_streams[_DNS_STREAM_TYPE_MAX];
 
         /* Unicast dns */
         LIST_HEAD(DnsServer, dns_servers);

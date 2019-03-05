@@ -11,9 +11,13 @@
 #include <sys/signalfd.h>
 #include <unistd.h>
 
+#include "build.h"
+#include "device-private.h"
 #include "fs-util.h"
 #include "log.h"
+#include "main-func.h"
 #include "missing.h"
+#include "mkdir.h"
 #include "selinux-util.h"
 #include "signal-util.h"
 #include "string-util.h"
@@ -51,63 +55,78 @@ static int fake_filesystems(void) {
         return 0;
 }
 
-int main(int argc, char *argv[]) {
-        _cleanup_(udev_event_freep) struct udev_event *event = NULL;
-        _cleanup_(udev_device_unrefp) struct udev_device *dev = NULL;
-        _cleanup_(udev_rules_unrefp) struct udev_rules *rules = NULL;
-        const char *devpath, *action;
+static int run(int argc, char *argv[]) {
+        _cleanup_(udev_rules_freep) UdevRules *rules = NULL;
+        _cleanup_(udev_event_freep) UdevEvent *event = NULL;
+        _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
+        const char *devpath, *devname, *action;
+        int r;
 
         test_setup_logging(LOG_INFO);
 
-        if (argc != 3) {
-                log_error("This program needs two arguments, %d given", argc - 1);
-                return EXIT_FAILURE;
+        if (!IN_SET(argc, 2, 3)) {
+                log_error("This program needs one or two arguments, %d given", argc - 1);
+                return -EINVAL;
         }
 
-        if (fake_filesystems() < 0)
-                return EXIT_FAILURE;
+        r = fake_filesystems();
+        if (r < 0)
+                return r;
 
-        log_debug("version %s", PACKAGE_VERSION);
+        if (argc == 2) {
+                if (!streq(argv[1], "check")) {
+                        log_error("Unknown argument: %s", argv[1]);
+                        return -EINVAL;
+                }
+
+                return 0;
+        }
+
+        log_debug("version %s", GIT_VERSION);
         mac_selinux_init();
 
         action = argv[1];
         devpath = argv[2];
 
-        rules = udev_rules_new(1);
+        assert_se(udev_rules_new(&rules, RESOLVE_NAME_EARLY) == 0);
 
         const char *syspath = strjoina("/sys", devpath);
-        dev = udev_device_new_from_synthetic_event(NULL, syspath, action);
-        if (!dev) {
-                log_debug("unknown device '%s'", devpath);
-                goto out;
-        }
+        r = device_new_from_synthetic_event(&dev, syspath, action);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to open device '%s'", devpath);
 
-        assert_se(event = udev_event_new(dev));
+        assert_se(event = udev_event_new(dev, 0, NULL));
 
         assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGTERM, SIGINT, SIGHUP, SIGCHLD, -1) >= 0);
 
         /* do what devtmpfs usually provides us */
-        if (udev_device_get_devnode(dev)) {
+        if (sd_device_get_devname(dev, &devname) >= 0) {
+                const char *subsystem;
                 mode_t mode = 0600;
 
-                if (streq(udev_device_get_subsystem(dev), "block"))
+                if (sd_device_get_subsystem(dev, &subsystem) >= 0 && streq(subsystem, "block"))
                         mode |= S_IFBLK;
                 else
                         mode |= S_IFCHR;
 
                 if (!streq(action, "remove")) {
-                        (void) mkdir_parents_label(udev_device_get_devnode(dev), 0755);
-                        assert_se(mknod(udev_device_get_devnode(dev), mode, udev_device_get_devnum(dev)) == 0);
+                        dev_t devnum = makedev(0, 0);
+
+                        (void) mkdir_parents_label(devname, 0755);
+                        (void) sd_device_get_devnum(dev, &devnum);
+                        if (mknod(devname, mode, devnum) < 0)
+                                return log_error_errno(errno, "mknod() failed for '%s': %m", devname);
                 } else {
-                        assert_se(unlink(udev_device_get_devnode(dev)) == 0);
-                        (void) rmdir_parents(udev_device_get_devnode(dev), "/");
+                        if (unlink(devname) < 0)
+                                return log_error_errno(errno, "unlink('%s') failed: %m", devname);
+                        (void) rmdir_parents(devname, "/");
                 }
         }
 
-        udev_event_execute_rules(event, 3 * USEC_PER_SEC, USEC_PER_SEC, NULL, rules);
-        udev_event_execute_run(event, 3 * USEC_PER_SEC, USEC_PER_SEC);
-out:
-        mac_selinux_finish();
+        udev_event_execute_rules(event, 3 * USEC_PER_SEC, NULL, rules);
+        udev_event_execute_run(event, 3 * USEC_PER_SEC);
 
-        return EXIT_SUCCESS;
+        return 0;
 }
+
+DEFINE_MAIN_FUNCTION(run);

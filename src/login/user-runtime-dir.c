@@ -8,8 +8,9 @@
 #include "bus-error.h"
 #include "fs-util.h"
 #include "label.h"
+#include "main-func.h"
 #include "mkdir.h"
-#include "mount-util.h"
+#include "mountpoint-util.h"
 #include "path-util.h"
 #include "rm-rf.h"
 #include "selinux-util.h"
@@ -21,7 +22,7 @@
 
 static int acquire_runtime_dir_size(uint64_t *ret) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        _cleanup_(sd_bus_unrefp) sd_bus *bus = NULL;
+        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         int r;
 
         r = sd_bus_default_system(&bus);
@@ -168,35 +169,30 @@ static int do_umount(const char *user) {
         return user_remove_runtime_path(runtime_path);
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         int r;
 
         log_parse_environment();
         log_open();
 
-        if (argc != 3) {
-                log_error("This program takes two arguments.");
-                return EXIT_FAILURE;
-        }
-        if (!STR_IN_SET(argv[1], "start", "stop")) {
-                log_error("First argument must be either \"start\" or \"stop\".");
-                return EXIT_FAILURE;
-        }
+        if (argc != 3)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "This program takes two arguments.");
+        if (!STR_IN_SET(argv[1], "start", "stop"))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "First argument must be either \"start\" or \"stop\".");
 
         r = mac_selinux_init();
-        if (r < 0) {
-                log_error_errno(r, "Could not initialize labelling: %m\n");
-                return EXIT_FAILURE;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Could not initialize labelling: %m\n");
 
         umask(0022);
 
         if (streq(argv[1], "start"))
-                r = do_mount(argv[2]);
-        else if (streq(argv[1], "stop"))
-                r = do_umount(argv[2]);
-        else
-                assert_not_reached("Unknown verb!");
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+                return do_mount(argv[2]);
+        if (streq(argv[1], "stop"))
+                return do_umount(argv[2]);
+        assert_not_reached("Unknown verb!");
 }
+
+DEFINE_MAIN_FUNCTION(run);

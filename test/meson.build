@@ -18,6 +18,8 @@ test_data_files = '''
         hwdb/10-bad.hwdb
         journal-data/journal-1.txt
         journal-data/journal-2.txt
+        nomem.slice
+        nomemleaf.service
         parent-deep.slice
         parent.slice
         sched_idle_bad.service
@@ -53,6 +55,7 @@ test_data_files = '''
         test-execute/exec-dynamicuser-statedir-migrate-step2.service
         test-execute/exec-dynamicuser-statedir.service
         test-execute/exec-dynamicuser-supplementarygroups.service
+        test-execute/exec-environment-no-substitute.service
         test-execute/exec-environment-empty.service
         test-execute/exec-environment-multiple.service
         test-execute/exec-environment.service
@@ -250,7 +253,8 @@ if perl.found()
         udev_test_pl = find_program('udev-test.pl')
         if want_tests != 'false'
                 test('udev-test',
-                     udev_test_pl)
+                     udev_test_pl,
+                     timeout : 180)
         endif
 else
         message('Skipping udev-test because perl is not available')

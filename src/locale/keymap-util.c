@@ -5,7 +5,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "bus-util.h"
 #include "def.h"
+#include "env-file.h"
+#include "env-file-label.h"
 #include "env-util.h"
 #include "fd-util.h"
 #include "fileio-label.h"
@@ -16,6 +19,7 @@
 #include "mkdir.h"
 #include "string-util.h"
 #include "strv.h"
+#include "tmpfile-util.h"
 
 static bool startswith_comma(const char *s, const char *prefix) {
         s = startswith(s, prefix);
@@ -68,7 +72,7 @@ static void context_free_locale(Context *c) {
                 c->locale[p] = mfree(c->locale[p]);
 }
 
-void context_free(Context *c) {
+void context_clear(Context *c) {
         context_free_locale(c);
         context_free_x11(c);
         context_free_vconsole(c);
@@ -76,6 +80,8 @@ void context_free(Context *c) {
         sd_bus_message_unref(c->locale_cache);
         sd_bus_message_unref(c->x11_cache);
         sd_bus_message_unref(c->vc_cache);
+
+        bus_verify_polkit_async_registry_free(c->polkit_registry);
 };
 
 void locale_simplify(char *locale[_VARIABLE_LC_MAX]) {
@@ -114,7 +120,7 @@ int locale_read_data(Context *c, sd_bus_message *m) {
                 c->locale_mtime = t;
                 context_free_locale(c);
 
-                r = parse_env_file(NULL, "/etc/locale.conf", NEWLINE,
+                r = parse_env_file(NULL, "/etc/locale.conf",
                                    "LANG",              &c->locale[VARIABLE_LANG],
                                    "LANGUAGE",          &c->locale[VARIABLE_LANGUAGE],
                                    "LC_CTYPE",          &c->locale[VARIABLE_LC_CTYPE],
@@ -128,8 +134,7 @@ int locale_read_data(Context *c, sd_bus_message *m) {
                                    "LC_ADDRESS",        &c->locale[VARIABLE_LC_ADDRESS],
                                    "LC_TELEPHONE",      &c->locale[VARIABLE_LC_TELEPHONE],
                                    "LC_MEASUREMENT",    &c->locale[VARIABLE_LC_MEASUREMENT],
-                                   "LC_IDENTIFICATION", &c->locale[VARIABLE_LC_IDENTIFICATION],
-                                   NULL);
+                                   "LC_IDENTIFICATION", &c->locale[VARIABLE_LC_IDENTIFICATION]);
                 if (r < 0)
                         return r;
         } else {
@@ -186,10 +191,9 @@ int vconsole_read_data(Context *c, sd_bus_message *m) {
         c->vc_mtime = t;
         context_free_vconsole(c);
 
-        r = parse_env_file(NULL, "/etc/vconsole.conf", NEWLINE,
+        r = parse_env_file(NULL, "/etc/vconsole.conf",
                            "KEYMAP",        &c->vc_keymap,
-                           "KEYMAP_TOGGLE", &c->vc_keymap_toggle,
-                           NULL);
+                           "KEYMAP_TOGGLE", &c->vc_keymap_toggle);
         if (r < 0)
                 return r;
 
@@ -341,7 +345,7 @@ int vconsole_write_data(Context *c) {
         struct stat st;
         int r;
 
-        r = load_env_file(NULL, "/etc/vconsole.conf", NULL, &l);
+        r = load_env_file(NULL, "/etc/vconsole.conf", &l);
         if (r < 0 && r != -ENOENT)
                 return r;
 

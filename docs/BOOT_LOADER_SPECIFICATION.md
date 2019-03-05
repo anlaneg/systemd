@@ -1,3 +1,7 @@
+---
+title: The Boot Loader Specification
+---
+
 # The Boot Loader Specification
 
 _TL;DR: Currently there's little cooperation between multiple distributions in dual-boot (or triple, ... multi-boot) setups, and we'd like to improve this situation by getting everybody to commit to a single boot configuration format that is based on drop-in files, and thus is robust, simple, works without rewriting configuration files and is free of namespace clashes._
@@ -38,9 +42,9 @@ Everything described below is located on a placeholder file system `$BOOT`. The 
   * If the OS is installed on a disk with MBR disk label, and a partition with the MBR type id of 0xEA already exists it should be used as `$BOOT`.
   * Otherwise, if the OS is installed on a disk with MBR disk label, a new partition with MBR type id of 0xEA shall be created, of a suitable size (let's say 500MB), and it should be used as `$BOOT`.
 * On disks with GPT disk labels
-  * If the OS is installed on a disk with GPT disk label, and a partition with the GPT type GUID of bc13c2ff-59e6-4262-a352-b275fd6f7172 already exists, it should be used as `$BOOT`.
-  * Otherwise, if the OS is installed on a disk with GPT disk label, and an ESP partition (i.e. with the GPT type UID of c12a7328-f81f-11d2-ba4b-00a0c93ec93b) already exists and is large enough (let's say 250MB) and otherwise qualifies, it should be used as `$BOOT`.
-  * Otherwise, if the OS is installed on a disk with GPT disk label, and if the ESP partition already exists but is too small, a new suitably sized (let's say 500MB) partition with GPT type GUID of bc13c2ff-59e6-4262-a352-b275fd6f7172 shall be created and it should be used as `$BOOT`.
+  * If the OS is installed on a disk with GPT disk label, and a partition with the GPT type GUID of `bc13c2ff-59e6-4262-a352-b275fd6f7172` already exists, it should be used as `$BOOT`.
+  * Otherwise, if the OS is installed on a disk with GPT disk label, and an ESP partition (i.e. with the GPT type UID of `c12a7328-f81f-11d2-ba4b-00a0c93ec93b`) already exists and is large enough (let's say 250MB`) and otherwise qualifies, it should be used as `$BOOT`.
+  * Otherwise, if the OS is installed on a disk with GPT disk label, and if the ESP partition already exists but is too small, a new suitably sized (let's say 500MB) partition with GPT type GUID of `bc13c2ff-59e6-4262-a352-b275fd6f7172` shall be created and it should be used as `$BOOT`.
   * Otherwise, if the OS is installed on a disk with GPT disk label, and no ESP partition exists yet, a new suitably sized (let's say 500MB) ESP should be created and should be used as `$BOOT`.
 
 This placeholder file system shall be determined during _installation time_, and an fstab entry may be created. It should be mounted to either `/boot/` or `/efi/`. Additional locations like `/boot/efi/`, with `/boot/` being a separate file system, might be supported by implementations. This is not recommended because the mounting of `$BOOT` is then dependent on and requires the mounting of the intermediate file system.
@@ -52,7 +56,7 @@ For systems where the firmware is able to read file systems directly, `$BOOT` mu
 This specification defines two types of boot loader entries. The first type is
 text based, very simple and suitable for a variety of firmware, architecture
 and image types ("Type #1"). The second type is specific to EFI, but allows
-single-file images that embedd all metadata in the kernel binary itself, which
+single-file images that embed all metadata in the kernel binary itself, which
 is useful to cryptographically sign them as one file for the purpose of
 SecureBoot ("Type #2").
 
@@ -76,7 +80,7 @@ We define two directories below `$BOOT`:
 
 Inside the `$BOOT/loader/entries/` directory each OS vendor may drop one or more configuration snippets with the suffix ".conf", one for each boot menu item. The file name of the file is used for identification of the boot item but shall never be presented to the user in the UI. The file name may be chosen freely but should be unique enough to avoid clashes between OS installations. More specifically it is suggested to include the machine ID (`/etc/machine-id` or the D-Bus machine ID for OSes that lack `/etc/machine-id`), the kernel version (as returned by `uname -r`) and an OS identifier (The ID field of `/etc/os-release`). Example: `$BOOT/loader/entries/6a9857a393724b7a981ebb5b8495b9ea-3.8.0-2.fc19.x86_64.conf`.
 
-These configuration snippets shall be Unix-style text files (i.e. line separation with a single newline character), in the UTF-8 encoding. The configuration snippets are loosely inspired on Grub1's configuration syntax. Lines beginning with '#' shall be ignored and used for commenting. The first word of a line is used as key and shall be separated by a space from its value. The following keys are known:
+These configuration snippets shall be Unix-style text files (i.e. line separation with a single newline character), in the UTF-8 encoding. The configuration snippets are loosely inspired on Grub1's configuration syntax. Lines beginning with '#' shall be ignored and used for commenting. The first word of a line is used as key and shall be separated by one or more spaces from its value. The following keys are known:
 
 * `title` shall contain a human readable title string for this menu item. This will be displayed in the boot menu for the item. It is a good idea to initialize this from the `PRETTY_NAME` of `/etc/os-release`. This name should be descriptive and does not have to be unique. If a boot loader discovers two entries with the same title it is a good idea to show more than just the raw title in the UI, for example by appending the `version` field. This field is optional. Example: "Fedora 18 (Spherical Cow)".
 * `version` shall contain a human readable version string for this menu item. This is usually the kernel version and is intended for use by OSes to install multiple kernel versions at the same time with the same `title` field. This field shall be in a syntax that is useful for Debian-style version sorts, so that the boot loader UI can determine the newest version easily and show it first or preselect it automatically. This field is optional. Example: `3.7.2-201.fc18.x86_64`.
