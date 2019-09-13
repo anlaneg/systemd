@@ -1560,12 +1560,14 @@ static int parse_argv(int argc, char *argv[]) {
         return 1;
 }
 
+//构造monitor,建听相应socket
 static int manager_new(Manager **ret, int fd_ctrl, int fd_uevent, const char *cgroup) {
         _cleanup_(manager_freep) Manager *manager = NULL;
         int r;
 
         assert(ret);
 
+        //申请manager内存
         manager = new(Manager, 1);
         if (!manager)
                 return log_oom();
@@ -1580,7 +1582,7 @@ static int manager_new(Manager **ret, int fd_ctrl, int fd_uevent, const char *cg
         if (r < 0)
                 return log_error_errno(r, "Failed to initialize udev control socket: %m");
 
-        //加载并解析udev规则文件
+        //开启udev_ctrl socket
         r = udev_ctrl_enable_receiving(manager->ctrl);
         if (r < 0)
                 return log_error_errno(r, "Failed to bind udev control socket: %m");
@@ -1591,6 +1593,7 @@ static int manager_new(Manager **ret, int fd_ctrl, int fd_uevent, const char *cg
 
         (void) sd_device_monitor_set_receive_buffer_size(manager->monitor, 128 * 1024 * 1024);
 
+        //开启netlink monitor的收包函数
         r = device_monitor_enable_receiving(manager->monitor);
         if (r < 0)
                 return log_error_errno(r, "Failed to bind netlink socket: %m");
@@ -1710,6 +1713,7 @@ static int main_loop(Manager *manager) {
         return r;
 }
 
+/*udevd实现函数*/
 static int run(int argc, char *argv[]) {
         _cleanup_free_ char *cgroup = NULL;
         _cleanup_(manager_freep) Manager *manager = NULL;

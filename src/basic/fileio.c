@@ -266,8 +266,8 @@ int verify_file(const char *fn, const char *blob, bool accept_extra_nl) {
 
 int read_full_stream(
                 FILE *f,
-                char **ret_contents,
-                size_t *ret_size) {
+                char **ret_contents/*存放读取的文件内容*/,
+                size_t *ret_size/*出参，文件大小*/) {
 
         _cleanup_free_ char *buf = NULL;
         struct stat st;
@@ -289,6 +289,7 @@ int read_full_stream(
                 if (S_ISREG(st.st_mode)) {
 
                         /* Safety check */
+                		//跳过过大的文件
                         if (st.st_size > READ_FULL_BYTES_MAX)
                                 return -E2BIG;
 
@@ -351,6 +352,7 @@ int read_full_stream(
         return 0;
 }
 
+//打开文件fn,并读取其内容到contents,文件长度为size
 int read_full_file(const char *fn, char **contents, size_t *size) {
         _cleanup_fclose_ FILE *f = NULL;
 

@@ -63,6 +63,7 @@ int udev_ctrl_new_from_fd(struct udev_ctrl **ret, int fd) {
         assert(ret);
 
         if (fd < 0) {
+        	//创建unix socket
                 sock = socket(AF_LOCAL, SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC, 0);
                 if (sock < 0)
                         return log_error_errno(errno, "Failed to create socket: %m");
@@ -105,6 +106,7 @@ int udev_ctrl_enable_receiving(struct udev_ctrl *uctrl) {
         if (uctrl->bound)
                 return 0;
 
+        //bind对应的socket到指定地址
         r = bind(uctrl->sock, &uctrl->saddr.sa, uctrl->addrlen);
         if (r < 0 && errno == EADDRINUSE) {
                 (void) sockaddr_un_unlink(&uctrl->saddr.un);
@@ -114,6 +116,7 @@ int udev_ctrl_enable_receiving(struct udev_ctrl *uctrl) {
         if (r < 0)
                 return log_error_errno(errno, "Failed to bind udev control socket: %m");
 
+        //监听此socket
         if (listen(uctrl->sock, 0) < 0)
                 return log_error_errno(errno, "Failed to listen udev control socket: %m");
 

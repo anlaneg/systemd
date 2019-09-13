@@ -13,7 +13,7 @@
         int main(int argc, char *argv[]) {                              \
                 int r;                                                  \
                 intro;                                                  \
-                r = impl;                                               \
+                r = impl;/*调用实现函数*/                                 \
                 static_destruct();                                      \
                 ask_password_agent_close();                             \
                 polkit_agent_close();                                   \

@@ -14,6 +14,7 @@
 #include "tmpfile-util.h"
 #include "utf8.h"
 
+//解析env类型文件（代码写得不怎么好看）
 static int parse_env_file_internal(
                 FILE *f,
                 const char *fname,
@@ -41,6 +42,7 @@ static int parse_env_file_internal(
                 COMMENT_ESCAPE
         } state = PRE_KEY;
 
+        //读取文件内容到contents
         if (f)
                 r = read_full_stream(f, &contents, NULL);
         else
@@ -69,16 +71,21 @@ static int parse_env_file_internal(
 
                 case KEY:
                         if (strchr(NEWLINE, c)) {
+                        		//key状态下遇到换行，忽略输入
                                 state = PRE_KEY;
                                 line++;
                                 n_key = 0;
                         } else if (c == '=') {
+                        		//key状态下，遇到'=',认为key结束，切至value状态
                                 state = PRE_VALUE;
                                 last_value_whitespace = (size_t) -1;
                         } else {
+                        	//仍然为key状态，遇到非'=','\n'的字符，则继续收集key的取值，
+                        	//这个解析有问题，多个空格时，第二个空格将导致key被合并
                                 if (!strchr(WHITESPACE, c))
                                         last_key_whitespace = (size_t) -1;
                                 else if (last_key_whitespace == (size_t) -1)
+                                	/*遇着key终止*/
                                          last_key_whitespace = n_key;
 
                                 if (!GREEDY_REALLOC(key, key_alloc, n_key+2))
@@ -90,6 +97,7 @@ static int parse_env_file_internal(
                         break;
 
                 case PRE_VALUE:
+                	//解析value
                         if (strchr(NEWLINE, c)) {
                                 state = PRE_KEY;
                                 line++;
@@ -225,6 +233,7 @@ static int parse_env_file_internal(
                         break;
 
                 case COMMENT:
+                	//comment状态时，除非遇到'\'或者\n,否则继续在comment状态
                         if (c == '\\')
                                 state = COMMENT_ESCAPE;
                         else if (strchr(NEWLINE, c)) {
@@ -311,11 +320,13 @@ static int parse_env_file_push(
 
         va_copy(aq, *ap);
 
+        //取key的名称
         while ((k = va_arg(aq, const char *))) {
                 char **v;
 
                 v = va_arg(aq, char **);
 
+                //如果是我们要设置的key,则置key的取值
                 if (streq(key, k)) {
                         va_end(aq);
                         free(*v);
@@ -343,17 +354,18 @@ int parse_env_filev(
         va_list aq;
 
         va_copy(aq, ap);
+        //解析环境变量文件
         r = parse_env_file_internal(f, fname, parse_env_file_push, &aq, &n_pushed);
         va_end(aq);
         if (r < 0)
                 return r;
 
-        return n_pushed;
+        return n_pushed;/*解析的变量数*/
 }
 
 int parse_env_file_sentinel(
                 FILE *f,
-                const char *fname,
+                const char *fname/*待解析的文件名*/,
                 ...) {
 
         va_list ap;

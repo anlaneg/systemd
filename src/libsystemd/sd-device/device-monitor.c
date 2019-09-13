@@ -87,6 +87,7 @@ int device_monitor_allow_unicast_sender(sd_device_monitor *m, sd_device_monitor 
         return 0;
 }
 
+//设置socket对应的recv buffer大小
 _public_ int sd_device_monitor_set_receive_buffer_size(sd_device_monitor *m, size_t size) {
         int r, n = (int) size;
 
@@ -145,6 +146,7 @@ int device_monitor_new_full(sd_device_monitor **ret, MonitorNetlinkGroup group, 
         }
 
         if (fd < 0) {
+        	//创建netlink socket,关注netlink_kobject_uevent事件
                 sock = socket(PF_NETLINK, SOCK_RAW|SOCK_CLOEXEC|SOCK_NONBLOCK, NETLINK_KOBJECT_UEVENT);
                 if (sock < 0)
                         return log_debug_errno(errno, "sd-device-monitor: Failed to create socket: %m");
@@ -159,7 +161,7 @@ int device_monitor_new_full(sd_device_monitor **ret, MonitorNetlinkGroup group, 
                 .sock = fd >= 0 ? fd : TAKE_FD(sock),
                 .bound = fd >= 0,
                 .snl.nl.nl_family = AF_NETLINK,
-                .snl.nl.nl_groups = group,
+                .snl.nl.nl_groups = group,//加入指定group组
         };
 
         if (fd >= 0) {
