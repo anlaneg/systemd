@@ -133,7 +133,8 @@ int rename_noreplace(int olddirfd, const char *oldpath, int newdirfd, const char
         return 0;
 }
 
-int readlinkat_malloc(int fd, const char *p, char **ret) {
+/*fd是一个目录，其下有一个link,取其对应的目标*/
+int readlinkat_malloc(int fd, const char *p, char **ret/*出参，目录位置*/) {
         size_t l = FILENAME_MAX+1;
         int r;
 
@@ -703,7 +704,7 @@ static int log_autofs_mount_point(int fd, const char *path, unsigned flags) {
                                  n1, path);
 }
 
-int chase_symlinks(const char *path, const char *original_root, unsigned flags, char **ret) {
+int chase_symlinks(const char *path, const char *original_root, unsigned flags, char **ret/*出参，*/) {
         _cleanup_free_ char *buffer = NULL, *done = NULL, *root = NULL;
         _cleanup_close_ int fd = -1;
         unsigned max_follow = CHASE_SYMLINKS_MAX; /* how many symlinks to follow before giving up and returning ELOOP */
@@ -716,12 +717,15 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
 
         /* Either the file may be missing, or we return an fd to the final object, but both make no sense */
         if (FLAGS_SET(flags, CHASE_NONEXISTENT | CHASE_OPEN))
+            /*出现冲突标记，报错*/
                 return -EINVAL;
 
         if (FLAGS_SET(flags, CHASE_STEP | CHASE_OPEN))
+            /*出现冲突标记，报错*/
                 return -EINVAL;
 
         if (isempty(path))
+            /*路径地址为空*/
                 return -EINVAL;
 
         /* This is a lot like canonicalize_file_name(), but takes an additional "root" parameter, that allows following
@@ -788,6 +792,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
         }
 
         if (original_root) {
+                /*构造绝对路径root*/
                 r = path_make_absolute_cwd(original_root, &root);
                 if (r < 0)
                         return r;
@@ -796,21 +801,26 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
 
                         /* We don't support relative paths in combination with a root directory */
                         if (!path_is_absolute(path))
+                            /*path不得为相应地址*/
                                 return -EINVAL;
 
+                        /*拼接root,path构成新的路径*/
                         path = prefix_roota(root, path);
                 }
         }
 
+        /*确保path为绝对路径，以buffer返回*/
         r = path_make_absolute_cwd(path, &buffer);
         if (r < 0)
                 return r;
 
+        /*打开根目录*/
         fd = open("/", O_CLOEXEC|O_NOFOLLOW|O_PATH);
         if (fd < 0)
                 return -errno;
 
         if (flags & CHASE_SAFE) {
+            /*记录此fd的stat*/
                 if (fstat(fd, &previous_stat) < 0)
                         return -errno;
         }
@@ -827,11 +837,12 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                 m = n + strcspn(todo + n, "/");         /* The entire length of the component */
 
                 /* Extract the first component. */
+                /*n的位置是首个非'/'符，m是自todo+n开始首个'/'位置，first为首个目录（可能含多个'/')*/
                 first = strndup(todo, m);
                 if (!first)
                         return -ENOMEM;
 
-                todo += m;
+                todo += m;/*跳过m*/
 
                 /* Empty? Then we reached the end. */
                 if (isempty(first))
@@ -850,6 +861,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
 
                 /* Just a dot? Then let's eat this up. */
                 if (path_equal(first, "/."))
+                    /*遇到形如'/./'这种路径，eat掉再试*/
                         continue;
 
                 /* Two dots? Then chop off the last bit of what we already found out. */
@@ -877,6 +889,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                         if (flags & CHASE_STEP)
                                 goto chased_one;
 
+                        /*打开fd跳到父目录*/
                         fd_parent = openat(fd, "..", O_CLOEXEC|O_NOFOLLOW|O_PATH);
                         if (fd_parent < 0)
                                 return -errno;
@@ -891,6 +904,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                                 previous_stat = st;
                         }
 
+                        /*关闭掉fd,更新fd为父目录，再试*/
                         safe_close(fd);
                         fd = TAKE_FD(fd_parent);
 
@@ -898,7 +912,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                 }
 
                 /* Otherwise let's see what this is. */
-                child = openat(fd, first + n, O_CLOEXEC|O_NOFOLLOW|O_PATH);
+                child = openat(fd, first + n, O_CLOEXEC|O_NOFOLLOW|O_PATH);/*在fd位置，继续下一层处理*/
                 if (child < 0) {
 
                         if (errno == ENOENT &&
@@ -936,6 +950,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                     fd_is_fs_type(child, AUTOFS_SUPER_MAGIC) > 0)
                         return log_autofs_mount_point(child, path, flags);
 
+                /*当前目录为link*/
                 if (S_ISLNK(st.st_mode) && !((flags & CHASE_NOFOLLOW) && isempty(todo))) {
                         char *joined;
 
@@ -946,6 +961,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                         if (--max_follow <= 0)
                                 return -ELOOP;
 
+                        /*读取link目标*/
                         r = readlinkat_malloc(fd, first + n, &destination);
                         if (r < 0)
                                 return r;

@@ -124,4 +124,5 @@ static int run(int argc, char *argv[]) {
         return udevadm_main(argc, argv);
 }
 
+/*udevadm程序入口*/
 DEFINE_MAIN_FUNCTION(run);

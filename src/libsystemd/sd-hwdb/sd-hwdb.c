@@ -304,6 +304,7 @@ static const char hwdb_bin_paths[] =
 #endif
         UDEVLIBEXECDIR "/hwdb.bin\0";
 
+/*打开hwdb.bin文件，读取其内容，返回sd_hwdb*/
 _public_ int sd_hwdb_new(sd_hwdb **ret) {
         _cleanup_(sd_hwdb_unrefp) sd_hwdb *hwdb = NULL;
         const char *hwdb_bin_path;
@@ -320,27 +321,34 @@ _public_ int sd_hwdb_new(sd_hwdb **ret) {
         /* find hwdb.bin in hwdb_bin_paths */
         NULSTR_FOREACH(hwdb_bin_path, hwdb_bin_paths) {
                 log_debug("Trying to open \"%s\"...", hwdb_bin_path);
-                hwdb->f = fopen(hwdb_bin_path, "re");
+                hwdb->f = fopen(hwdb_bin_path, "re");/*尝试打开hwdb.bin文件*/
                 if (hwdb->f)
+                    /*打开成功，跳出*/
                         break;
                 if (errno != ENOENT)
+                    /*文件存在，但打开失败，报错*/
                         return log_debug_errno(errno, "Failed to open %s: %m", hwdb_bin_path);
         }
 
         if (!hwdb->f)
+            /*查找hwdb.bin文件不存在，报错*/
                 return log_debug_errno(SYNTHETIC_ERRNO(ENOENT),
                                        "hwdb.bin does not exist, please run 'systemd-hwdb update'");
 
+        /*取文件状态失败，报错*/
         if (fstat(fileno(hwdb->f), &hwdb->st) < 0)
                 return log_debug_errno(errno, "Failed to stat %s: %m", hwdb_bin_path);
+        /*文件内容过小（不足文件头），报错*/
         if (hwdb->st.st_size < (off_t) offsetof(struct trie_header_f, strings_len) + 8)
                 return log_debug_errno(SYNTHETIC_ERRNO(EIO),
                                        "File %s is too short: %m", hwdb_bin_path);
 
+        /*文件载入内存*/
         hwdb->map = mmap(0, hwdb->st.st_size, PROT_READ, MAP_SHARED, fileno(hwdb->f), 0);
         if (hwdb->map == MAP_FAILED)
                 return log_debug_errno(errno, "Failed to map %s: %m", hwdb_bin_path);
 
+        /*文件magic比较*/
         if (memcmp(hwdb->map, sig, sizeof(hwdb->head->signature)) != 0 ||
             (size_t) hwdb->st.st_size != le64toh(hwdb->head->file_size)) {
                 log_debug("Failed to recognize the format of %s", hwdb_bin_path);

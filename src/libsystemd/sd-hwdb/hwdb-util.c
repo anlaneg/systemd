@@ -680,6 +680,7 @@ int hwdb_query(const char *modalias) {
                 return r;
 
         SD_HWDB_FOREACH_PROPERTY(hwdb, modalias, key, value)
+                /*针对查询到的结果进行k,v显示*/
                 printf("%s=%s\n", key, value);
 
         return 0;

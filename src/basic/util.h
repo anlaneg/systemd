@@ -89,11 +89,12 @@ static inline void* bsearch_safe(const void *key, const void *base,
         return bsearch(key, base, nmemb, size, compar);
 }
 
+/*b是一个已排好序的数组，n是数组长度，func是元素比对函数，k是要查询的key,本函数以二分法检查k在b中时否存在*/
 #define typesafe_bsearch(k, b, n, func)                                 \
         ({                                                              \
                 const typeof(b[0]) *_k = k;                             \
-                int (*_func_)(const typeof(b[0])*, const typeof(b[0])*) = func; \
-                bsearch_safe((const void*) _k, (b), (n), sizeof((b)[0]), (__compar_fn_t) _func_); \
+                int (*_func_)(const typeof(b[0])*, const typeof(b[0])*) = func;/*比对函数*/ \
+                bsearch_safe((const void*) _k/*待查询的内容*/, (b)/*数组起始位置*/, (n)/*数组大小*/, sizeof((b)[0])/*元素大小*/, (__compar_fn_t) _func_); \
         })
 
 /**

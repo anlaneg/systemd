@@ -9,11 +9,11 @@
 #include "spawn-polkit-agent.h"
 #include "static-destruct.h"
 
-#define _DEFINE_MAIN_FUNCTION(intro, impl, ret)                         \
+#define _DEFINE_MAIN_FUNCTION(intro, impl, ret/*规范化返回值*/)                         \
         int main(int argc, char *argv[]) {                              \
                 int r;                                                  \
                 intro;                                                  \
-                r = impl;/*调用实现函数*/                                 \
+                r = impl;/*在这里直接调用实现函数*/                                 \
                 static_destruct();                                      \
                 ask_password_agent_close();                             \
                 polkit_agent_close();                                   \

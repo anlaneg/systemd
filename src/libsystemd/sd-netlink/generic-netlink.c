@@ -15,6 +15,7 @@ static const genl_family genl_families[] = {
         [SD_GENL_FOU]       = { .name = "fou", .version = 1 },
 };
 
+/*创建netlink netlink_generic类型的socket*/
 int sd_genl_socket_open(sd_netlink **ret) {
         return netlink_open_family(ret, NETLINK_GENERIC);
 }

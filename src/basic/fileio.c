@@ -501,6 +501,7 @@ static int search_and_fopen_internal(const char *path, const char *mode, const c
         if (!path_strv_resolve_uniq(search, root))
                 return -ENOMEM;
 
+        /*遍历search文件*/
         STRV_FOREACH(i, search) {
                 _cleanup_free_ char *p = NULL;
                 FILE *f;
@@ -512,6 +513,7 @@ static int search_and_fopen_internal(const char *path, const char *mode, const c
                 if (!p)
                         return -ENOMEM;
 
+                /*如果文件存在，就返回*/
                 f = fopen(p, mode);
                 if (f) {
                         *_f = f;
@@ -555,6 +557,7 @@ int search_and_fopen_nulstr(const char *path, const char *mode, const char *root
         _cleanup_strv_free_ char **s = NULL;
 
         if (path_is_absolute(path)) {
+            /*path为绝对路径，直接打开，并返回*/
                 FILE *f;
 
                 f = fopen(path, mode);
@@ -570,6 +573,7 @@ int search_and_fopen_nulstr(const char *path, const char *mode, const char *root
         if (!s)
                 return -ENOMEM;
 
+        /*在search目录里进行查找*/
         return search_and_fopen_internal(path, mode, root, s, _f);
 }
 

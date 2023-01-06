@@ -270,6 +270,7 @@ static int device_amend(sd_device *device, const char *key, const char *value) {
                                 return log_device_debug_errno(device, r, "sd-device: Failed to add tag '%s': %m", tag);
                 }
         } else {
+            /*遇到其它key,value*/
                 r = device_add_property_internal(device, key, value);
                 if (r < 0)
                         return log_device_debug_errno(device, r, "sd-device: Failed to add property '%s=%s': %m", key, value);
@@ -334,6 +335,7 @@ static int device_append(sd_device *device, char *key, const char **_major, cons
                                 return -EINVAL;
                 }
 
+                /*遇到其它不认识的key,value*/
                 r = device_amend(device, key, value);
                 if (r < 0)
                         return r;

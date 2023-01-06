@@ -35,7 +35,9 @@ int sd_hwdb_enumerate(sd_hwdb *hwdb, const char **key, const char **value);
 
 /* the inverse condition avoids ambiguity of dangling 'else' after the macro */
 #define SD_HWDB_FOREACH_PROPERTY(hwdb, modalias, key, value)            \
+        /*通过seek进行查询，如果未命中，不输出*/\
         if (sd_hwdb_seek(hwdb, modalias) < 0) { }                       \
+        /*查询成功，遍历返回所有的k,v*/\
         else while (sd_hwdb_enumerate(hwdb, &(key), &(value)) > 0)
 
 _SD_DEFINE_POINTER_CLEANUP_FUNC(sd_hwdb, sd_hwdb_unref);

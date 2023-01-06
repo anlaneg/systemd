@@ -12,7 +12,6 @@
 #include "signal-util.h"
 #include "user-util.h"
 
-//systemd-networkd进程入口
 static int run(int argc, char *argv[]) {
         _cleanup_(notify_on_cleanup) const char *notify_message = NULL;
         _cleanup_(manager_freep) Manager *m = NULL;
@@ -117,4 +116,5 @@ static int run(int argc, char *argv[]) {
         return 0;
 }
 
+//systemd-networkd进程入口
 DEFINE_MAIN_FUNCTION(run);

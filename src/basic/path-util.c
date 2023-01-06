@@ -77,9 +77,11 @@ char *path_make_absolute(const char *p, const char *prefix) {
                 return strjoin(prefix, "/", p);
 }
 
+/*取当前工作目录路径*/
 int safe_getcwd(char **ret) {
         char *cwd;
 
+        /*取当前工作目录*/
         cwd = get_current_dir_name();
         if (!cwd)
                 return negative_errno();
@@ -87,6 +89,7 @@ int safe_getcwd(char **ret) {
         /* Let's make sure the directory is really absolute, to protect us from the logic behind
          * CVE-2018-1000001 */
         if (cwd[0] != '/') {
+            /*返回的目录没有以'/'开头*/
                 free(cwd);
                 return -ENOMEDIUM;
         }
@@ -95,6 +98,7 @@ int safe_getcwd(char **ret) {
         return 0;
 }
 
+/*返回p绝对地址,填充到ret*/
 int path_make_absolute_cwd(const char *p, char **ret) {
         char *c;
         int r;
@@ -106,8 +110,10 @@ int path_make_absolute_cwd(const char *p, char **ret) {
          * current working directory. */
 
         if (path_is_absolute(p))
+            /*p为绝对地址，则复制并返回*/
                 c = strdup(p);
         else {
+            /*p为相对路径，则提取当前工作目录，并将cwd与p相连后返回*/
                 _cleanup_free_ char *cwd = NULL;
 
                 r = safe_getcwd(&cwd);
@@ -253,20 +259,23 @@ char **path_strv_resolve(char **l, const char *root) {
                 _cleanup_free_ char *orig = NULL;
                 char *t, *u;
 
-                //每一个元素必须为绝对路径
+                //s如果不是绝对路径，则忽略
                 if (!path_is_absolute(*s)) {
-                        free(*s);
+                        free(*s);/*这个free没有置NULL*/
                         continue;
                 }
 
                 if (root) {
+                    /*有root,在*s前添加root前缀，生成新的路径t*/
                         orig = *s;
                         t = prefix_root(root, orig);
                         if (!t) {
+                            /*添加前缀失败*/
                                 enomem = true;
                                 continue;
                         }
                 } else
+                    /*没有root,则路径为*s*/
                         t = *s;
 
                 r = chase_symlinks(t, root, 0, &u);
@@ -311,22 +320,25 @@ char **path_strv_resolve(char **l, const char *root) {
                 l[k++] = u;
         }
 
-        l[k] = NULL;
+        l[k] = NULL;/*以NULL结尾*/
 
         if (enomem)
                 return NULL;
 
-        return l;
+        return l;/*返回填充好的l*/
 }
 
 char **path_strv_resolve_uniq(char **l, const char *root) {
 
         if (strv_isempty(l))
-                return l;//如果为空，则返回空
+            //如果为空，则返回空
+                return l;
 
+        /*l指向一组路径，root如果不为空，则l均增加root前缀，然后针对link进行解决，生成新的路径*/
         if (!path_strv_resolve(l, root))
                 return NULL;
 
+        /*l元素去重*/
         return strv_uniq(l);
 }
 
@@ -487,6 +499,7 @@ bool path_equal_or_files_same(const char *a, const char *b, int flags) {
         return path_equal(a, b) || files_same(a, b, flags) > 0;
 }
 
+/*路径字符串拼接*/
 char* path_join_internal(const char *first, ...) {
         char *joined, *q;
         const char *p;
@@ -691,6 +704,9 @@ int mkfs_exists(const char *fstype) {
         return binary_is_good(mkfs);
 }
 
+/*
+ * 为path添加上root前缀
+ * 如果root为空或者为'/',则复制并返回path,否则将root与path合并产生以root为前缀的地址*/
 char *prefix_root(const char *root, const char *path) {
         char *n, *p;
         size_t l;
@@ -702,9 +718,10 @@ char *prefix_root(const char *root, const char *path) {
 
         /* First, drop duplicate prefixing slashes from the path */
         while (path[0] == '/' && path[1] == '/')
-                path++;
+                path++;/*丢弃重复的'/'符号*/
 
         if (empty_or_root(root))
+            /*root为null或者root为'/'目录，复制返回path*/
                 return strdup(path);
 
         l = strlen(root) + 1 + strlen(path) + 1;
@@ -713,14 +730,18 @@ char *prefix_root(const char *root, const char *path) {
         if (!n)
                 return NULL;
 
+        /*复制root到n中，返回结尾*/
         p = stpcpy(n, root);
 
+        /*root的结尾可能有多个连续的'/',将其精简*/
         while (p > n && p[-1] == '/')
                 p--;
 
+        /*如果path不能'/'开头，则拼地址时，需要加上'/'*/
         if (path[0] != '/')
                 *(p++) = '/';
 
+        /*将path也一并写入到p*/
         strcpy(p, path);
         return n;
 }
@@ -1096,8 +1117,10 @@ bool empty_or_root(const char *root) {
          * i.e. either / or NULL or the empty string or any equivalent. */
 
         if (!root)
+            /*为空，返回true*/
                 return true;
 
+        /*strspn用于查找'/'字符在root前缀位置出现的次数，如果root[x]==0,则说明root字符串中全是'/'符*/
         return root[strspn(root, "/")] == 0;
 }
 

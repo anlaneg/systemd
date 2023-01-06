@@ -36,6 +36,7 @@ int proc_cmdline(char **ret) {
         if (detect_container() > 0)
                 return get_process_cmdline(1, 0, false, ret);
         else
+            /*读取cmdline,将其内容存入到ret中*/
                 return read_one_line_file("/proc/cmdline", ret);
 }
 

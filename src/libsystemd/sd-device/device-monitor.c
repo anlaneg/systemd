@@ -116,7 +116,7 @@ int device_monitor_get_fd(sd_device_monitor *m) {
         return m->sock;
 }
 
-int device_monitor_new_full(sd_device_monitor **ret, MonitorNetlinkGroup group, int fd) {
+int device_monitor_new_full(sd_device_monitor **ret/*出参*/, MonitorNetlinkGroup group/*要加入的组播组*/, int fd) {
         _cleanup_(sd_device_monitor_unrefp) sd_device_monitor *m = NULL;
         _cleanup_close_ int sock = -1;
         int r;
@@ -152,6 +152,7 @@ int device_monitor_new_full(sd_device_monitor **ret, MonitorNetlinkGroup group, 
                         return log_debug_errno(errno, "sd-device-monitor: Failed to create socket: %m");
         }
 
+        /*创建monitor结构体*/
         m = new(sd_device_monitor, 1);
         if (!m)
                 return -ENOMEM;
@@ -160,7 +161,7 @@ int device_monitor_new_full(sd_device_monitor **ret, MonitorNetlinkGroup group, 
                 .n_ref = 1,
                 .sock = fd >= 0 ? fd : TAKE_FD(sock),
                 .bound = fd >= 0,
-                .snl.nl.nl_family = AF_NETLINK,
+                .snl.nl.nl_family = AF_NETLINK,/*采用netlink*/
                 .snl.nl.nl_groups = group,//加入指定group组
         };
 
@@ -197,6 +198,7 @@ static int device_monitor_event_handler(sd_event_source *s, int fd, uint32_t rev
                 return 0;
 
         if (m->callback)
+            /*触发sd_device_monitor的处理函数*/
                 return m->callback(m, device, m->userdata);
 
         return 0;
@@ -382,6 +384,7 @@ int device_monitor_receive_device(sd_device_monitor *m, sd_device **ret) {
 
         assert(ret);
 
+        /*自此socket读取消息*/
         buflen = recvmsg(m->sock, &smsg, 0);
         if (buflen < 0) {
                 if (errno != EINTR)

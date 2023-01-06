@@ -83,6 +83,7 @@ int device_add_property_aux(sd_device *device, const char *_key, const char *_va
         assert(_key);
 
         if (db)
+            /*如果为db,则存入到properties_db中*/
                 properties = &device->properties_db;
         else
                 properties = &device->properties;
@@ -949,6 +950,7 @@ _public_ int sd_device_get_driver(sd_device *device, const char **ret) {
         return 0;
 }
 
+/*取device对应的devpath*/
 _public_ int sd_device_get_devpath(sd_device *device, const char **devpath) {
         assert_return(device, -EINVAL);
         assert_return(devpath, -EINVAL);

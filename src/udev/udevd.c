@@ -82,7 +82,7 @@ typedef struct Manager {
         const char *cgroup;
         pid_t pid; /* the process that originally allocated the manager object */
 
-        UdevRules *rules;
+        UdevRules *rules;/*解析udev配置文件生成的规则*/
         Hashmap *properties;
 
         sd_netlink *rtnl;
@@ -300,7 +300,7 @@ static void manager_free(Manager *manager) {
         sd_netlink_unref(manager->rtnl);
 
         hashmap_free_free_free(manager->properties);
-        udev_rules_free(manager->rules);
+        udev_rules_free(manager->rules);/*释放加载的规则*/
 
         safe_close(manager->fd_inotify);
         safe_close_pair(manager->worker_watch);
@@ -870,6 +870,7 @@ static void event_queue_start(Manager *manager) {
         udev_builtin_init();
 
         if (!manager->rules) {
+            /*加载udev规则文件，填充manager->rules*/
                 r = udev_rules_new(&manager->rules, arg_resolve_name_timing);
                 if (r < 0) {
                         log_warning_errno(r, "Failed to read udev rules: %m");
@@ -1560,7 +1561,7 @@ static int parse_argv(int argc, char *argv[]) {
         return 1;
 }
 
-//构造monitor,建听相应socket
+//构造monitor,监听相应socket
 static int manager_new(Manager **ret, int fd_ctrl, int fd_uevent, const char *cgroup) {
         _cleanup_(manager_freep) Manager *manager = NULL;
         int r;
@@ -1611,6 +1612,7 @@ static int main_loop(Manager *manager) {
         if (r < 0)
                 return log_error_errno(errno, "Failed to create socketpair for communicating with workers: %m");
 
+        /*读端fd*/
         fd_worker = manager->worker_watch[READ_END];
 
         r = setsockopt_int(fd_worker, SOL_SOCKET, SO_PASSCRED, true);
@@ -1691,6 +1693,7 @@ static int main_loop(Manager *manager) {
 
         udev_builtin_init();
 
+        /*加载udev规则文件，填充manager->rules*/
         r = udev_rules_new(&manager->rules, arg_resolve_name_timing);
         if (!manager->rules)
                 return log_error_errno(r, "Failed to read udev rules: %m");
@@ -1832,4 +1835,5 @@ static int run(int argc, char *argv[]) {
         return r;
 }
 
+/*systemd-udevd程序入口*/
 DEFINE_MAIN_FUNCTION(run);

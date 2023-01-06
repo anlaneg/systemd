@@ -21,16 +21,18 @@ _printf_(6,0) static void udev_kmod_log(void *data, int priority, const char *fi
         log_internalv(priority, 0, file, line, fn, format, args);
 }
 
-static int builtin_kmod(sd_device *dev, int argc, char *argv[], bool test) {
+static int builtin_kmod(sd_device *dev, int argc, char *argv[]/*命令参数*/, bool test) {
         int i;
 
         if (!ctx)
                 return 0;
 
+        /*首个参数必须为load*/
         if (argc < 3 || !streq(argv[1], "load"))
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "%s: expected: load <module>", argv[0]);
 
+        /*加载参数指定的所有module*/
         for (i = 2; argv[i]; i++)
                 (void) module_load_and_warn(ctx, argv[i], false);
 

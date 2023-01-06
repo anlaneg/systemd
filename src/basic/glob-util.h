@@ -16,6 +16,7 @@ int glob_extend(char ***strv, const char *path);
 
 #define _cleanup_globfree_ _cleanup_(globfree)
 
+/*字符串是否包含glob字符*?]*/
 _pure_ static inline bool string_is_glob(const char *p) {
         /* Check if a string contains any glob patterns. */
         return !!strpbrk(p, GLOB_CHARS);

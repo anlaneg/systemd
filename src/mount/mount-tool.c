@@ -1617,4 +1617,5 @@ static int run(int argc, char* argv[]) {
         return r;
 }
 
+/*systemd-mount程序入口*/
 DEFINE_MAIN_FUNCTION(run);

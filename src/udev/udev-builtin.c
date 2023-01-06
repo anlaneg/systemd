@@ -93,6 +93,7 @@ bool udev_builtin_run_once(enum udev_builtin_cmd cmd) {
         return builtins[cmd]->run_once;
 }
 
+/*查询命令对应的内建命令index*/
 enum udev_builtin_cmd udev_builtin_lookup(const char *command) {
         enum udev_builtin_cmd i;
         size_t n;
@@ -108,7 +109,7 @@ enum udev_builtin_cmd udev_builtin_lookup(const char *command) {
         return _UDEV_BUILTIN_INVALID;
 }
 
-int udev_builtin_run(sd_device *dev, enum udev_builtin_cmd cmd, const char *command, bool test) {
+int udev_builtin_run(sd_device *dev, enum udev_builtin_cmd cmd/*内建的命令index*/, const char *command, bool test) {
         _cleanup_strv_free_ char **argv = NULL;
 
         assert(dev);
@@ -124,6 +125,7 @@ int udev_builtin_run(sd_device *dev, enum udev_builtin_cmd cmd, const char *comm
 
         /* we need '0' here to reset the internal state */
         optind = 0;
+        /*按命令index找到相应命令，执行命令处理*/
         return builtins[cmd]->cmd(dev, strv_length(argv), argv, test);
 }
 

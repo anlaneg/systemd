@@ -24,12 +24,12 @@
 #include "util.h"
 
 static int files_add(
-                Hashmap *h,
-                Set *masked,
-                const char *suffix,
-                const char *root,
+                Hashmap *h/*记录收集的文件*/,
+                Set *masked/*指明要忽略收集的文件*/,
+                const char *suffix/*指明满足收集要求的文件后缀*/,
+                const char *root/*根目录前缀*/,
                 unsigned flags,
-                const char *path) {
+                const char *path/*目录名称*/) {
 
         _cleanup_closedir_ DIR *dir = NULL;
         const char *dirpath;
@@ -51,24 +51,26 @@ static int files_add(
                 return log_debug_errno(errno, "Failed to open directory '%s': %m", dirpath);
         }
 
-        //遍历dir下所有文件
+        //遍历dir下所有文件（忽略隐藏文件）
         FOREACH_DIRENT(de, dir, return -errno) {
                 struct stat st;
                 char *p, *key;
 
                 /* Does this match the suffix? */
-                //后缀不相等
+                //忽略后缀不相等的
                 if (suffix && !endswith(de->d_name, suffix))
                         continue;
 
                 /* Has this file already been found in an earlier directory? */
                 if (hashmap_contains(h, de->d_name)) {
+                    /*跳过hash表中已包含的文件名称*/
                         log_debug("Skipping overridden file '%s/%s'.", dirpath, de->d_name);
                         continue;
                 }
 
                 /* Has this been masked in an earlier directory? */
                 if ((flags & CONF_FILES_FILTER_MASKED) && set_contains(masked, de->d_name)) {
+                    /*跳过masked集合中指明的文件*/
                         log_debug("File '%s/%s' is masked by previous entry.", dirpath, de->d_name);
                         continue;
                 }
@@ -112,12 +114,14 @@ static int files_add(
                         }
 
                 if (flags & CONF_FILES_BASENAME) {
+                    /*key使用basename,value使用basename*/
                         p = strdup(de->d_name);
                         if (!p)
                                 return -ENOMEM;
 
                         key = p;
                 } else {
+                    /*key使用basename,value使用全名称*/
                         p = strjoin(dirpath, "/", de->d_name);
                         if (!p)
                                 return -ENOMEM;
@@ -125,6 +129,7 @@ static int files_add(
                         key = basename(p);
                 }
 
+                /*存入hash表*/
                 r = hashmap_put(h, key, p);
                 if (r < 0) {
                         free(p);
@@ -141,7 +146,7 @@ static int base_cmp(char * const *a, char * const *b) {
         return strcmp(basename(*a), basename(*b));
 }
 
-static int conf_files_list_strv_internal(char ***strv, const char *suffix, const char *root, unsigned flags, char **dirs) {
+static int conf_files_list_strv_internal(char ***strv/*出参，收集要的合乎要求的文件*/, const char *suffix/*合乎要求的后缀*/, const char *root/*根目录前缀*/, unsigned flags, char **dirs) {
         _cleanup_hashmap_free_ Hashmap *fh = NULL;
         _cleanup_set_free_free_ Set *masked = NULL;
         char **files, **p;
@@ -150,6 +155,9 @@ static int conf_files_list_strv_internal(char ***strv, const char *suffix, const
         assert(strv);
 
         /* This alters the dirs string array */
+        /*dirs指向一组路径，root为空或者不为空，是根目录前缀
+         * dirs中每一个元素需要添加上根目录前缀后，进行解link并去重后，获得真实的地址
+         * */
         if (!path_strv_resolve_uniq(dirs, root))
                 return -ENOMEM;
 
@@ -178,6 +186,7 @@ static int conf_files_list_strv_internal(char ***strv, const char *suffix, const
         if (!files)
                 return -ENOMEM;
 
+        /*对这些文件进行排序*/
         typesafe_qsort(files, hashmap_size(fh), base_cmp);
         *strv = files;
 
@@ -262,10 +271,12 @@ int conf_files_list_strv(char ***strv, const char *suffix, const char *root, uns
 
         assert(strv);
 
+        /*复制dirs*/
         copy = strv_copy((char**) dirs);
         if (!copy)
                 return -ENOMEM;
 
+        /*在copy对应的目录下进行合乎要求的suffix后缀文件收集，存入strv中*/
         return conf_files_list_strv_internal(strv, suffix, root, flags, copy);
 }
 

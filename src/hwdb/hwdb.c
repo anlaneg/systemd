@@ -101,6 +101,7 @@ static int parse_argv(int argc, char *argv[]) {
         return 1;
 }
 
+/*支持hwdb的更新与查询*/
 static int hwdb_main(int argc, char *argv[]) {
         static const Verb verbs[] = {
                 { "update", 1, 1, 0, verb_update },
@@ -126,4 +127,5 @@ static int run(int argc, char *argv[]) {
         return hwdb_main(argc, argv);
 }
 
+/*systemd-hwdb程序入口*/
 DEFINE_MAIN_FUNCTION(run);

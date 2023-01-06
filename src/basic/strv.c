@@ -82,13 +82,16 @@ char **strv_free_erase(char **l) {
         return strv_free(l);
 }
 
+/*字符串vector复制*/
 char **strv_copy(char * const *l) {
         char **r, **k;
 
+        /*l的strv长度为strv_length*/
         k = r = new(char*, strv_length(l) + 1);
         if (!r)
                 return NULL;
 
+        /*复制l中每个数组字符串元素*/
         if (l)
                 for (; *l; k++, l++) {
                         *k = strdup(*l);
@@ -552,6 +555,7 @@ int strv_extend_front(char ***l, const char *value) {
         return 0;
 }
 
+/*strv元素去重*/
 char **strv_uniq(char **l) {
         char **i;
 

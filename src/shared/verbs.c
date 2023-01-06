@@ -46,7 +46,7 @@ bool running_in_chroot_or_offline(void) {
         return r > 0;
 }
 
-int dispatch_verb(int argc, char *argv[], const Verb verbs[], void *userdata) {
+int dispatch_verb(int argc, char *argv[], const Verb verbs[]/*各命令指行函数*/, void *userdata) {
         const Verb *verb;
         const char *name;
         unsigned i;
@@ -76,11 +76,14 @@ int dispatch_verb(int argc, char *argv[], const Verb verbs[], void *userdata) {
                 }
 
                 if (name)
+                    /*提供了参数，检查参数是否区配*/
                         found = streq(name, verbs[i].verb);
                 else
+                    /*命令有default标记，没有提供参数，使用默认命令*/
                         found = verbs[i].flags & VERB_DEFAULT;
 
                 if (found) {
+                    /*命中*/
                         verb = &verbs[i];
                         break;
                 }
@@ -91,6 +94,7 @@ int dispatch_verb(int argc, char *argv[], const Verb verbs[], void *userdata) {
         if (!name)
                 left = 1;
 
+        /*子命令参数校验*/
         if (verb->min_args != VERB_ANY &&
             (unsigned) left < verb->min_args)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
@@ -115,6 +119,7 @@ int dispatch_verb(int argc, char *argv[], const Verb verbs[], void *userdata) {
                         return r;
         }
 
+        /*执行选中的子命令*/
         if (name)
                 return verb->dispatch(left, argv, userdata);
         else {

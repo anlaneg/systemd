@@ -101,7 +101,7 @@ _malloc_  _alloc_(1, 2) static inline void *malloc_multiply(size_t size, size_t 
 }
 
 #if !HAVE_REALLOCARRAY
-_alloc_(2, 3) static inline void *reallocarray(void *p, size_t need, size_t size) {
+_alloc_(2, 3) static inline void *reallocarray(void *p, size_t need/*数组大小*/, size_t size/*每个数组元素大小*/) {
         if (size_multiply_overflow(size, need))
                 return NULL;
 

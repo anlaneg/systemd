@@ -21,6 +21,7 @@
 #include "util.h"
 
 static char **arg_proc_cmdline_modules = NULL;
+/*modules-load配置文件可能的目录列表*/
 static const char conf_file_dirs[] = CONF_PATHS_NULSTR("modules-load.d");
 
 STATIC_DESTRUCTOR_REGISTER(arg_proc_cmdline_modules, strv_freep);
@@ -33,6 +34,7 @@ static void systemd_kmod_log(void *data, int priority, const char *file, int lin
         REENABLE_WARNING;
 }
 
+/*解析p中的内容，将module名称存入到arg_proc_cmdline_modules*/
 static int add_modules(const char *p) {
         _cleanup_strv_free_ char **k = NULL;
 
@@ -49,6 +51,7 @@ static int add_modules(const char *p) {
 static int parse_proc_cmdline_item(const char *key, const char *value, void *data) {
         int r;
 
+        /*取命令行中modules_load参数，解析要加载的module*/
         if (proc_cmdline_key_streq(key, "modules_load")) {
 
                 if (proc_cmdline_value_missing(key, value))
@@ -62,7 +65,7 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
         return 0;
 }
 
-static int apply_file(struct kmod_ctx *ctx, const char *path, bool ignore_enoent) {
+static int apply_file(struct kmod_ctx *ctx, const char *path/*要加载的模块path*/, bool ignore_enoent) {
         _cleanup_fclose_ FILE *f = NULL;
         int r;
 
@@ -71,6 +74,7 @@ static int apply_file(struct kmod_ctx *ctx, const char *path, bool ignore_enoent
 
         r = search_and_fopen_nulstr(path, "re", NULL, conf_file_dirs, &f);
         if (r < 0) {
+            /*没有找到文件，退出*/
                 if (ignore_enoent && r == -ENOENT)
                         return 0;
 
@@ -83,6 +87,7 @@ static int apply_file(struct kmod_ctx *ctx, const char *path, bool ignore_enoent
                 char *l;
                 int k;
 
+                /*自此文件中读取一行*/
                 k = read_line(f, LONG_LINE_MAX, &line);
                 if (k < 0)
                         return log_error_errno(k, "Failed to read file '%s': %m", path);
@@ -93,9 +98,10 @@ static int apply_file(struct kmod_ctx *ctx, const char *path, bool ignore_enoent
                 if (isempty(l))
                         continue;
                 if (strchr(COMMENTS, *l))
+                    /*跳过注释行*/
                         continue;
 
-                k = module_load_and_warn(ctx, l, true);
+                k = module_load_and_warn(ctx, l/*要加载的模块名*/, true);
                 if (k < 0 && r >= 0)
                         r = k;
         }
@@ -190,6 +196,7 @@ static int run(int argc, char *argv[]) {
         if (argc > optind) {
                 int i;
 
+                /*按参数指定的文件名进行模块加载*/
                 for (i = optind; i < argc; i++) {
                         k = apply_file(ctx, argv[i], false);
                         if (k < 0 && r == 0)
@@ -206,6 +213,7 @@ static int run(int argc, char *argv[]) {
                                 r = k;
                 }
 
+                /*查找modules-load.d目录下，所以.conf后缀的文件*/
                 k = conf_files_list_nulstr(&files, ".conf", NULL, 0, conf_file_dirs);
                 if (k < 0) {
                         log_error_errno(k, "Failed to enumerate modules-load.d files: %m");
@@ -214,6 +222,7 @@ static int run(int argc, char *argv[]) {
                         return r;
                 }
 
+                /*逐个加载这些文件指定的module*/
                 STRV_FOREACH(fn, files) {
                         k = apply_file(ctx, *fn, true);
                         if (k < 0 && r == 0)
@@ -224,4 +233,5 @@ static int run(int argc, char *argv[]) {
         return r;
 }
 
+/*main函数定义*/
 DEFINE_MAIN_FUNCTION(run);

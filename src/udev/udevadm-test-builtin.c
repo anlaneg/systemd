@@ -74,6 +74,7 @@ int builtin_main(int argc, char *argv[], void *userdata) {
 
         udev_builtin_init();
 
+        /*通过命令字符串查询对应的命令index*/
         cmd = udev_builtin_lookup(arg_command);
         if (cmd < 0) {
                 log_error("Unknown command '%s'", arg_command);

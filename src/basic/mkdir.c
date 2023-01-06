@@ -74,6 +74,7 @@ int mkdir_safe_internal(const char *path, mode_t mode, uid_t uid, gid_t gid, Mkd
         return 0;
 }
 
+/*创建目录$pathname*/
 int mkdir_errno_wrapper(const char *pathname, mode_t mode) {
         if (mkdir(pathname, mode) < 0)
                 return -errno;

@@ -238,6 +238,7 @@ static int manager_connect_udev(Manager *m) {
         if (r < 0)
                 return log_error_errno(r, "Failed to attach event to device monitor: %m");
 
+        /*设置消息处理函数*/
         r = sd_device_monitor_start(m->device_monitor, manager_udev_process_link, m);
         if (r < 0)
                 return log_error_errno(r, "Failed to start device monitor: %m");
