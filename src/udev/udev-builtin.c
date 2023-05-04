@@ -38,6 +38,7 @@ void udev_builtin_init(void) {
         if (initialized)
                 return;
 
+        /*初始化所有内置命令*/
         for (i = 0; i < _UDEV_BUILTIN_MAX; i++)
                 if (builtins[i] && builtins[i]->init)
                         builtins[i]->init();
@@ -51,6 +52,7 @@ void udev_builtin_exit(void) {
         if (!initialized)
                 return;
 
+        /*针对所有内置命令调用exit*/
         for (i = 0; i < _UDEV_BUILTIN_MAX; i++)
                 if (builtins[i] && builtins[i]->exit)
                         builtins[i]->exit();
@@ -61,6 +63,7 @@ void udev_builtin_exit(void) {
 bool udev_builtin_validate(void) {
         unsigned i;
 
+        /*针对所有内置命令调用validate*/
         for (i = 0; i < _UDEV_BUILTIN_MAX; i++)
                 if (builtins[i] && builtins[i]->validate && builtins[i]->validate())
                         return true;
@@ -70,11 +73,13 @@ bool udev_builtin_validate(void) {
 void udev_builtin_list(void) {
         unsigned i;
 
+        /*针对所有内置命令显示命令及帮助信息*/
         for (i = 0; i < _UDEV_BUILTIN_MAX; i++)
                 if (builtins[i])
                         fprintf(stderr, "  %-14s  %s\n", builtins[i]->name, builtins[i]->help);
 }
 
+/*返回指定内置命令的名称*/
 const char *udev_builtin_name(enum udev_builtin_cmd cmd) {
         assert(cmd >= 0 && cmd < _UDEV_BUILTIN_MAX);
 
@@ -84,6 +89,7 @@ const char *udev_builtin_name(enum udev_builtin_cmd cmd) {
         return builtins[cmd]->name;
 }
 
+/*检查给定cmd是否仅需要运行一次*/
 bool udev_builtin_run_once(enum udev_builtin_cmd cmd) {
         assert(cmd >= 0 && cmd < _UDEV_BUILTIN_MAX);
 
@@ -109,6 +115,7 @@ enum udev_builtin_cmd udev_builtin_lookup(const char *command) {
         return _UDEV_BUILTIN_INVALID;
 }
 
+/*执行内建命令*/
 int udev_builtin_run(sd_device *dev, enum udev_builtin_cmd cmd/*内建的命令index*/, const char *command, bool test) {
         _cleanup_strv_free_ char **argv = NULL;
 

@@ -601,6 +601,7 @@ static int condition_test_null(Condition *c) {
 
 int condition_test(Condition *c) {
 
+	/*定义一组函数指针*/
         static int (*const condition_tests[_CONDITION_TYPE_MAX])(Condition *c) = {
                 [CONDITION_PATH_EXISTS] = condition_test_path_exists,
                 [CONDITION_PATH_EXISTS_GLOB] = condition_test_path_exists_glob,
@@ -633,6 +634,7 @@ int condition_test(Condition *c) {
         assert(c->type >= 0);
         assert(c->type < _CONDITION_TYPE_MAX);
 
+        /*按照condition type选择对应的回调，并调用*/
         r = condition_tests[c->type](c);
         if (r < 0) {
                 c->result = CONDITION_ERROR;

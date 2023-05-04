@@ -391,6 +391,7 @@ static int worker_process_device(Manager *manager, sd_device *dev) {
         assert(manager);
         assert(dev);
 
+        /*取此设备对应的event seqnum及action*/
         r = sd_device_get_property_value(dev, "SEQNUM", &seqnum);
         if (r < 0)
                 return log_device_debug_errno(dev, r, "Failed to get SEQNUM: %m");
@@ -399,8 +400,10 @@ static int worker_process_device(Manager *manager, sd_device *dev) {
         if (r < 0)
                 return log_device_debug_errno(dev, r, "Failed to get ACTION: %m");
 
+        /*显示seqnum与action*/
         log_device_debug(dev, "Processing device (SEQNUM=%s, ACTION=%s)", seqnum, action);
 
+        /*申请udev_event*/
         udev_event = udev_event_new(dev, arg_exec_delay_usec, manager->rtnl);
         if (!udev_event)
                 return -ENOMEM;
@@ -410,7 +413,7 @@ static int worker_process_device(Manager *manager, sd_device *dev) {
                 return r;
 
         /* apply rules, create node, symlinks */
-        udev_event_execute_rules(udev_event, arg_event_timeout_usec, manager->properties, manager->rules);
+        udev_event_execute_rules(udev_event, arg_event_timeout_usec, manager->properties, manager->rules/*规则列表*/);
         udev_event_execute_run(udev_event, arg_event_timeout_usec);
 
         if (!manager->rtnl)
@@ -1691,13 +1694,15 @@ static int main_loop(Manager *manager) {
         if (r < 0)
                 return log_error_errno(r, "Failed to create post event source: %m");
 
+        /*内置命令初始化*/
         udev_builtin_init();
 
         /*加载udev规则文件，填充manager->rules*/
-        r = udev_rules_new(&manager->rules, arg_resolve_name_timing);
+        r = udev_rules_new(&manager->rules/*出参，加载生成的所有规则*/, arg_resolve_name_timing);
         if (!manager->rules)
                 return log_error_errno(r, "Failed to read udev rules: %m");
 
+        /*处理static_node创建*/
         r = udev_rules_apply_static_dev_perms(manager->rules);
         if (r < 0)
                 log_error_errno(r, "Failed to apply permissions on static device nodes: %m");

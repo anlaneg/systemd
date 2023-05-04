@@ -14,13 +14,13 @@ struct sd_device {
 
         sd_device *parent;
 
-        OrderedHashmap *properties;
+        OrderedHashmap *properties;/*非db属性存储于此处，例如uevent上传的属性列表*/
         Iterator properties_iterator;
         uint64_t properties_generation; /* changes whenever the properties are changed */
         uint64_t properties_iterator_generation; /* generation when iteration was started */
 
         /* the subset of the properties that should be written to the db */
-        OrderedHashmap *properties_db;
+        OrderedHashmap *properties_db;/*db属性存储于此处。*/
 
         Hashmap *sysattr_values; /* cached sysattr values */
 
@@ -73,6 +73,7 @@ struct sd_device {
         bool subsystem_set:1; /* don't reread subsystem */
         bool driver_subsystem_set:1; /* don't reread subsystem */
         bool driver_set:1; /* don't reread driver */
+        /*标记uevent已自设备中读取*/
         bool uevent_loaded:1; /* don't reread uevent */
         bool db_loaded; /* don't reread db */
 

@@ -57,9 +57,9 @@ struct UdevRules {
         ResolveNameTiming resolve_name_timing;
 
         /* every key in the rules file becomes a token */
-        struct token *tokens;
-        size_t token_cur;/*指向待填充的tokens数组位置*/
-        size_t token_max;
+        struct token *tokens;/*token数组，用于保存规则*/
+        size_t token_cur;/*指向tokens数组当前待填充位置（即有效长度）*/
+        size_t token_max;/*当前token内存元素容量的最大值*/
 
         /* all key strings are copied and de-duplicated in a single continuous string buffer */
         struct strbuf *strbuf;
@@ -77,7 +77,8 @@ static char *rules_str(UdevRules *rules, unsigned off) {
         return rules->strbuf->buf + off;
 }
 
-static unsigned rules_add_string(UdevRules *rules, const char *s/*文件名*/) {
+static unsigned rules_add_string(UdevRules *rules, const char *s) {
+		/*向string buffer中添加字符串，返回其对应的位置*/
         return strbuf_add_string(rules->strbuf, s, strlen(s));
 }
 
@@ -116,35 +117,72 @@ enum token_type {
         TK_UNSET,
         TK_RULE,
 
+		/*对应关键字：ACTION*/
         TK_M_ACTION,                    /* val */
+		/*对应关键字：DEVPATH*/
         TK_M_DEVPATH,                   /* val */
+		/*对应关键字：KERNEL*/
         TK_M_KERNEL,                    /* val */
+		/*对应关键字：NAME，注意这种OP均为匹配类，故有M标记*/
         TK_M_DEVLINK,                   /* val */
+		/*对应关键字：SYMLINK，注意这种OP均为匹配类，故有M标记*/
         TK_M_NAME,                      /* val */
+		/*对应关键字：ENV，注意这种OP均为匹配类，故有M标记*/
         TK_M_ENV,                       /* val, attr */
+		/*对应关键字：TAG，注意这种OP均为匹配类，故有M标记*/
         TK_M_TAG,                       /* val */
+		/*对应的关键字："subsystem", "bus", "class"，推荐：subsystem*/
         TK_M_SUBSYSTEM,                 /* val */
+		/*对应关键字：DRIVER*/
         TK_M_DRIVER,                    /* val */
         TK_M_WAITFOR,                   /* val */
+		/*对应关键字：ATTR{attr} $OP val,设置属性并指明attr，注意这种OP均为匹配类，故有M标记*/
         TK_M_ATTR,                      /* val, attr */
+		/*对应关键字：SYSCTL{attr} $OP val,设置属性并指明attr，注意这种OP均为匹配类，故有M标记*/
         TK_M_SYSCTL,                    /* val, attr */
 
         TK_M_PARENTS_MIN,
+		/*对应关键字：KERNELS*/
         TK_M_KERNELS,                   /* val */
+		/*对应关键字：SUBSYSTEMS*/
         TK_M_SUBSYSTEMS,                /* val */
+		/*对应关键字：DRIVERS*/
         TK_M_DRIVERS,                   /* val */
+		/*对应关键字：ATTRS{attr} $OP val,设置属性并指明attr*/
         TK_M_ATTRS,                     /* val, attr */
+		/*对应关键字：TAGS*/
         TK_M_TAGS,                      /* val */
         TK_M_PARENTS_MAX,
-
+		/*对应关键字：TEST，有两种表示，如果有mode,则为TEST{8进制数字},否则为TEST*/
         TK_M_TEST,                      /* val, mode_t */
+		/*对应关键字：PROGRAM*/
         TK_M_PROGRAM,                   /* val */
+		/*对应关键字：IMPORT{attr} op val
+		 * 1。当attr为file时，使用此标记
+		 * */
         TK_M_IMPORT_FILE,               /* val */
+		/*对应关键字：IMPORT{attr} op val
+				 * 1。当attr为program时，且给出绝对路径时使用此标记
+				 * */
         TK_M_IMPORT_PROG,               /* val */
+		/*对应关键字：IMPORT{attr} op val
+		 * 1。当attr为program时，且未给出绝对路径时回退到内置命令
+		 * 2。当attr为builtin时
+		 * */
         TK_M_IMPORT_BUILTIN,            /* val */
+		/*对应关键字：IMPORT{attr} op val
+		 * 1。当attr为db时，使用此标记
+		 * */
         TK_M_IMPORT_DB,                 /* val */
+		/*对应关键字：IMPORT{attr} op val
+		 * 1。当attr为cmdline时，使用此标记
+		 * */
         TK_M_IMPORT_CMDLINE,            /* val */
+		/*对应关键字：IMPORT{attr} op val
+		 * 1。当attr为parent时，使用此标记
+		 * */
         TK_M_IMPORT_PARENT,             /* val */
+		/*对应关键字：RESULT*/
         TK_M_RESULT,                    /* val */
         TK_M_MAX,
 
@@ -153,22 +191,34 @@ enum token_type {
         TK_A_DB_PERSIST,
         TK_A_INOTIFY_WATCH,             /* int */
         TK_A_DEVLINK_PRIO,              /* int */
+		/*对应关键字：OWNER,且指定的不为uid_t格式的参数*/
         TK_A_OWNER,                     /* val */
         TK_A_GROUP,                     /* val */
         TK_A_MODE,                      /* val */
+		/*对应关键字：OWNER,且指定的为uid_t格式的参数*/
         TK_A_OWNER_ID,                  /* uid_t */
         TK_A_GROUP_ID,                  /* gid_t */
         TK_A_MODE_ID,                   /* mode_t */
+		/*对应关键字：TAG，注意这种OP均非匹配类，故有A标记*/
         TK_A_TAG,                       /* val */
         TK_A_STATIC_NODE,               /* val */
+		/*对应关键字：SECLABEL{attr} $OP val,设置属性并指明attr*/
         TK_A_SECLABEL,                  /* val, attr */
+		/*对应关键字：ENV，注意这种OP均非匹配类，故有A标记*/
         TK_A_ENV,                       /* val, attr */
+		/*对应关键字：NAME，注意这种OP均非匹配类，故有A标记*/
         TK_A_NAME,                      /* val */
+		/*对应关键字：SYMLINK，注意这种OP均非匹配类，故有A标记*/
         TK_A_DEVLINK,                   /* val */
+		/*对应关键字：ATTR{attr} $OP val,设置属性并指明attr，注意这种OP均非匹配类，故有A标记*/
         TK_A_ATTR,                      /* val, attr */
+		/*对应关键字：SYSCTL{attr} $OP val,设置属性并指明attr，注意这种OP均非匹配类，故有A标记*/
         TK_A_SYSCTL,                    /* val, attr */
+		/*对应关键字：RUN{attr} $OP val,设置属性并指明attr，当attr为builtin时使用此标记*/
         TK_A_RUN_BUILTIN,               /* val, bool */
+		/*对应关键字：RUN{attr} $OP val,设置属性并指明attr，当attr为program时使用此标记*/
         TK_A_RUN_PROGRAM,               /* val, bool */
+		/*对应关键字：GOTO val ,注意op将被忽略*/
         TK_A_GOTO,                      /* size_t */
 
         TK_END,
@@ -180,28 +230,28 @@ struct token {
                 unsigned char type;                /* same in rule and key */
                 struct {
                         enum token_type type:8;
-                        bool can_set_name:1;
+                        bool can_set_name:1;/*标记有NAME关键字*/
                         bool has_static_node:1;
                         unsigned unused:6;
                         unsigned short token_count;
-                        unsigned label_off;
+                        unsigned label_off;/*label关键字对应的value字符串在buffer中的offset*/
                         unsigned short filename_off;/*文件名字符串在buffer中的offset*/
                         unsigned short filename_line;/*行号*/
                 } rule;
                 struct {
                         enum token_type type:8;/*关键字类型*/
                         enum operation_type op:8;/*操作符类型*/
-                        enum string_glob_type glob:8;/*glob类型*/
+                        enum string_glob_type glob:8;/*glob类型，例如是纯字符或者有glob匹配符号*/
                         enum string_subst_type subst:4;/*value中替代字符串*/
                         enum string_subst_type attrsubst:4;/*属性替代*/
                         unsigned value_off;/*value字符串在buffer中的offset*/
                         union {
                             /*不同关键字类型有另一组值*/
-                                unsigned attr_off;
-                                unsigned rule_goto;
+                                unsigned attr_off;/*属性字符串在buffer中的offset*/
+                                unsigned rule_goto;/*指明goto的目标规则*/
                                 mode_t mode;
-                                uid_t uid;
-                                gid_t gid;
+                                uid_t uid;/*owner id号*/
+                                gid_t gid;/*group id号*/
                                 int devlink_prio;
                                 int watch;
                                 enum udev_builtin_cmd builtin_cmd;
@@ -441,9 +491,11 @@ static void dump_token(UdevRules *rules, struct token *token) {}
 static void dump_rules(UdevRules *rules) {}
 #endif /* ENABLE_DEBUG_UDEV */
 
+/*向规则rules中添加token*/
 static int add_token(UdevRules *rules, struct token *token) {
         /* grow buffer if needed */
         if (!GREEDY_REALLOC(rules->tokens, rules->token_max, rules->token_cur + 1))
+        	/*增长buffer失败*/
                 return -ENOMEM;
 
         /*复制token到rules->tokens*/
@@ -811,14 +863,15 @@ static const char *get_key_attribute(char *str) {
 }
 
 /*添加规则中的一组key,op,value,data*/
-static int rule_add_key(struct rule_tmp *rule_tmp, enum token_type type/*udev规则关键字*/,
-                        enum operation_type op/*关键字对应的操作*/,
-                        const char *value, const void *data) {
+static int rule_add_key(struct rule_tmp *rule_tmp, enum token_type type/*udev规则关键字(操作）,例如action*/,
+                        enum operation_type op/*关键字对应的操作，例如'=='*/,
+                        const char *value/*操作对应的值*/, const void *data/*上层传入的与type相关的另一参数*/) {
+		/*当前待填充的token*/
         struct token *token = rule_tmp->token + rule_tmp->token_cur;
         const char *attr = NULL;
 
         if (rule_tmp->token_cur >= ELEMENTSOF(rule_tmp->token))
-            /*超过规则的token总数*/
+            /*超过规则的token最大数*/
                 return -E2BIG;
 
         memzero(token, sizeof(struct token));
@@ -852,10 +905,11 @@ static int rule_add_key(struct rule_tmp *rule_tmp, enum token_type type/*udev规
         case TK_M_TAG:
         case TK_A_TAG:
         case TK_A_STATIC_NODE:
-            /*记录value的字符串*/
+            /*记录value的字符串在rule_tmp->rules中的位置*/
                 token->key.value_off = rules_add_string(rule_tmp->rules, value);
                 break;
         case TK_M_IMPORT_BUILTIN:
+        	/*记录value的字符串在rule_tmp->rules中的位置*/
                 token->key.value_off = rules_add_string(rule_tmp->rules, value);
                 token->key.builtin_cmd = *(enum udev_builtin_cmd *)data;/*内建的命令*/
                 break;
@@ -867,7 +921,7 @@ static int rule_add_key(struct rule_tmp *rule_tmp, enum token_type type/*udev规
         case TK_A_SYSCTL:
         case TK_A_ENV:
         case TK_A_SECLABEL:
-            /*记录value及属性（来源于data)*/
+            	/*记录value及属性（来源于data)*/
                 attr = data;
                 token->key.value_off = rules_add_string(rule_tmp->rules, value);
                 token->key.attr_off = rules_add_string(rule_tmp->rules, attr);
@@ -913,8 +967,8 @@ static int rule_add_key(struct rule_tmp *rule_tmp, enum token_type type/*udev规
                 enum string_glob_type glob;
                 bool has_split, has_glob;
 
-                has_split = strchr(value, '|');
-                has_glob = string_is_glob(value);
+                has_split = strchr(value, '|');/*字符串中有分隔符*/
+                has_glob = string_is_glob(value);/*字符串中有glob符号*/
                 if (has_split && has_glob)
                         glob = GL_SPLIT_GLOB;
                 else if (has_split)
@@ -925,7 +979,7 @@ static int rule_add_key(struct rule_tmp *rule_tmp, enum token_type type/*udev规
                         else
                                 glob = GL_GLOB;
                 } else
-                        glob = GL_PLAIN;
+                        glob = GL_PLAIN;/*纯字符*/
 
                 token->key.glob = glob;
         }
@@ -1002,8 +1056,8 @@ static int sort_token(UdevRules *rules, struct rule_tmp *rule_tmp) {
 #define LOG_AND_RETURN(fmt, ...) { LOG_RULE_ERROR(fmt, __VA_ARGS__); return; }
 #define LOG_AND_RETURN_ADD_KEY LOG_AND_RETURN("Temporary rule array too small, aborting event processing with %zu items", rule_tmp.token_cur);
 
-//解析udev规则文件
-static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
+//解析udev规则文件，待解析的内容是"KEY" "OP" "VALUE"格式的内容.
+static void add_rule(UdevRules *rules/*出参，对应的规则*/, char *line/*待解析的规则行*/,
                      const char *filename/*规则文件名称*/, unsigned filename_off/*规则文件在字符串buffer中的偏移量*/, unsigned lineno/*规则行号*/) {
         char *linepos;
         const char *attr;
@@ -1081,6 +1135,7 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                                 if (!streq(value, "subsystem"))
                                         LOG_RULE_WARNING("'%s' must be specified as 'subsystem'; please fix", value);
 
+                                /*子系统*/
                                 r = rule_add_key(&rule_tmp, TK_M_SUBSYSTEM, op, "subsystem|class|bus", NULL);
                         } else
                                 r = rule_add_key(&rule_tmp, TK_M_SUBSYSTEM, op, value, NULL);
@@ -1091,6 +1146,7 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                         if (op > OP_MATCH_MAX)
                                 LOG_AND_RETURN("Invalid %s operation", key);
 
+                        /*添加driver*/
                         if (rule_add_key(&rule_tmp, TK_M_DRIVER, op, value, NULL) < 0)
                                 LOG_AND_RETURN_ADD_KEY;
 
@@ -1101,25 +1157,28 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                                 LOG_AND_RETURN("Failed to parse %s attribute", "ATTR");
 
                         if (op == OP_REMOVE)
+                        	/*针对ATTR{xx}这种不容许remove操作*/
                                 LOG_AND_RETURN("Invalid %s operation", "ATTR");
 
                         /*以ATTR{开头的，指明attr具体指代*/
                         if (op < OP_MATCH_MAX)
-                                r = rule_add_key(&rule_tmp, TK_M_ATTR, op, value, attr);
+                                r = rule_add_key(&rule_tmp, TK_M_ATTR, op/*属性对应的操作*/, value/*属性值*/, attr/*指定的属性*/);
                         else
                                 r = rule_add_key(&rule_tmp, TK_A_ATTR, op, value, attr);
                         if (r < 0)
                                 LOG_AND_RETURN_ADD_KEY;
 
                 } else if (startswith(key, "SYSCTL{")) {
-                    /*key以SYSCTL{开头，取其具体指定的attr*/
+                		/*key以SYSCTL{开头，取其具体指定的attr*/
                         attr = get_key_attribute(key + STRLEN("SYSCTL"));
                         if (!attr)
                                 LOG_AND_RETURN("Failed to parse %s attribute", "ATTR");
 
                         if (op == OP_REMOVE)
+                        	/*不支持remove*/
                                 LOG_AND_RETURN("Invalid %s operation", "ATTR");
 
+                        /*sysctl类*/
                         if (op < OP_MATCH_MAX)
                                 r = rule_add_key(&rule_tmp, TK_M_SYSCTL, op, value, attr);
                         else
@@ -1136,6 +1195,7 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                         if (op == OP_REMOVE)
                                 LOG_AND_RETURN("Invalid %s operation", "SECLABEL");
 
+                        /*seclable类*/
                         if (rule_add_key(&rule_tmp, TK_A_SECLABEL, op, value, attr) < 0)
                                 LOG_AND_RETURN_ADD_KEY;
 
@@ -1217,6 +1277,7 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                                 LOG_AND_RETURN_ADD_KEY;
 
                 } else if (streq(key, "TAG")) {
+                	/*TAG关键字*/
                         if (op < OP_MATCH_MAX)
                                 r = rule_add_key(&rule_tmp, TK_M_TAG, op, value, NULL);
                         else
@@ -1225,6 +1286,7 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                                 LOG_AND_RETURN_ADD_KEY;
 
                 } else if (streq(key, "PROGRAM")) {
+                	/*不支持remove操作*/
                         if (op == OP_REMOVE)
                                 LOG_AND_RETURN("Invalid %s operation", key);
 
@@ -1246,9 +1308,11 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                                 continue;
                         }
                         if (op == OP_REMOVE)
+                        	/*不支持remove操作*/
                                 LOG_AND_RETURN("Invalid %s operation", "IMPORT");
 
                         if (streq(attr, "program")) {
+                        	/*属性为program时查内建命令*/
                                 /* find known built-in command */
                                 if (value[0] != '/') {
                                     /*value不是绝对路径，查内建的cmd*/
@@ -1298,9 +1362,11 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
 
                         attr = get_key_attribute(key + STRLEN("TEST"));
                         if (attr) {
+                        	/*属性为8进制数字的情况*/
                                 mode = strtol(attr, NULL, 8);
                                 r = rule_add_key(&rule_tmp, TK_M_TEST, op, value, &mode);
                         } else
+                        	/*属性为空的情况*/
                                 r = rule_add_key(&rule_tmp, TK_M_TEST, op, value, NULL);
                         if (r < 0)
                                 LOG_AND_RETURN_ADD_KEY;
@@ -1313,6 +1379,7 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                                 LOG_AND_RETURN("Invalid %s operation", "RUN");
 
                         if (streq(attr, "builtin")) {
+                        	/*使用内置命令*/
                                 const enum udev_builtin_cmd cmd = udev_builtin_lookup(value);
 
                                 if (cmd < 0) {
@@ -1321,6 +1388,7 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                                 } else
                                         r = rule_add_key(&rule_tmp, TK_A_RUN_BUILTIN, op, value, &cmd);
                         } else if (streq(attr, "program")) {
+                        	/*使用外部程序*/
                                 const enum udev_builtin_cmd cmd = _UDEV_BUILTIN_MAX;
 
                                 r = rule_add_key(&rule_tmp, TK_A_RUN_PROGRAM, op, value, &cmd);
@@ -1332,12 +1400,14 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                                 LOG_AND_RETURN_ADD_KEY;
 
                 } else if (streq(key, "LABEL")) {
+                	/*LABEL关键字处理*/
                         if (op == OP_REMOVE)
                                 LOG_AND_RETURN("Invalid %s operation", key);
 
                         rule_tmp.rule.rule.label_off = rules_add_string(rules, value);
 
                 } else if (streq(key, "GOTO")) {
+                	/*goto不容许remove，但不区分op*/
                         if (op == OP_REMOVE)
                                 LOG_AND_RETURN("Invalid %s operation", key);
 
@@ -1378,6 +1448,7 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                         rule_tmp.rule.rule.can_set_name = true;
 
                 } else if (streq(key, "OWNER")) {
+                	/*owner关键字处理*/
                         uid_t uid;
 
                         if (op == OP_REMOVE)
@@ -1488,6 +1559,7 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
                         pos = strstr(value, "static_node=");
                         if (pos) {
                                 pos += STRLEN("static_node=");
+                                /*指明此规则为static_node*/
                                 if (rule_add_key(&rule_tmp, TK_A_STATIC_NODE, op, pos, NULL) < 0)
                                         LOG_AND_RETURN_ADD_KEY;
                                 rule_tmp.rule.rule.has_static_node = true;
@@ -1504,8 +1576,8 @@ static void add_rule(UdevRules *rules, char *line/*待解析的规则行*/,
 }
 
 //解析rule配置文件
-static int parse_file(UdevRules *rules, const char *filename/*rule配置文件*/) {
-        _cleanup_free_ char *continuation = NULL;
+static int parse_file(UdevRules *rules/*出参，依据配置生成rules*/, const char *filename/*rule配置文件*/) {
+        _cleanup_free_ char *continuation = NULL;/*续行符使能的行*/
         _cleanup_fclose_ FILE *f = NULL;
         bool ignore_line = false;
         size_t first_token, i;
@@ -1557,7 +1629,7 @@ static int parse_file(UdevRules *rules, const char *filename/*rule配置文件*/
                 len = strlen(line);
 
                 if (continuation && !ignore_line) {
-                    /*非忽略行，且continuation有值*/
+                    /*非忽略行，且上一行已指明续行（continuation有值）*/
                         if (strlen(continuation) + len >= UTIL_LINE_SIZE)
                             /*长度超限，定为忽略行*/
                                 ignore_line = true;
@@ -1588,40 +1660,45 @@ static int parse_file(UdevRules *rules, const char *filename/*rule配置文件*/
                         continue;
                 }
 
+                /*续行全部处理完成或者遇到的为非续行*/
                 if (ignore_line)
                         log_error("Line too long '%s':%u, ignored", filename, line_nr);
                 else if (len > 0)
-                	//添加规则
-                        add_rule(rules, line/*自文件中读取的配置行*/, filename/*文件名称*/, filename_off/*文件名在buffer的起始位置*/, line_nr);
+                		//添加规则，形成一条规则，规则由一组tokens组成
+                        add_rule(rules, line/*自文件中读取的配置行*/, filename/*文件名称*/, filename_off/*文件名在buffer的起始位置*/, line_nr/*行号*/);
 
+                /*如果存在续行，则释放*/
                 continuation = mfree(continuation);
                 ignore_line = false;
         }
 
+        /*所有规则内容均已解析完成，形成了一组rule*/
         /* link GOTOs to LABEL rules in this file to be able to fast-forward */
         for (i = first_token+1; i < rules->token_cur; i++) {
                 if (rules->tokens[i].type == TK_A_GOTO) {
                     /*针对goto,将label替换为规则*/
-                        char *label = rules_str(rules, rules->tokens[i].key.value_off);
+                        char *label = rules_str(rules, rules->tokens[i].key.value_off);/*取goto对应的value*/
                         size_t j;
 
                         for (j = i+1; j < rules->token_cur; j++) {
                                 if (rules->tokens[j].type != TK_RULE)
-                                        continue;
+                                        continue;/*跳过非规则*/
                                 if (rules->tokens[j].rule.label_off == 0)
-                                        continue;
+                                        continue;/*跳过规则未指定label的*/
                                 if (!streq(label, rules_str(rules, rules->tokens[j].rule.label_off)))
-                                        continue;
-                                rules->tokens[i].key.rule_goto = j;
+                                        continue;/*跳过label与目标不相等的*/
+                                rules->tokens[i].key.rule_goto = j;/*替换为要跳转的规则*/
                                 break;
                         }
                         if (rules->tokens[i].key.rule_goto == 0)
+                        	/*未找到要跳转的规则，报错*/
                                 log_error("GOTO '%s' has no matching label in: '%s'", label, filename);
                 }
         }
         return 0;
 }
 
+/*加载RULES_DIRS目录下所有.rules文件，读取每一行组成rule,所有文件的行合并，组成rules,完成goto解析（goto只能在文件中跳）*/
 int udev_rules_new(UdevRules **ret_rules/*出参，加载udev配置文件，生成的rules*/, ResolveNameTiming resolve_name_timing) {
         _cleanup_(udev_rules_freep) UdevRules *rules = NULL;
         _cleanup_strv_free_ char **files = NULL;
@@ -1640,7 +1717,7 @@ int udev_rules_new(UdevRules **ret_rules/*出参，加载udev配置文件，生�
         };
 
         /* init token array and string buffer */
-        rules->tokens = new(struct token, PREALLOC_TOKEN);
+        rules->tokens = new(struct token, PREALLOC_TOKEN);/*申请token数组*/
         if (!rules->tokens)
                 return -ENOMEM;
         rules->token_max = PREALLOC_TOKEN;
@@ -1666,9 +1743,9 @@ int udev_rules_new(UdevRules **ret_rules/*出参，加载udev配置文件，生�
 
         //遍历每个规则文件，解析规则文件，填充rules
         STRV_FOREACH(f, files)
-                parse_file(rules, *f);
+                parse_file(rules, *f);/*解析文件产生rules*/
 
-        struct token end_token = { .type = TK_END };
+        struct token end_token = { .type = TK_END };/*标记token结束*/
         add_token(rules, &end_token);/*添加end token*/
         log_debug("Rules contain %zu bytes tokens (%zu * %zu bytes), %zu bytes strings",
                   rules->token_max * sizeof(struct token), rules->token_max, sizeof(struct token), rules->strbuf->len);
@@ -1687,6 +1764,7 @@ int udev_rules_new(UdevRules **ret_rules/*出参，加载udev配置文件，生�
         rules->gids_cur = 0;
         rules->gids_max = 0;
 
+        /*显示所有规则*/
         dump_rules(rules);
         *ret_rules = TAKE_PTR(rules);/*返回读取规则文件生成的rules*/
         return 0;
@@ -1710,6 +1788,7 @@ bool udev_rules_check_timestamp(UdevRules *rules) {
 }
 
 static bool match_key(UdevRules *rules, struct token *token, const char *val) {
+	/*取规则中具体一个token 指明的value*/
         char *key_value = rules_str(rules, token->key.value_off);
         char *pos;
         bool match = false;
@@ -1719,13 +1798,16 @@ static bool match_key(UdevRules *rules, struct token *token, const char *val) {
 
         switch (token->key.glob) {
         case GL_PLAIN:
+        		/*key_value为纯字符串，检查与所给value是否完全相等*/
                 match = streq(key_value, val);
                 break;
         case GL_GLOB:
+        	/*key_value为glob，检查与所给value是否匹配*/
                 match = (fnmatch(key_value, val, 0) == 0);
                 break;
         case GL_SPLIT:
                 {
+                	/*key_value分隔的一组列表，逐个检查与所给value是否匹配*/
                         const char *s;
                         size_t len;
 
@@ -1769,6 +1851,7 @@ static bool match_key(UdevRules *rules, struct token *token, const char *val) {
                         break;
                 }
         case GL_SOMETHING:
+        		/*任意字符串匹配*/
                 match = (val[0] != '\0');
                 break;
         case GL_UNSET:
@@ -1829,8 +1912,9 @@ enum escape_type {
         ESCAPE_REPLACE,
 };
 
+/*依据收到的event应用规则*/
 int udev_rules_apply_to_event(
-                UdevRules *rules,
+                UdevRules *rules/*规则列表*/,
                 UdevEvent *event,
                 usec_t timeout_usec,
                 Hashmap *properties_list) {
@@ -1842,8 +1926,10 @@ int udev_rules_apply_to_event(
         int r;
 
         if (!rules->tokens)
+        	/*规则无内容，退出*/
                 return 0;
 
+        /*取设备对应的action*/
         r = sd_device_get_property_value(dev, "ACTION", &action);
         if (r < 0)
                 return r;
@@ -1853,7 +1939,7 @@ int udev_rules_apply_to_event(
                          sd_device_get_ifindex(dev, NULL) >= 0));
 
         /* loop through token list, match, run actions or forward to next rule */
-        cur = &rules->tokens[0];
+        cur = &rules->tokens[0];/*指向首个token*/
         rule = cur;
         for (;;) {
                 dump_token(rules, cur);
@@ -1868,6 +1954,7 @@ int udev_rules_apply_to_event(
                         break;
                 case TK_M_ACTION:
                         if (!match_key(rules, cur, action))
+                        	/*设置上传的action与规则不匹配*/
                                 goto nomatch;
                         break;
                 case TK_M_DEVPATH:
@@ -2138,6 +2225,7 @@ int udev_rules_apply_to_event(
                                          rules_str(rules, rule->rule.filename_off),
                                          rule->rule.filename_line);
 
+                        /*执行内建命令*/
                         r = udev_builtin_run(dev, cur->key.builtin_cmd, command, false);
                         if (r < 0) {
                                 /* remember failure */
@@ -2196,6 +2284,7 @@ int udev_rules_apply_to_event(
                         if (!match_key(rules, cur, event->program_result))
                                 goto nomatch;
                         break;
+                        /*以下为动作执行*/
                 case TK_A_STRING_ESCAPE_NONE:
                         esc = ESCAPE_NONE;
                         break;
@@ -2350,6 +2439,7 @@ int udev_rules_apply_to_event(
                         break;
                 }
                 case TK_A_ENV: {
+                	/*执行动作：添加新的ENV*/
                         char value_new[UTIL_NAME_SIZE];
                         const char *name, *value_old;
 
@@ -2398,15 +2488,18 @@ int udev_rules_apply_to_event(
                         break;
                 }
                 case TK_A_NAME: {
+                	/*指定了设备名称*/
                         char name_str[UTIL_PATH_SIZE];
                         const char *name;
                         int count;
 
+                        /*取名称对应的字符串*/
                         name = rules_str(rules, cur->key.value_off);
                         if (event->name_final)
                                 break;
                         if (cur->key.op == OP_ASSIGN_FINAL)
                                 event->name_final = true;
+                        /*解析name字符串，取得最后名称字符串*/
                         udev_event_apply_format(event, name, name_str, sizeof(name_str), false);
                         if (IN_SET(esc, ESCAPE_UNSET, ESCAPE_REPLACE)) {
                                 count = util_replace_chars(name_str, "/");
@@ -2422,6 +2515,8 @@ int udev_rules_apply_to_event(
                                                  rule->rule.filename_line);
                                 break;
                         }
+
+                        /*设置event->name为规则指定的名称*/
                         if (free_and_strdup(&event->name, name_str) < 0)
                                 return log_oom();
 
@@ -2539,12 +2634,13 @@ int udev_rules_apply_to_event(
                         break;
                 }
                 case TK_A_GOTO:
+                	/*执行动作，跳对应规则*/
                         if (cur->key.rule_goto == 0)
                                 break;
                         cur = &rules->tokens[cur->key.rule_goto];
                         continue;
                 case TK_END:
-                        return 0;
+                        return 0;/*此规则执行完成，退出*/
 
                 case TK_M_PARENTS_MIN:
                 case TK_M_PARENTS_MAX:
@@ -2558,6 +2654,7 @@ int udev_rules_apply_to_event(
                 cur++;
                 continue;
         nomatch:
+				/*由于某个token不匹配，尝试下一条规则*/
                 /* fast-forward to next rule */
                 cur = rule + rule->rule.token_count;/*匹配不成功，尝试下一个规则*/
         }
@@ -2579,6 +2676,7 @@ int udev_rules_apply_static_dev_perms(UdevRules *rules) {
         int r;
 
         if (!rules->tokens)
+        	/*无内容，退出*/
                 return 0;
 
         cur = &rules->tokens[0];
@@ -2586,11 +2684,13 @@ int udev_rules_apply_static_dev_perms(UdevRules *rules) {
         for (;;) {
                 switch (cur->type) {
                 case TK_RULE:
+                	/*当前token为规则*/
                         /* current rule */
                         rule = cur;
 
                         /* skip rules without a static_node tag */
                         if (!rule->rule.has_static_node)
+                        	/*此规则没有static_node,尝试下一条，不处理*/
                                 goto next;
 
                         uid = 0;
@@ -2608,6 +2708,7 @@ int udev_rules_apply_static_dev_perms(UdevRules *rules) {
                         mode = cur->key.mode;
                         break;
                 case TK_A_TAG:
+                	/*取此规则对应的TAG指定的内容*/
                         r = strv_extend(&tags, rules_str(rules, cur->key.value_off));
                         if (r < 0)
                                 goto finish;

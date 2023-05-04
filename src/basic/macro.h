@@ -349,12 +349,14 @@ static inline int __coverity_check__(int condition) {
         };
 #endif
 
+/*expr必须为真，否则将打log并返回*/
 #define assert_return(expr, r)                                          \
         do {                                                            \
                 if (!assert_log(expr, #expr))                           \
                         return (r);                                     \
         } while (false)
 
+/*expr必须为真，否则将打log设置errno后并返回*/
 #define assert_return_errno(expr, r, err)                               \
         do {                                                            \
                 if (!assert_log(expr, #expr)) {                         \

@@ -354,6 +354,7 @@ ssize_t udev_event_apply_format(UdevEvent *event,
                 ssize_t subst_len;
 
                 while (from[0] != '\0') {
+                		/*遇到$符，进行变量解析*/
                         if (from[0] == '$') {
                                 /* substitute named variable */
                                 unsigned i;
@@ -402,6 +403,7 @@ copy:
 subst:
                 /* extract possible $format{attr} */
                 if (from[0] == '{') {
+                	/*遇到属性名称，取相应的attr*/
                         unsigned i;
 
                         from++;
@@ -693,6 +695,7 @@ int udev_event_spawn(UdevEvent *event,
         return r; /* 0 for success, and positive if the program failed */
 }
 
+/*处理接口重命名*/
 static int rename_netif(UdevEvent *event) {
         sd_device *dev = event->dev;
         const char *action, *oldname;
@@ -700,12 +703,15 @@ static int rename_netif(UdevEvent *event) {
         int ifindex, r;
 
         if (!event->name)
+        	/*没有给定新名称，直接返回*/
                 return 0; /* No new name is requested. */
 
+        /*取旧的名称*/
         r = sd_device_get_sysname(dev, &oldname);
         if (r < 0)
                 return log_device_error_errno(dev, r, "Failed to get sysname: %m");
 
+        /*新旧名称相等，直接返回*/
         if (streq(event->name, oldname))
                 return 0; /* The interface name is already requested name. */
 
@@ -713,20 +719,24 @@ static int rename_netif(UdevEvent *event) {
         if (r < 0)
                 return log_device_error_errno(dev, r, "Failed to get property 'ACTION': %m");
 
+        /*rename仅对add操作有效*/
         if (!streq(action, "add"))
                 return 0; /* Rename the interface only when it is added. */
 
+        /*取接口ifindex*/
         r = sd_device_get_ifindex(dev, &ifindex);
         if (r == -ENOENT)
                 return 0; /* Device is not a network interface. */
         if (r < 0)
                 return log_device_error_errno(dev, r, "Failed to get ifindex: %m");
 
+        /*要求kernel设置接口名称*/
         strscpy(name, IFNAMSIZ, event->name);
         r = rtnl_set_link_name(&event->rtnl, ifindex, name);
         if (r < 0)
                 return log_device_error_errno(dev, r, "Failed to rename network interface %i from '%s' to '%s': %m", ifindex, oldname, name);
 
+        /*kernel名称已变更，更新缓存的名称*/
         r = device_rename(dev, event->name);
         if (r < 0)
                 return log_warning_errno(r, "Network interface %i is renamed from '%s' to '%s', but could not update sd_device object: %m", ifindex, oldname, name);
@@ -835,6 +845,7 @@ int udev_event_execute_rules(UdevEvent *event,
         if (r < 0)
                 return log_device_error_errno(dev, r, "Failed to get property 'ACTION': %m");
 
+        /*action为remove执行remove指令*/
         if (streq(action, "remove")) {
                 event_execute_rules_on_remove(event, timeout_usec, properties_list, rules);
                 return 0;
@@ -860,8 +871,10 @@ int udev_event_execute_rules(UdevEvent *event,
                         (void) udev_watch_end(event->dev_db_clone);
         }
 
-        (void) udev_rules_apply_to_event(rules, event, timeout_usec, properties_list);
+        /*针对event执行规则列表*/
+        (void) udev_rules_apply_to_event(rules/*规则列表*/, event/*事件*/, timeout_usec, properties_list);
 
+        /*更新netif的名称（如果需要的话）*/
         (void) rename_netif(event);
         (void) update_devnode(event);
 

@@ -86,9 +86,11 @@ int device_add_property_aux(sd_device *device, const char *_key, const char *_va
             /*如果为db,则存入到properties_db中*/
                 properties = &device->properties_db;
         else
+        	/*uevent传入的属性，则存入此中*/
                 properties = &device->properties;
 
         if (_value) {
+        	/*value有值的情况，*/
                 _cleanup_free_ char *key = NULL, *value = NULL, *old_key = NULL, *old_value = NULL;
                 int r;
 
@@ -106,6 +108,7 @@ int device_add_property_aux(sd_device *device, const char *_key, const char *_va
 
                 old_value = ordered_hashmap_get2(*properties, key, (void**) &old_key);
 
+                /*替换为新的value*/
                 r = ordered_hashmap_replace(*properties, key, value);
                 if (r < 0)
                         return r;
@@ -113,6 +116,7 @@ int device_add_property_aux(sd_device *device, const char *_key, const char *_va
                 key = NULL;
                 value = NULL;
         } else {
+        	/*value无值，将对应的key直接移除*/
                 _cleanup_free_ char *key = NULL;
                 _cleanup_free_ char *value = NULL;
 
@@ -128,7 +132,7 @@ int device_add_property_aux(sd_device *device, const char *_key, const char *_va
 }
 
 int device_add_property_internal(sd_device *device, const char *key, const char *value) {
-        return device_add_property_aux(device, key, value, false);
+        return device_add_property_aux(device, key, value, false/*非db*/);
 }
 
 int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
@@ -327,6 +331,7 @@ int device_set_devtype(sd_device *device, const char *_devtype) {
         if (!devtype)
                 return -ENOMEM;
 
+        /*添加devtype属性*/
         r = device_add_property_internal(device, "DEVTYPE", devtype);
         if (r < 0)
                 return r;
@@ -342,10 +347,12 @@ int device_set_ifindex(sd_device *device, const char *_ifindex) {
         assert(device);
         assert(_ifindex);
 
+        /*将ifindex转换为数字*/
         r = parse_ifindex(_ifindex, &ifindex);
         if (r < 0)
                 return r;
 
+        /*添加ifindex属性*/
         r = device_add_property_internal(device, "IFINDEX", _ifindex);
         if (r < 0)
                 return r;
@@ -363,6 +370,7 @@ int device_set_devname(sd_device *device, const char *_devname) {
         assert(_devname);
 
         if (_devname[0] != '/') {
+        	/*devname不以'/'开头的，则加上/dev前缀*/
                 r = asprintf(&devname, "/dev/%s", _devname);
                 if (r < 0)
                         return -ENOMEM;
@@ -388,6 +396,7 @@ int device_set_devmode(sd_device *device, const char *_devmode) {
         assert(device);
         assert(_devmode);
 
+        /*先转换devmode,再添加devmode属性*/
         r = safe_atou(_devmode, &devmode);
         if (r < 0)
                 return r;
@@ -417,6 +426,7 @@ int device_set_devnum(sd_device *device, const char *major, const char *minor) {
         if (!maj)
                 return 0;
 
+        /*校验major,minor并填充*/
         if (minor) {
                 r = safe_atou(minor, &min);
                 if (r < 0)
@@ -448,26 +458,33 @@ static int handle_uevent_line(sd_device *device, const char *key, const char *va
         assert(minor);
 
         if (streq(key, "DEVTYPE")) {
+        	/*uevent指明DEVTYPE属性*/
                 r = device_set_devtype(device, value);
                 if (r < 0)
                         return r;
         } else if (streq(key, "IFINDEX")) {
+        	/*uevent指明IFINDEX属性*/
                 r = device_set_ifindex(device, value);
                 if (r < 0)
                         return r;
         } else if (streq(key, "DEVNAME")) {
+        	/*uevent指明DEVNAME属性*/
                 r = device_set_devname(device, value);
                 if (r < 0)
                         return r;
         } else if (streq(key, "DEVMODE")) {
+        	/*uevent指明DEVMODE属性*/
                 r = device_set_devmode(device, value);
                 if (r < 0)
                         return r;
         } else if (streq(key, "MAJOR"))
+        	/*uevent指明MAJOR属性*/
                 *major = value;
         else if (streq(key, "MINOR"))
+        	/*uevent指明MINOR属性*/
                 *minor = value;
         else {
+        	/*uevent指明的其它属性*/
                 r = device_add_property_internal(device, key, value);
                 if (r < 0)
                         return r;
@@ -476,6 +493,7 @@ static int handle_uevent_line(sd_device *device, const char *key, const char *va
         return 0;
 }
 
+/*读取设备下的uevent文件，并解析其内容填充到device->properties*/
 int device_read_uevent_file(sd_device *device) {
         _cleanup_free_ char *uevent = NULL;
         const char *syspath, *key = NULL, *value = NULL, *major = NULL, *minor = NULL;
@@ -501,6 +519,7 @@ int device_read_uevent_file(sd_device *device) {
         if (r < 0)
                 return r;
 
+        /*打开设备下的uevent文件，并读取uevent结构体*/
         path = strjoina(syspath, "/uevent");
 
         r = read_full_file(path, &uevent, &uevent_len);
@@ -520,6 +539,7 @@ int device_read_uevent_file(sd_device *device) {
         for (i = 0; i < uevent_len; i++)
                 switch (state) {
                 case PRE_KEY:
+                	/*此状态下，检查uevnet[i]直到遇到非'\r'或'\n'，切到key状态*/
                         if (!strchr(NEWLINE, uevent[i])) {
                                 key = &uevent[i];
 
@@ -528,6 +548,8 @@ int device_read_uevent_file(sd_device *device) {
 
                         break;
                 case KEY:
+                	/*此状态下，如果遇到‘=’，则切换到pre_value状态，并将'='变更为'\0'完成key识别
+                	 * 如果遇到'\r'或者'\n',则切到pre_key状态*/
                         if (uevent[i] == '=') {
                                 uevent[i] = '\0';
 
@@ -541,14 +563,17 @@ int device_read_uevent_file(sd_device *device) {
 
                         break;
                 case PRE_VALUE:
+                	/*此状态，标记起始字符为value开始，并转value状态*/
                         value = &uevent[i];
                         state = VALUE;
 
                         _fallthrough_; /* to handle empty property */
                 case VALUE:
+                	/*此状态，如果遇到'\r'或者'\n'，则认为达到value结尾，解析内容，并转pre-key状态*/
                         if (strchr(NEWLINE, uevent[i])) {
                                 uevent[i] = '\0';
 
+                                /*达到uevent结尾，处理此行key,value*/
                                 r = handle_uevent_line(device, key, value, &major, &minor);
                                 if (r < 0)
                                         log_device_debug_errno(device, r, "sd-device: Failed to handle uevent entry '%s=%s', ignoring: %m", key, value);
@@ -766,6 +791,7 @@ static int device_set_drivers_subsystem(sd_device *device, const char *_subsyste
         return free_and_replace(device->driver_subsystem, subsystem);
 }
 
+/*获取给定的设备属于哪个子系统*/
 _public_ int sd_device_get_subsystem(sd_device *device, const char **ret) {
         const char *syspath, *drivers = NULL;
         int r;
@@ -992,6 +1018,7 @@ static int device_set_sysname(sd_device *device) {
 
         pos = strrchr(device->devpath, '/');
         if (!pos)
+        	/*devpath不包含'/'*/
                 return -EINVAL;
         pos++;
 
@@ -999,6 +1026,7 @@ static int device_set_sysname(sd_device *device) {
         if (*pos == '\0' || pos <= device->devpath)
                 return -EINVAL;
 
+        /*devpath的最后一项为sysname*/
         sysname = strdup(pos);
         if (!sysname)
                 return -ENOMEM;
@@ -1013,13 +1041,14 @@ static int device_set_sysname(sd_device *device) {
 
         /* trailing number */
         while (len > 0 && isdigit(sysname[--len]))
-                sysnum = &sysname[len];
+                sysnum = &sysname[len];/*sysname后面有数字，指向数字*/
 
         if (len == 0)
                 sysnum = NULL;
 
         device->sysname_set = true;
-        device->sysnum = sysnum;
+        device->sysnum = sysnum;/*指向sysname后面的数字*/
+        /*设置sysname,其来源于devpath*/
         return free_and_replace(device->sysname, sysname);
 }
 
@@ -1030,6 +1059,7 @@ _public_ int sd_device_get_sysname(sd_device *device, const char **ret) {
         assert_return(ret, -EINVAL);
 
         if (!device->sysname_set) {
+        	/*设备没有设置sysname,加载sysname*/
                 r = device_set_sysname(device);
                 if (r < 0)
                         return r;
@@ -1037,6 +1067,7 @@ _public_ int sd_device_get_sysname(sd_device *device, const char **ret) {
 
         assert_return(device->sysname, -ENOENT);
 
+        /*返回deivce上设置的sysname*/
         *ret = device->sysname;
         return 0;
 }
@@ -1367,12 +1398,15 @@ int device_read_db_internal(sd_device *device, bool force) {
         if (device->db_loaded || (!force && device->sealed))
                 return 0;
 
+        /*取此设备对应的id文件名称*/
         r = device_get_id_filename(device, &id);
         if (r < 0)
                 return r;
 
+        /*读取此文件*/
         path = strjoina("/run/udev/data/", id);
 
+        /*解析此文件中的key,value,并填充*/
         return device_read_db_internal_filename(device, path);
 }
 
@@ -1475,10 +1509,12 @@ int device_properties_prepare(sd_device *device) {
 
         assert(device);
 
+        /*读取uevent文件*/
         r = device_read_uevent_file(device);
         if (r < 0)
                 return r;
 
+        /*读取此设备对应的id文件，并加载db*/
         r = device_read_db(device);
         if (r < 0)
                 return r;
@@ -1667,6 +1703,7 @@ _public_ int sd_device_has_tag(sd_device *device, const char *tag) {
         return !!set_contains(device->tags, tag);
 }
 
+/*自sd_device设备中获取properities中对应key的取值*/
 _public_ int sd_device_get_property_value(sd_device *device, const char *key, const char **_value) {
         char *value;
         int r;
@@ -1674,10 +1711,12 @@ _public_ int sd_device_get_property_value(sd_device *device, const char *key, co
         assert_return(device, -EINVAL);
         assert_return(key, -EINVAL);
 
+        /*加载device属性*/
         r = device_properties_prepare(device);
         if (r < 0)
                 return r;
 
+        /*检查properties表中是否包含此key，如有此key,则返回对应的值*/
         value = ordered_hashmap_get(device->properties, key);
         if (!value)
                 return -ENOENT;

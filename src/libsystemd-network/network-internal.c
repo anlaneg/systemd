@@ -76,10 +76,12 @@ int net_get_unique_predictable_data(sd_device *device, uint64_t *result) {
 static bool net_condition_test_strv(char * const *raw_patterns,
                                     const char *string) {
         if (strv_isempty(raw_patterns))
+        	/*此集合为空时，则返回true*/
                 return true;
 
         /* If the patterns begin with "!", edit it out and negate the test. */
         if (raw_patterns[0][0] == '!') {
+        	/*如果此patterns[0]以'!'开头，则移除'!',并重建patterns，匹配结果取反*/
                 char **patterns;
                 size_t i, length;
 
@@ -95,7 +97,7 @@ static bool net_condition_test_strv(char * const *raw_patterns,
         return string && strv_fnmatch(raw_patterns, string, 0);
 }
 
-bool net_match_config(Set *match_mac,
+bool net_match_config(Set *match_mac/*可匹配的mac集合(不为NULL时需匹配）*/,
                       char * const *match_paths,
                       char * const *match_drivers,
                       char * const *match_types,
@@ -105,13 +107,14 @@ bool net_match_config(Set *match_mac,
                       Condition *match_kernel_cmdline,
                       Condition *match_kernel_version,
                       Condition *match_arch,
-                      const struct ether_addr *dev_mac,
+                      const struct ether_addr *dev_mac/*待匹配的mac*/,
                       const char *dev_path,
                       const char *dev_driver,
                       const char *dev_type,
                       const char *dev_name) {
 
         if (match_host && condition_test(match_host) <= 0)
+        	/*match_host不为空，则调用match_host->type对应回调*/
                 return false;
 
         if (match_virt && condition_test(match_virt) <= 0)
@@ -127,8 +130,10 @@ bool net_match_config(Set *match_mac,
                 return false;
 
         if (match_mac && (!dev_mac || !set_contains(match_mac, dev_mac)))
+        	/*如果match_mac不为NULL，且dev_mac未提供或者dev_mac与match_mac集合不匹配，则返回false*/
                 return false;
 
+        /*dev_path是否在match_paths集合中的匹配*/
         if (!net_condition_test_strv(match_paths, dev_path))
                 return false;
 

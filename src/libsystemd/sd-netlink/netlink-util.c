@@ -5,7 +5,8 @@
 #include "netlink-internal.h"
 #include "netlink-util.h"
 
-int rtnl_set_link_name(sd_netlink **rtnl, int ifindex, const char *name) {
+/*修改接口名称*/
+int rtnl_set_link_name(sd_netlink **rtnl, int ifindex/*要修改的接口*/, const char *name/*新的接口名称*/) {
         _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *message = NULL;
         int r;
 
@@ -23,6 +24,7 @@ int rtnl_set_link_name(sd_netlink **rtnl, int ifindex, const char *name) {
         if (r < 0)
                 return r;
 
+        /*添加接口名称*/
         r = sd_netlink_message_append_string(message, IFLA_IFNAME, name);
         if (r < 0)
                 return r;
@@ -43,6 +45,7 @@ int rtnl_set_link_properties(sd_netlink **rtnl, int ifindex, const char *alias,
         assert(ifindex > 0);
 
         if (!alias && !mac && mtu == 0)
+        	/*三者都不需要配置，直接返回*/
                 return 0;
 
         if (!*rtnl) {

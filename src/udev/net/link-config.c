@@ -186,6 +186,7 @@ static bool enable_name_policy(void) {
         return proc_cmdline_get_bool("net.ifnames", &b) <= 0 || b;
 }
 
+/*读取link的无符号属性*/
 static int link_unsigned_attribute(sd_device *device, const char *attr, unsigned *type) {
         const char *s;
         int r;
@@ -302,8 +303,10 @@ static int get_mac(sd_device *device, MACPolicy policy, struct ether_addr *mac) 
                 return r;
         switch (addr_type) {
         case NET_ADDR_SET:
+        	/*已被用户空间设置*/
                 return log_device_debug(device, "MAC on the device already set by userspace");
         case NET_ADDR_STOLEN:
+        	/*已基于另一设备设置*/
                 return log_device_debug(device, "MAC on the device already set based on another device");
         case NET_ADDR_RANDOM:
         case NET_ADDR_PERM:
@@ -320,6 +323,7 @@ static int get_mac(sd_device *device, MACPolicy policy, struct ether_addr *mac) 
                 log_device_debug(device, "Using random bytes to generate MAC");
                 random_bytes(mac->ether_addr_octet, ETH_ALEN);
         } else {
+        	/*生成固定地址*/
                 uint64_t result;
 
                 r = net_get_unique_predictable_data(device, &result);
@@ -330,6 +334,7 @@ static int get_mac(sd_device *device, MACPolicy policy, struct ether_addr *mac) 
                 memcpy(mac->ether_addr_octet, &result, ETH_ALEN);
         }
 
+        /*生成的固定地址样式*/
         /* see eth_random_addr in the kernel */
         mac->ether_addr_octet[0] &= 0xfe;  /* clear multicast bit */
         mac->ether_addr_octet[0] |= 0x02;  /* set local assignment bit (IEEE802) */
@@ -392,6 +397,7 @@ int link_config_apply(link_config_ctx *ctx, link_config *config,
                         log_warning_errno(r, "Could not set channels of %s: %m", old_name);
         }
 
+        /*取设置ifindex*/
         r = sd_device_get_ifindex(device, &ifindex);
         if (r < 0)
                 return log_device_warning_errno(device, r, "Could not find ifindex: %m");
@@ -455,11 +461,13 @@ int link_config_apply(link_config_ctx *ctx, link_config *config,
  no_rename:
 
         if (IN_SET(config->mac_policy, MACPOLICY_PERSISTENT, MACPOLICY_RANDOM)) {
+        		/*mac policy为random或者persistent，则获取generated_mac*/
                 if (get_mac(device, config->mac_policy, &generated_mac) > 0)
                         mac = &generated_mac;
         } else
                 mac = config->mac;
 
+        /*配置mac/mtu/alias*/
         r = rtnl_set_link_properties(&ctx->rtnl, ifindex, config->alias, mac, config->mtu);
         if (r < 0)
                 return log_warning_errno(r, "Could not set Alias=, MACAddress= or MTU= on %s: %m", old_name);
@@ -469,6 +477,7 @@ int link_config_apply(link_config_ctx *ctx, link_config *config,
         return 0;
 }
 
+/*取这个设备对应的驱动*/
 int link_get_driver(link_config_ctx *ctx, sd_device *device, char **ret) {
         const char *name;
         char *driver = NULL;

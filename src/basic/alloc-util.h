@@ -127,8 +127,8 @@ _alloc_(2, 3) static inline void *memdup_suffix0_multiply(const void *p, size_t 
 void* greedy_realloc(void **p, size_t *allocated, size_t need, size_t size);
 void* greedy_realloc0(void **p, size_t *allocated, size_t need, size_t size);
 
-#define GREEDY_REALLOC(array, allocated, need)                          \
-        greedy_realloc((void**) &(array), &(allocated), (need), sizeof((array)[0]))
+#define GREEDY_REALLOC(array/*内存*/, allocated/*已申请大小*/, need/*需要的大小*/)                          \
+        greedy_realloc((void**) &(array), &(allocated), (need), sizeof((array)[0])/*单个元素大小*/)
 
 #define GREEDY_REALLOC0(array, allocated, need)                         \
         greedy_realloc0((void**) &(array), &(allocated), (need), sizeof((array)[0]))

@@ -16,12 +16,16 @@ static int builtin_net_setup_link(sd_device *dev, int argc, char **argv, bool te
         int r;
 
         if (argc > 1)
+        	/*此程序不需要参数*/
                 return log_device_error_errno(dev, SYNTHETIC_ERRNO(EINVAL), "This program takes no arguments.");
 
+        /*取设备对应的驱动*/
         r = link_get_driver(ctx, dev, &driver);
         if (r >= 0)
+        	/*设置驱动名称*/
                 udev_builtin_add_property(dev, test, "ID_NET_DRIVER", driver);
 
+        /*取这个设备的配置*/
         r = link_config_get(ctx, dev, &link);
         if (r < 0) {
                 if (r == -ENOENT)
@@ -30,7 +34,8 @@ static int builtin_net_setup_link(sd_device *dev, int argc, char **argv, bool te
                 return log_device_error_errno(dev, r, "Failed to get link config: %m");
         }
 
-        r = link_config_apply(ctx, link, dev, &name);
+        /*应用这个设备的配置*/
+        r = link_config_apply(ctx, link, dev, &name/*更新的接口名称*/);
         if (r < 0)
                 log_device_warning_errno(dev, r, "Could not apply link config, ignoring: %m");
 
@@ -74,6 +79,7 @@ static bool builtin_net_setup_link_validate(void) {
         return link_config_should_reload(ctx);
 }
 
+/*网络link相关的配置*/
 const struct udev_builtin udev_builtin_net_setup_link = {
         .name = "net_setup_link",
         .cmd = builtin_net_setup_link,

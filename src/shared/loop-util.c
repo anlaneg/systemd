@@ -11,6 +11,7 @@
 #include "loop-util.h"
 #include "stat-util.h"
 
+/*利用fd创建后端文件*/
 int loop_device_make(int fd, int open_flags, LoopDevice **ret) {
         const struct loop_info64 info = {
                 .lo_flags = LO_FLAGS_AUTOCLEAR|LO_FLAGS_PARTSCAN|(open_flags == O_RDONLY ? LO_FLAGS_READ_ONLY : 0),
@@ -56,22 +57,26 @@ int loop_device_make(int fd, int open_flags, LoopDevice **ret) {
         if (r < 0)
                 return r;
 
+        /*获取空闲的loop设备idx*/
         control = open("/dev/loop-control", O_RDWR|O_CLOEXEC|O_NOCTTY|O_NONBLOCK);
         if (control < 0)
                 return -errno;
 
-        nr = ioctl(control, LOOP_CTL_GET_FREE);
+        nr = ioctl(control, LOOP_CTL_GET_FREE);/*返回空闲的loop设备idx*/
         if (nr < 0)
                 return -errno;
 
+        /*构造设备名称*/
         if (asprintf(&loopdev, "/dev/loop%i", nr) < 0)
                 return -ENOMEM;
 
+        /*打开给定的loop设备*/
         loop = open(loopdev, O_CLOEXEC|O_NONBLOCK|O_NOCTTY|open_flags);
         if (loop < 0)
                 return -errno;
 
-        if (ioctl(loop, LOOP_SET_FD, fd) < 0)
+        /*传入loop设备后端文件fd*/
+        if (ioctl(loop, LOOP_SET_FD, fd/*后端文件*/) < 0)
                 return -errno;
 
         if (ioctl(loop, LOOP_SET_STATUS64, &info) < 0)
@@ -88,9 +93,10 @@ int loop_device_make(int fd, int open_flags, LoopDevice **ret) {
         };
 
         *ret = d;
-        return d->fd;
+        return d->fd;/*返回loop设备idx*/
 }
 
+/*创建loop设备，并将其后端设置为path*/
 int loop_device_make_by_path(const char *path, int open_flags, LoopDevice **ret) {
         _cleanup_close_ int fd = -1;
 

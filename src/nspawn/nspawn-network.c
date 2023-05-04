@@ -270,6 +270,7 @@ static int join_bridge(sd_netlink *rtnl, const char *veth_name, const char *brid
         if (r < 0)
                 return r;
 
+        /*将veth_name加入到bridge_ifi中*/
         r = sd_netlink_message_append_string(m, IFLA_IFNAME, veth_name);
         if (r < 0)
                 return r;
@@ -438,6 +439,7 @@ int move_network_interfaces(pid_t pid, char **ifaces) {
                 if (ifi < 0)
                         return ifi;
 
+                /*变更ifi对应的net ns*/
                 r = sd_rtnl_message_new_link(rtnl, &m, RTM_SETLINK, ifi);
                 if (r < 0)
                         return log_error_errno(r, "Failed to allocate netlink message: %m");

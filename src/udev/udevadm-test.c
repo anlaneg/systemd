@@ -110,7 +110,7 @@ int test_main(int argc, char *argv[], void *userdata) {
 
         udev_builtin_init();
 
-        r = udev_rules_new(&rules, arg_resolve_name_timing);
+        r = udev_rules_new(&rules/*出参，解析的所有规则*/, arg_resolve_name_timing);
         if (r < 0) {
                 log_error_errno(r, "Failed to read udev rules: %m");
                 goto out;
