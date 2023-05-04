@@ -99,7 +99,7 @@ static bool net_condition_test_strv(char * const *raw_patterns,
 
 bool net_match_config(Set *match_mac/*可匹配的mac集合(不为NULL时需匹配）*/,
                       char * const *match_paths,
-                      char * const *match_drivers,
+                      char * const *match_drivers/*可匹配的驱动集合*/,
                       char * const *match_types,
                       char * const *match_names,
                       Condition *match_host,
@@ -156,11 +156,11 @@ int config_parse_net_condition(const char *unit,
                                unsigned section_line,
                                const char *lvalue,
                                int ltype,
-                               const char *rvalue,
+                               const char *rvalue/*设置右值*/,
                                void *data,
                                void *userdata) {
 
-        ConditionType cond = ltype;
+        ConditionType cond = ltype;/*将ltype做为cond*/
         Condition **ret = data;
         bool negate;
         Condition *c;
@@ -179,7 +179,7 @@ int config_parse_net_condition(const char *unit,
         if (!s)
                 return log_oom();
 
-        c = condition_new(cond, s, false, negate);
+        c = condition_new(cond, s/*设置参数*/, false, negate);
         if (!c)
                 return log_oom();
 

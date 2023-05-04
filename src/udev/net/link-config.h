@@ -33,7 +33,7 @@ typedef enum NamePolicy {
 } NamePolicy;
 
 struct link_config {
-        char *filename;
+        char *filename;/*此link config对应的配置文件*/
 
         Set *match_mac;
         char **match_path;

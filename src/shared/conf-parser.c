@@ -67,12 +67,12 @@ int config_item_table_lookup(
 }
 
 int config_item_perf_lookup(
-                const void *table,//查询函数
-                const char *section,//段名称
-                const char *lvalue,//key值
-                ConfigParserCallback *func,/*出参，解析key value的值*/
-                int *ltype,/*解析key value的类型*/
-                void **data,/*出参，parse函数对应的参数*/
+                const void *table,/*查询函数*/
+                const char *section,/*段名称*/
+                const char *lvalue,/*key值*/
+                ConfigParserCallback *func,/*出参，解析此key value的函数指针*/
+                int *ltype,/*出参，此key value的类型*/
+                void **data,/*出参，解析key value要填充的userdata中对应的填充参数*/
                 void *userdata/*入参，计算data*/) {
 
         ConfigPerfItemLookup lookup = (ConfigPerfItemLookup) table;
@@ -86,8 +86,7 @@ int config_item_perf_lookup(
 
         if (section) {
                 const char *key;
-
-                //构造查询key
+                //指定了section,构造查询key
                 key = strjoina(section, ".", lvalue);
                 //查询key
                 p = lookup(key, strlen(key));
@@ -286,8 +285,8 @@ static int parse_line(
 /* Go through the file and parse each line */
 //解析parse
 int config_parse(const char *unit/*unit名称*/,
-                 const char *filename,
-                 FILE *f,
+                 const char *filename/*配置文件名称*/,
+                 FILE *f/*配置文件操作对象*/,
                  const char *sections,
                  ConfigItemLookup lookup,
                  const void *table,
@@ -324,7 +323,7 @@ int config_parse(const char *unit/*unit名称*/,
                 bool escaped = false;
                 char *l, *p, *e;
 
-                //读取文件
+                //读取一行内容
                 r = read_line(f, LONG_LINE_MAX, &buf);
                 if (r == 0)
                         break;
@@ -341,6 +340,7 @@ int config_parse(const char *unit/*unit名称*/,
                         return r;
                 }
 
+                /*跳过前导的空字符后，如果第一个字符为comments,则continue*/
                 if (strchr(COMMENTS, *skip_leading_chars(buf, WHITESPACE)))
                         continue;
 
@@ -396,9 +396,9 @@ int config_parse(const char *unit/*unit名称*/,
 
                 //解析单行数据
                 r = parse_line(unit,
-                               filename,
-                               ++line,//增加行号
-                               sections,
+                               filename/*配置文件名称*/,
+                               ++line/*当前解析行号，增加行号*/,
+                               sections/*有效的sections*/,
                                lookup,
                                table,
                                flags,

@@ -124,6 +124,7 @@ char *delete_chars(char *s, const char *bad);
 char *delete_trailing_chars(char *s, const char *bad);
 char *truncate_nl(char *s);
 
+/*跳过前导的在字符串bad字符集合中的内容*/
 static inline char *skip_leading_chars(const char *s, const char *bad) {
 
         if (!s)

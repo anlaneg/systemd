@@ -34,6 +34,7 @@ int proc_cmdline(char **ret) {
         }
 
         if (detect_container() > 0)
+        	/*容器情况下处理cmdline*/
                 return get_process_cmdline(1, 0, false, ret);
         else
             /*读取cmdline,将其内容存入到ret中*/
@@ -182,6 +183,7 @@ int proc_cmdline_get_key(const char *key, ProcCmdlineFlags flags, char **ret_val
         if (FLAGS_SET(flags, PROC_CMDLINE_VALUE_OPTIONAL) && !ret_value)
                 return -EINVAL;
 
+        /*读取/proc/cmdline*/
         r = proc_cmdline(&line);
         if (r < 0)
                 return r;

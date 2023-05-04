@@ -29,6 +29,7 @@ bool hostname_is_set(void) {
         return true;
 }
 
+/*读取并返回当前节点名称*/
 char* gethostname_malloc(void) {
         struct utsname u;
 

@@ -270,6 +270,7 @@ static int condition_test_group(Condition *c) {
         return in_group(c->parameter) > 0;
 }
 
+/*检测虚拟化参数*/
 static int condition_test_virtualization(Condition *c) {
         int b, v;
 
@@ -329,21 +330,25 @@ static int condition_test_host(Condition *c) {
 
         assert(c);
         assert(c->parameter);
+        /*仅响应condition_host调用*/
         assert(c->type == CONDITION_HOST);
 
+        /*参数为id128类型，记为x,读取/etc/machine-id,记录为y*/
         if (sd_id128_from_string(c->parameter, &x) >= 0) {
-
                 r = sd_id128_get_machine(&y);
                 if (r < 0)
                         return r;
 
+                /*检查两者是否一致*/
                 return sd_id128_equal(x, y);
         }
 
+        /*读取hostname*/
         h = gethostname_malloc();
         if (!h)
                 return -ENOMEM;
 
+        /*检查hostname是否一致*/
         return fnmatch(c->parameter, h, FNM_CASEFOLD) == 0;
 }
 

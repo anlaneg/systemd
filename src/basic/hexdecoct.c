@@ -41,6 +41,7 @@ char hexchar(int x) {
         return table[x & 15];
 }
 
+/*按16进制解析对应的数值*/
 int unhexchar(char c) {
 
         if (c >= '0' && c <= '9')

@@ -427,6 +427,7 @@ finish:
         return r;
 }
 
+/*检查是否在container环境*/
 int detect_container(void) {
 
         static const struct {
@@ -523,6 +524,7 @@ finish:
         return r;
 }
 
+/*检查是否在虚拟化环境中运行*/
 int detect_virtualization(void) {
         int r;
 

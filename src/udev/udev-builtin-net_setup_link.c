@@ -25,10 +25,11 @@ static int builtin_net_setup_link(sd_device *dev, int argc, char **argv, bool te
         	/*设置驱动名称*/
                 udev_builtin_add_property(dev, test, "ID_NET_DRIVER", driver);
 
-        /*取这个设备的配置*/
+        /*取这个设备对应的link配置*/
         r = link_config_get(ctx, dev, &link);
         if (r < 0) {
                 if (r == -ENOENT)
+                	/*没有匹配到link configureation(即无.link配置文件）*/
                         return log_device_debug_errno(dev, r, "No matching link configuration found.");
 
                 return log_device_error_errno(dev, r, "Failed to get link config: %m");

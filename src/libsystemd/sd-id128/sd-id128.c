@@ -48,6 +48,7 @@ _public_ int sd_id128_from_string(const char s[], sd_id128_t *ret) {
                          * the dashes */
 
                         if (i == 8)
+                        	/*采用guid格式*/
                                 is_guid = true;
                         else if (IN_SET(i, 13, 18, 23)) {
                                 if (!is_guid)
@@ -59,17 +60,21 @@ _public_ int sd_id128_from_string(const char s[], sd_id128_t *ret) {
                         continue;
                 }
 
+                /*解析高4位*/
                 a = unhexchar(s[i++]);
                 if (a < 0)
                         return -EINVAL;
 
+                /*解析低4位*/
                 b = unhexchar(s[i++]);
                 if (b < 0)
                         return -EINVAL;
 
+                /*组装成完整的字节，填充t.bytes*/
                 t.bytes[n++] = (a << 4) | b;
         }
 
+        /*guid格式由于有4个'-',需要36长度*/
         if (i != (is_guid ? 36 : 32))
                 return -EINVAL;
 
@@ -88,6 +93,7 @@ _public_ int sd_id128_get_machine(sd_id128_t *ret) {
         assert_return(ret, -EINVAL);
 
         if (sd_id128_is_null(saved_machine_id)) {
+        	/*读取/etc/machine-id,并存入到saved_machine_id中*/
                 r = id128_read("/etc/machine-id", ID128_PLAIN, &saved_machine_id);
                 if (r < 0)
                         return r;

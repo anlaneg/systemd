@@ -115,6 +115,7 @@ assert_cc((ELEMENTSOF(ethtool_link_mode_bit_table)-1) / 32 < ELEMENTSOF(((struct
 
 DEFINE_STRING_TABLE_LOOKUP(ethtool_link_mode_bit, enum ethtool_link_mode_bit_indices);
 
+/*创建ethtool对应的socket*/
 int ethtool_connect(int *ret) {
         int fd;
 
@@ -129,6 +130,7 @@ int ethtool_connect(int *ret) {
         return 0;
 }
 
+/*获取$ifname对应的driver信息*/
 int ethtool_get_driver(int *fd, const char *ifname, char **ret) {
         struct ethtool_drvinfo ecmd = {
                 .cmd = ETHTOOL_GDRVINFO

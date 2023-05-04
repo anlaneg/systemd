@@ -33,7 +33,7 @@ struct link_config_ctx {
 
         int ethtool_fd;
 
-        bool enable_name_policy;
+        bool enable_name_policy;/*是否开启name policy*/
 
         sd_netlink *rtnl;
 
@@ -125,10 +125,12 @@ int link_load_one(link_config_ctx *ctx, const char *filename) {
         assert(ctx);
         assert(filename);
 
+        /*打开文件*/
         file = fopen(filename, "re");
         if (!file)
                 return errno == ENOENT ? 0 : -errno;
 
+        /*忽略空文件*/
         if (null_or_empty_fd(fileno(file))) {
                 log_debug("Skipping empty file: %s", filename);
                 return 0;
@@ -154,9 +156,10 @@ int link_load_one(link_config_ctx *ctx, const char *filename) {
         for (i = 0; i < ELEMENTSOF(link->features); i++)
                 link->features[i] = -1;
 
+        /*解析此配置文件，填充link结构体对应成员*/
         r = config_parse(NULL, filename, file,
                          "Match\0Link\0",
-                         config_item_perf_lookup, link_config_gperf_lookup,
+                         config_item_perf_lookup, link_config_gperf_lookup/*由gperf工具生成的静态hash表*/,
                          CONFIG_PARSE_WARN, link);
         if (r < 0)
                 return r;
@@ -164,6 +167,7 @@ int link_load_one(link_config_ctx *ctx, const char *filename) {
         if (link->speed > UINT_MAX)
                 return -ERANGE;
 
+        /*检查link设置的对host,虚拟化环境,kernel版本等的匹配，如果不匹配，则未达到要求的环境，不考虑此link*/
         if (!net_match_config(NULL, NULL, NULL, NULL, NULL,
                               link->match_host, link->match_virt, link->match_kernel_cmdline,
                               link->match_kernel_version, link->match_arch,
@@ -174,6 +178,7 @@ int link_load_one(link_config_ctx *ctx, const char *filename) {
 
         log_debug("Parsed configuration file %s", filename);
 
+        /*将此link加入到ctx->links链表后面*/
         LIST_PREPEND(links, ctx->links, link);
         link = NULL;
 
@@ -183,6 +188,7 @@ int link_load_one(link_config_ctx *ctx, const char *filename) {
 static bool enable_name_policy(void) {
         bool b;
 
+        /*取proc/cmdline中对net.ifnames的配置*/
         return proc_cmdline_get_bool("net.ifnames", &b) <= 0 || b;
 }
 
@@ -211,6 +217,7 @@ int link_config_load(link_config_ctx *ctx) {
         link_configs_free(ctx);
 
         if (!enable_name_policy()) {
+        	/*kernel配置net.ifnames=0，不开启name policy*/
                 ctx->enable_name_policy = false;
                 log_info("Network interface NamePolicy= disabled on kernel command line, ignoring.");
         }
@@ -218,6 +225,7 @@ int link_config_load(link_config_ctx *ctx) {
         /* update timestamp */
         paths_check_timestamp(NETWORK_DIRS, &ctx->network_dirs_ts_usec, true);
 
+        /*收集.link文件，并加载这些文件*/
         r = conf_files_list_strv(&files, ".link", NULL, 0, NETWORK_DIRS);
         if (r < 0)
                 return log_error_errno(r, "failed to enumerate link files: %m");
@@ -251,6 +259,7 @@ int link_config_get(link_config_ctx *ctx, sd_device *device, link_config **ret) 
                 (void) sd_device_get_devtype(device, &devtype);
                 (void) sd_device_get_sysname(device, &sysname);
 
+                /*匹配成功，则显示采用哪个配置文件*/
                 if (net_match_config(link->match_mac, link->match_path, link->match_driver,
                                      link->match_type, link->match_name, link->match_host,
                                      link->match_virt, link->match_kernel_cmdline,
@@ -411,6 +420,7 @@ int link_config_apply(link_config_ctx *ctx, link_config *config,
                 goto no_rename;
         }
 
+        /*只有两者均开启name policy才执行policy处理*/
         if (ctx->enable_name_policy && config->name_policy)
                 for (NamePolicy *p = config->name_policy; !new_name && *p != _NAMEPOLICY_INVALID; p++) {
                         policy = *p;
@@ -487,6 +497,7 @@ int link_get_driver(link_config_ctx *ctx, sd_device *device, char **ret) {
         if (r < 0)
                 return r;
 
+        /*通过ethtool获取driver名称*/
         r = ethtool_get_driver(&ctx->ethtool_fd, name, &driver);
         if (r < 0)
                 return r;
