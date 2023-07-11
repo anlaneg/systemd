@@ -68,6 +68,7 @@ const char *unit_dbus_interface_from_name(const char *name) {
         return unit_dbus_interface_from_type(t);
 }
 
+/*按unit type与unit后缀的对照关系*/
 static const char* const unit_type_table[_UNIT_TYPE_MAX] = {
         [UNIT_SERVICE] = "service",
         [UNIT_SOCKET] = "socket",
@@ -263,6 +264,7 @@ static const char* const unit_dependency_table[_UNIT_DEPENDENCY_MAX] = {
 
 DEFINE_STRING_TABLE_LOOKUP(unit_dependency, UnitDependency);
 
+/*notify访问方法与字符串映射表*/
 static const char* const notify_access_table[_NOTIFY_ACCESS_MAX] = {
         [NOTIFY_NONE] = "none",
         [NOTIFY_MAIN] = "main",

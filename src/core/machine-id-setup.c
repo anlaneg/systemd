@@ -36,6 +36,7 @@ static int generate_machine_id(const char *root, sd_id128_t *ret) {
         fd = open(dbus_machine_id, O_RDONLY|O_CLOEXEC|O_NOCTTY|O_NOFOLLOW);
         if (fd >= 0) {
                 if (id128_read_fd(fd, ID128_PLAIN, ret) >= 0) {
+                	/*采用dbus machine-id*/
                         log_info("Initializing machine ID from D-Bus machine ID.");
                         return 0;
                 }
@@ -96,6 +97,7 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, sd_id128_t *ret) {
                 (void) mkdir_parents(etc_machine_id, 0755);
                 fd = open(etc_machine_id, O_RDWR|O_CREAT|O_CLOEXEC|O_NOCTTY, 0444);
                 if (fd < 0) {
+                	/*文件已存在，尝试只读打开*/
                         int old_errno = errno;
 
                         fd = open(etc_machine_id, O_RDONLY|O_CLOEXEC|O_NOCTTY);
@@ -130,6 +132,7 @@ int machine_id_setup(const char *root, sd_id128_t machine_id, sd_id128_t *ret) {
         }
 
         if (writable) {
+        	/*文件可写，写入machine_id*/
                 if (lseek(fd, 0, SEEK_SET) == (off_t) -1)
                         return log_error_errno(errno, "Failed to seek %s: %m", etc_machine_id);
 

@@ -16,6 +16,7 @@ int find_device(const char *id, const char *prefix, sd_device **ret) {
         assert(ret);
 
         if (prefix) {
+        	/*如果指明了前缀，则检查id是否包含前缀，如不包含，则为其添加前缀*/
                 if (!path_startswith(id, prefix)) {
                         id = path = path_join(prefix, id);
                         if (!path)

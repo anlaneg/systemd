@@ -1520,8 +1520,10 @@ static void redirect_telinit(int argc, char *argv[]) {
                 return;
 
         if (!strstr(program_invocation_short_name, "init"))
+        	/*此函数仅处理init程序逻辑*/
                 return;
 
+        /*转成启动SYSTEMCTL_BINARY_PATH程序*/
         execv(SYSTEMCTL_BINARY_PATH, argv);
         log_error_errno(errno, "Failed to exec " SYSTEMCTL_BINARY_PATH ": %m");
         exit(EXIT_FAILURE);
@@ -2351,6 +2353,7 @@ static bool early_skip_setup_check(int argc, char *argv[]) {
         return found_deserialize; /* When we are deserializing, then we are reexecuting, hence avoid the extensive setup */
 }
 
+/*systemd进程入口（kernel可能会启动此程序）*/
 int main(int argc, char *argv[]) {
 
         dual_timestamp initrd_timestamp = DUAL_TIMESTAMP_NULL, userspace_timestamp = DUAL_TIMESTAMP_NULL, kernel_timestamp = DUAL_TIMESTAMP_NULL,

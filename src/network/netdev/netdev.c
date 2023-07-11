@@ -36,6 +36,7 @@
 #include "netdev/netdevsim.h"
 #include "netdev/fou-tunnel.h"
 
+/*定义各类netdev设备*/
 const NetDevVTable * const netdev_vtable[_NETDEV_KIND_MAX] = {
         [NETDEV_KIND_BRIDGE] = &bridge_vtable,
         [NETDEV_KIND_BOND] = &bond_vtable,
@@ -67,6 +68,7 @@ const NetDevVTable * const netdev_vtable[_NETDEV_KIND_MAX] = {
         [NETDEV_KIND_ERSPAN] = &erspan_vtable,
 };
 
+/*定义各类netdev的类型名称*/
 static const char* const netdev_kind_table[_NETDEV_KIND_MAX] = {
         [NETDEV_KIND_BRIDGE] = "bridge",
         [NETDEV_KIND_BOND] = "bond",
@@ -465,6 +467,7 @@ int netdev_set_ifindex(NetDev *netdev, sd_netlink_message *message) {
 
 #define HASH_KEY SD_ID128_MAKE(52,e1,45,bd,00,6f,29,96,21,c6,30,6d,83,71,04,48)
 
+/*通过ifname生成netdev的mac地址*/
 int netdev_get_mac(const char *ifname, struct ether_addr **ret) {
         _cleanup_free_ struct ether_addr *mac = NULL;
         uint64_t result;
@@ -484,20 +487,20 @@ int netdev_get_mac(const char *ifname, struct ether_addr **ret) {
         v = newa(uint8_t, sz);
 
         /* fetch some persistent data unique to the machine */
-        r = sd_id128_get_machine((sd_id128_t*) v);
+        r = sd_id128_get_machine((sd_id128_t*) v);/*读取machine id到v*/
         if (r < 0)
                 return r;
 
         /* combine with some data unique (on this machine) to this
          * netdev */
-        memcpy(v + sizeof(sd_id128_t), ifname, l);
+        memcpy(v + sizeof(sd_id128_t), ifname, l);/*合入ifname到v*/
 
         /* Let's hash the host machine ID plus the container name. We
          * use a fixed, but originally randomly created hash key here. */
         result = siphash24(v, sz, HASH_KEY.bytes);
 
         assert_cc(ETH_ALEN <= sizeof(result));
-        memcpy(mac->ether_addr_octet, &result, ETH_ALEN);
+        memcpy(mac->ether_addr_octet, &result, ETH_ALEN);/*合入mac地址*/
 
         /* see eth_random_addr in the kernel */
         mac->ether_addr_octet[0] &= 0xfe;        /* clear multicast bit */
@@ -518,6 +521,7 @@ static int netdev_create(NetDev *netdev, Link *link, link_netlink_message_handle
         if (NETDEV_VTABLE(netdev)->create) {
                 assert(!link);
 
+                /*调用create回调，创建指定类型的netdev*/
                 r = NETDEV_VTABLE(netdev)->create(netdev);
                 if (r < 0)
                         return r;
@@ -540,6 +544,7 @@ static int netdev_create(NetDev *netdev, Link *link, link_netlink_message_handle
                                 return log_netdev_error_errno(netdev, r, "Could not append IFLA_ADDRESS attribute: %m");
                 }
 
+                /*设置mtu*/
                 if (netdev->mtu) {
                         r = sd_netlink_message_append_u32(m, IFLA_MTU, netdev->mtu);
                         if (r < 0)
@@ -627,6 +632,7 @@ int netdev_join(NetDev *netdev, Link *link, link_netlink_message_handler_t callb
         return 0;
 }
 
+/*加载配置filename*/
 int netdev_load_one(Manager *manager, const char *filename) {
         _cleanup_(netdev_unrefp) NetDev *netdev_raw = NULL, *netdev = NULL;
         _cleanup_fclose_ FILE *file = NULL;
@@ -637,6 +643,7 @@ int netdev_load_one(Manager *manager, const char *filename) {
         assert(manager);
         assert(filename);
 
+        /*打开.netdev配置文件*/
         file = fopen(filename, "re");
         if (!file) {
                 if (errno == ENOENT)
@@ -645,11 +652,13 @@ int netdev_load_one(Manager *manager, const char *filename) {
                 return -errno;
         }
 
+        /*跳过空文件*/
         if (null_or_empty_fd(fileno(file))) {
                 log_debug("Skipping empty file: %s", filename);
                 return 0;
         }
 
+        /*初始化netdev*/
         netdev_raw = new(NetDev, 1);
         if (!netdev_raw)
                 return log_oom();
@@ -660,7 +669,10 @@ int netdev_load_one(Manager *manager, const char *filename) {
                 .state = _NETDEV_STATE_INVALID, /* an invalid state means done() of the implementation won't be called on destruction */
         };
 
+        /*添加.d后缀*/
         dropin_dirname = strjoina(basename(filename), ".d");
+
+        /*解析.netdev后缀的配置文件，采用netdev-gpref.gpref生成的函数*/
         r = config_parse_many(filename, NETWORK_DIRS, dropin_dirname,
                               "Match\0NetDev\0",
                               config_item_perf_lookup, network_netdev_gperf_lookup,
@@ -674,20 +686,24 @@ int netdev_load_one(Manager *manager, const char *filename) {
                               netdev_raw->match_kernel_cmdline, netdev_raw->match_kernel_version,
                               netdev_raw->match_arch,
                               NULL, NULL, NULL, NULL, NULL)) {
+        	/*跳过与当前环境不匹配的配置文件*/
                 log_debug("%s: Conditions in the file do not match the system environment, skipping.", filename);
                 return 0;
         }
 
         if (netdev_raw->kind == _NETDEV_KIND_INVALID) {
+        	/*跳过kind无效的netdev*/
                 log_warning("NetDev has no Kind configured in %s. Ignoring", filename);
                 return 0;
         }
 
         if (!netdev_raw->ifname) {
+        	/*跳过未指定ifname的配置*/
                 log_warning("NetDev without Name configured in %s. Ignoring", filename);
                 return 0;
         }
 
+        /*设置文件游标0*/
         r = fseek(file, 0, SEEK_SET);
         if (r < 0)
                 return -errno;
@@ -701,6 +717,7 @@ int netdev_load_one(Manager *manager, const char *filename) {
         netdev->kind = netdev_raw->kind;
         netdev->state = NETDEV_STATE_LOADING; /* we initialize the state here for the first time, so that done() will be called on destruction */
 
+        /*按类型初始化netdev*/
         if (NETDEV_VTABLE(netdev)->init)
                 NETDEV_VTABLE(netdev)->init(netdev);
 
@@ -723,6 +740,7 @@ int netdev_load_one(Manager *manager, const char *filename) {
                 return log_oom();
 
         if (!netdev->mac && netdev->kind != NETDEV_KIND_VLAN) {
+        	/*生成netdev的mac地址*/
                 r = netdev_get_mac(netdev->ifname, &netdev->mac);
                 if (r < 0)
                         return log_error_errno(r, "Failed to generate predictable MAC address for %s: %m", netdev->ifname);
@@ -785,6 +803,7 @@ int netdev_load_one(Manager *manager, const char *filename) {
         }
 
         if (independent) {
+        	/*依据配置参数创建netdev*/
                 r = netdev_create(netdev, NULL, NULL);
                 if (r < 0)
                         return r;
@@ -804,11 +823,14 @@ int netdev_load(Manager *manager) {
 
         hashmap_clear_with_destructor(manager->netdevs, netdev_unref);
 
+        /*获取配置路径下所有.netdev配置文件*/
         r = conf_files_list_strv(&files, ".netdev", NULL, 0, NETWORK_DIRS);
         if (r < 0)
                 return log_error_errno(r, "Failed to enumerate netdev files: %m");
 
+        /*遍历所有配置，逐个加载*/
         STRV_FOREACH_BACKWARDS(f, files) {
+        		/*加载配置文件f*/
                 r = netdev_load_one(manager, *f);
                 if (r < 0)
                         return r;

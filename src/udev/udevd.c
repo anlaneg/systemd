@@ -212,6 +212,7 @@ static int worker_new(struct worker **ret, Manager *manager, sd_device_monitor *
         if (r < 0)
                 return r;
 
+        /*将此worker加入到workers中（通过pid进行映射）*/
         r = hashmap_put(manager->workers, PID_TO_PTR(pid), worker);
         if (r < 0)
                 return r;
@@ -256,18 +257,20 @@ static void worker_attach_event(struct worker *worker, struct event *event) {
         assert(!event->worker);
         assert(!worker->event);
 
-        worker->state = WORKER_RUNNING;
+        worker->state = WORKER_RUNNING;/*worker进入running状态*/
         worker->event = event;
-        event->state = EVENT_RUNNING;
+        event->state = EVENT_RUNNING;/*event进入running状态*/
         event->worker = worker;
 
         e = worker->manager->event;
 
         assert_se(sd_event_now(e, CLOCK_MONOTONIC, &usec) >= 0);
 
+        /*添加event处理timeout告警timer*/
         (void) sd_event_add_time(e, &event->timeout_warning_event, CLOCK_MONOTONIC,
                                  usec + udev_warn_timeout(arg_event_timeout_usec), USEC_PER_SEC, on_event_timeout_warning, event);
 
+        /*添加event处理timeout杀死处理timer*/
         (void) sd_event_add_time(e, &event->timeout_event, CLOCK_MONOTONIC,
                                  usec + arg_event_timeout_usec, USEC_PER_SEC, on_event_timeout, event);
 }
@@ -457,6 +460,7 @@ static int worker_device_monitor_handler(sd_device_monitor *monitor, sd_device *
         return 1;
 }
 
+/*worker进程入口*/
 static int worker_main(Manager *_manager, sd_device_monitor *monitor, sd_device *first_device) {
         _cleanup_(sd_device_unrefp) sd_device *dev = first_device;
         _cleanup_(manager_freep) Manager *manager = _manager;
@@ -533,6 +537,7 @@ static int worker_spawn(Manager *manager, struct event *event) {
         }
         if (r == 0) {
                 /* Worker process */
+        		/*fork返回值为0，即为worker进程自身，负责具体处理event*/
                 r = worker_main(manager, worker_monitor, sd_device_ref(event->dev));
                 log_close();
                 _exit(r < 0 ? EXIT_FAILURE : EXIT_SUCCESS);
@@ -542,6 +547,7 @@ static int worker_spawn(Manager *manager, struct event *event) {
         if (r < 0)
                 return log_error_errno(r, "Failed to create worker object: %m");
 
+        /*将此event分配给选定的worker*/
         worker_attach_event(worker, event);
 
         log_device_debug(event->dev, "Worker ["PID_FMT"] is forked for processing SEQNUM=%"PRIu64".", pid, event->seqnum);
@@ -558,8 +564,10 @@ static void event_run(Manager *manager, struct event *event) {
 
         HASHMAP_FOREACH(worker, manager->workers, i) {
                 if (worker->state != WORKER_IDLE)
+                	/*选择处于idle的worker,遇到非idle的，继续尝试*/
                         continue;
 
+                /*找到了空闲的worker,检查其能否正常通信*/
                 r = device_monitor_send_device(manager->monitor, worker->monitor, event->dev);
                 if (r < 0) {
                         log_device_error_errno(event->dev, r, "Worker ["PID_FMT"] did not accept message, killing the worker: %m",
@@ -568,16 +576,19 @@ static void event_run(Manager *manager, struct event *event) {
                         worker->state = WORKER_KILLED;
                         continue;
                 }
+                /*将此event分配给选定的worker*/
                 worker_attach_event(worker, event);
                 return;
         }
 
+        /*未找到空闲的worker,且达到worker最大数，报错后退出*/
         if (hashmap_size(manager->workers) >= arg_children_max) {
                 if (arg_children_max > 1)
                         log_debug("Maximum number (%u) of children reached.", hashmap_size(manager->workers));
                 return;
         }
 
+        /*未找到空闲worker,创建新的worker并传递此event执行*/
         /* start new worker and pass initial device */
         worker_spawn(manager, event);
 }
@@ -881,6 +892,7 @@ static void event_queue_start(Manager *manager) {
                 }
         }
 
+        /*按序遍历manager->events,并逐个运行event*/
         LIST_FOREACH(event, event, manager->events) {
                 if (event->state != EVENT_QUEUED)
                         continue;
@@ -936,6 +948,7 @@ static int on_worker(sd_event_source *s, int fd, uint32_t revents, void *userdat
                                 continue;
                         else if (errno == EAGAIN)
                                 /* nothing more to read */
+                        	/*所有消息均已响应，退出*/
                                 break;
 
                         return log_error_errno(errno, "Failed to receive message: %m");
@@ -958,10 +971,12 @@ static int on_worker(sd_event_source *s, int fd, uint32_t revents, void *userdat
                 /* lookup worker who sent the signal */
                 worker = hashmap_get(manager->workers, PID_TO_PTR(ucred->pid));
                 if (!worker) {
+                	/*收到了消息，但没有找到是哪个worker发送的，忽略*/
                         log_debug("Worker ["PID_FMT"] returned, but is no longer tracked", ucred->pid);
                         continue;
                 }
 
+                /*event完成，将此worker置为idle*/
                 if (worker->state != WORKER_KILLED)
                         worker->state = WORKER_IDLE;
 
@@ -1565,7 +1580,7 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 //构造monitor,监听相应socket
-static int manager_new(Manager **ret, int fd_ctrl, int fd_uevent, const char *cgroup) {
+static int manager_new(Manager **ret, int fd_ctrl/*控制命令用fd*/, int fd_uevent, const char *cgroup) {
         _cleanup_(manager_freep) Manager *manager = NULL;
         int r;
 
@@ -1636,18 +1651,22 @@ static int main_loop(Manager *manager) {
         if (r < 0)
                 return log_error_errno(r, "Failed to allocate event loop: %m");
 
+        /*sigint信号事件处理*/
         r = sd_event_add_signal(manager->event, NULL, SIGINT, on_sigterm, manager);
         if (r < 0)
                 return log_error_errno(r, "Failed to create SIGINT event source: %m");
 
+        /*sigterm信号事件处理*/
         r = sd_event_add_signal(manager->event, NULL, SIGTERM, on_sigterm, manager);
         if (r < 0)
                 return log_error_errno(r, "Failed to create SIGTERM event source: %m");
 
+        /*sighup信号事件处理*/
         r = sd_event_add_signal(manager->event, NULL, SIGHUP, on_sighup, manager);
         if (r < 0)
                 return log_error_errno(r, "Failed to create SIGHUP event source: %m");
 
+        /*sigchld信号事件处理*/
         r = sd_event_add_signal(manager->event, NULL, SIGCHLD, on_sigchld, manager);
         if (r < 0)
                 return log_error_errno(r, "Failed to create SIGCHLD event source: %m");
@@ -1660,6 +1679,7 @@ static int main_loop(Manager *manager) {
         if (r < 0)
                 return log_error_errno(r, "Failed to attach event to udev control: %m");
 
+        /*处理控制类消息*/
         r = udev_ctrl_start(manager->ctrl, on_ctrl_msg, manager);
         if (r < 0)
                 return log_error_errno(r, "Failed to start device monitor: %m");
@@ -1686,6 +1706,7 @@ static int main_loop(Manager *manager) {
 
         (void) sd_event_source_set_description(sd_device_monitor_get_event_source(manager->monitor), "device-monitor");
 
+        /*处理来自fd_worker的读事件*/
         r = sd_event_add_io(manager->event, NULL, fd_worker, EPOLLIN, on_worker, manager);
         if (r < 0)
                 return log_error_errno(r, "Failed to create worker event source: %m");

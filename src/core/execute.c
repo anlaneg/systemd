@@ -1693,6 +1693,7 @@ static int build_environment(
                 our_env[n_env++] = x;
         }
 
+        /*添加HOME环境变量*/
         if (home) {
                 x = strappend("HOME=", home);
                 if (!x)
@@ -3642,7 +3643,7 @@ static int exec_child(
         }
 
         //执行要启动的命令
-        execve(command->path, final_argv, accum_env);
+        execve(command->path, final_argv, accum_env/*历经各种组合后生成的环境变量*/);
         r = -errno;
 
         if (exec_fd >= 0) {

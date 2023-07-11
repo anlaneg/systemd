@@ -186,7 +186,7 @@ static int conf_files_list_strv_internal(char ***strv/*出参，收集要的合�
         if (!files)
                 return -ENOMEM;
 
-        /*对这些文件进行排序*/
+        /*对这些文件按名称进行排序*/
         typesafe_qsort(files, hashmap_size(fh), base_cmp);
         *strv = files;
 

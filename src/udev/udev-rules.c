@@ -1728,7 +1728,7 @@ int udev_rules_new(UdevRules **ret_rules/*出参，加载udev配置文件，生�
 
         udev_rules_check_timestamp(rules);
 
-        //在$rules_dirs(例如：/etc/udev/rules.d/）目录中查找.rules结尾的文件（已排序）
+        //在$rules_dirs(例如：/etc/udev/rules.d/）等目录中查找.rules结尾的文件（已排序）
         r = conf_files_list_strv(&files, ".rules", NULL, 0, RULES_DIRS);
         if (r < 0)
 		//枚举配置文件失败
@@ -2200,6 +2200,7 @@ int udev_rules_apply_to_event(
                         break;
                 }
                 case TK_M_IMPORT_BUILTIN: {
+                	/*内置cmd处理*/
                         char command[UTIL_PATH_SIZE];
 
                         if (udev_builtin_run_once(cur->key.builtin_cmd)) {

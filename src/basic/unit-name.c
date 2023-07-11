@@ -31,15 +31,17 @@
         VALID_CHARS_WITH_AT                     \
         "[]!-*?"
 
+/*检查unit名称是否有效*/
 bool unit_name_is_valid(const char *n, UnitNameFlags flags) {
         const char *e, *i, *at;
 
         assert((flags & ~(UNIT_NAME_PLAIN|UNIT_NAME_INSTANCE|UNIT_NAME_TEMPLATE)) == 0);
 
         if (_unlikely_(flags == 0))
+        	/*如果flags为0，则直接返回无效*/
                 return false;
 
-        //名称为空
+        //名称为空，返回无效
         if (isempty(n))
                 return false;
 
@@ -47,22 +49,22 @@ bool unit_name_is_valid(const char *n, UnitNameFlags flags) {
         if (strlen(n) >= UNIT_NAME_MAX)
                 return false;
 
-        //名称必须包含'.',不得以'.'开头
+        //名称必须包含'.',但不得以'.'开头
         e = strrchr(n, '.');
         if (!e || e == n)
                 return false;
 
-        //检查后缀是否为合法的unit后缀
+        //名称中包含的后缀必须是合法的unit后缀
         if (unit_type_from_string(e + 1) < 0)
                 return false;
 
-        //校验文件名称，必须为约定的合法字符
+        //校验unit名称，必须为约定的合法字符
         for (i = n, at = NULL; i < e/*'.'所在的位置*/; i++) {
 
                 if (*i == '@' && !at)
                         at = i;//at首次出现，记录其出现的位置
 
-                //字符必须为VALID_CHARS及'@'
+                //字符只能在VALID_CHARS及'@'集合中,否则无效
                 if (!strchr("@" VALID_CHARS, *i))
                         return false;
         }
@@ -71,21 +73,22 @@ bool unit_name_is_valid(const char *n, UnitNameFlags flags) {
         if (at == n)
                 return false;
 
-        //如果有UNIT_NAME_PLAIN标记，则不容许有@号
+        //如果有UNIT_NAME_PLAIN标记，则不容许包含@符号
         if (flags & UNIT_NAME_PLAIN)
                 if (!at)
                         return true;
 
-        //如果UNIT_NAME_INSTANCE标记，则＠必须存在，且必须不能是'.'号之前的字符
+        //如果UNIT_NAME_INSTANCE标记，则＠必须存在，且必须不能位于'.'号之前
         if (flags & UNIT_NAME_INSTANCE)
                 if (at && e > at + 1)
                         return true;
 
-        //如果有unit_name_template标记，则@必须是'.'号之前的字符
+        //如果有unit_name_template标记，则@必须在'.'号之前
         if (flags & UNIT_NAME_TEMPLATE)
                 if (at && e == at + 1)
                         return true;
 
+        /*其它情况均无效*/
         return false;
 }
 
@@ -119,9 +122,11 @@ bool unit_suffix_is_valid(const char *s) {
                 return false;
 
         if (s[0] != '.')
+        	/*首字符必须为'.'*/
                 return false;
 
         if (unit_type_from_string(s + 1) < 0)
+        	/*unit后缀不匹配，返回false*/
                 return false;
 
         return true;
@@ -151,7 +156,7 @@ int unit_name_to_prefix(const char *n, char **ret) {
         return 0;
 }
 
-//取实例名称
+//取实例名称（unit名称中@号之后，‘.'号之前的内容）
 int unit_name_to_instance(const char *n, char **instance) {
         const char *p, *d;
         char *i;
@@ -215,7 +220,7 @@ UnitType unit_name_to_type(const char *n) {
         if (!unit_name_is_valid(n, UNIT_NAME_ANY))
                 return _UNIT_TYPE_INVALID;
 
-        //必须有e
+        //必须要有'.'
         assert_se(e = strrchr(n, '.'));
 
         //返回unit对应的类型
@@ -390,6 +395,7 @@ int unit_name_path_escape(const char *f, char **ret) {
         assert(f);
         assert(ret);
 
+        /*复制字符串，且内存采用alloc*/
         p = strdupa(f);
         if (!p)
                 return -ENOMEM;
@@ -397,6 +403,7 @@ int unit_name_path_escape(const char *f, char **ret) {
         path_simplify(p, false);
 
         if (empty_or_root(p))
+        	/*路径为root或为空*/
                 s = strdup("-");
         else {
                 if (!path_is_normalized(p))
@@ -542,6 +549,7 @@ int unit_name_from_path(const char *path, const char *suffix, char **ret) {
         if (r < 0)
                 return r;
 
+        /*unit名称添加后缀，并返回*/
         s = strappend(p, suffix);
         if (!s)
                 return -ENOMEM;

@@ -707,7 +707,8 @@ int job_run_and_invalidate(Job *j) {
                 case JOB_START:
                 case JOB_STOP:
                 case JOB_RESTART:
-                        r = job_perform_on_unit(&j);//执行job对应的unit
+                	//执行job对应的unit
+                        r = job_perform_on_unit(&j);
 
                         /* If the unit type does not support starting/stopping, then simply wait. */
                         if (r == -EBADR)

@@ -42,6 +42,7 @@ static int builtin_net_setup_link(sd_device *dev, int argc, char **argv, bool te
 
         udev_builtin_add_property(dev, test, "ID_NET_LINK_FILE", link->filename);
 
+        /*设置网络名称*/
         if (name)
                 udev_builtin_add_property(dev, test, "ID_NET_NAME", name);
 
@@ -58,6 +59,7 @@ static int builtin_net_setup_link_init(void) {
         if (r < 0)
                 return r;
 
+        /*加载.link文件*/
         r = link_config_load(ctx);
         if (r < 0)
                 return r;

@@ -315,6 +315,7 @@ void log_forget_fds(void) {
         console_fd = kmsg_fd = syslog_fd = journal_fd = -1;
 }
 
+/*设置指定realm对应的日志级别*/
 void log_set_max_level_realm(LogRealm realm, int level) {
         assert((level & LOG_PRIMASK) == level);
         assert(realm < ELEMENTSOF(log_max_level));

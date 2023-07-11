@@ -1695,6 +1695,7 @@ int bus_open_system_watch_bind_with_description(sd_bus **ret, const char *descri
                 return r;
 
         if (description) {
+        	/*设置bus描述符*/
                 r = sd_bus_set_description(bus, description);
                 if (r < 0)
                         return r;
@@ -1704,10 +1705,12 @@ int bus_open_system_watch_bind_with_description(sd_bus **ret, const char *descri
         if (!e)
                 e = DEFAULT_SYSTEM_BUS_ADDRESS;
 
+        /*设置bus address*/
         r = sd_bus_set_address(bus, e);
         if (r < 0)
                 return r;
 
+        /*设置bus client*/
         r = sd_bus_set_bus_client(bus, true);
         if (r < 0)
                 return r;

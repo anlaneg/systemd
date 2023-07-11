@@ -171,6 +171,7 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
 #  define VOID_0 ((void*)0)
 #endif
 
+/*数组元素数*/
 #define ELEMENTSOF(x)                                                   \
         (__builtin_choose_expr(                                         \
                 !__builtin_types_compatible_p(typeof(x), typeof(&*(x))), \

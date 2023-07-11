@@ -55,7 +55,7 @@
 #include "user-util.h"
 #include "virt.h"
 
-//各unit类型
+//各unit类型对应的UnitVTable
 const UnitVTable * const unit_vtable[_UNIT_TYPE_MAX] = {
         [UNIT_SERVICE] = &service_vtable,//service类型的unit对象
         [UNIT_SOCKET] = &socket_vtable,
@@ -190,7 +190,7 @@ static void unit_init(Unit *u) {
 }
 
 //向manager->units中添加unit
-int unit_add_name(Unit *u, const char *text) {
+int unit_add_name(Unit *u, const char *text/*unit名称*/) {
         _cleanup_free_ char *s = NULL, *i = NULL;
         UnitType t;
         int r;
@@ -214,11 +214,11 @@ int unit_add_name(Unit *u, const char *text) {
                         return -ENOMEM;
         }
 
-        //如果已存在，则直接返回０
+        //如果此名称已存在，则直接返回０
         if (set_contains(u->names, s))
                 return 0;
 
-        //如果manager中已存在此units，则返回已存在
+        //如果manager中已存在此units，则返回失败
         if (hashmap_contains(u->manager->units, s))
                 return -EEXIST;
 
@@ -252,7 +252,7 @@ int unit_add_name(Unit *u, const char *text) {
         if (!unit_type_may_alias(t) && !set_isempty(u->names))
                 return -EEXIST;
 
-        //unit过多时报错
+        //unit数量超限，报错
         if (hashmap_size(u->manager->units) >= MANAGER_MAX_NAMES)
                 return -E2BIG;
 
@@ -417,6 +417,7 @@ void unit_add_to_load_queue(Unit *u) {
         if (u->load_state != UNIT_STUB || u->in_load_queue)
                 return;
 
+        /*将此unit加入到load队列*/
         LIST_PREPEND(load_queue, u->manager->load_queue, u);
         u->in_load_queue = true;
 }
@@ -1329,6 +1330,7 @@ void unit_dump(Unit *u, FILE *f, const char *prefix) {
                         prefix, job_mode_to_string(u->on_failure_job_mode),
                         prefix, yes_no(u->ignore_on_isolate));
 
+                /*执行此unit对应的dump回调*/
                 if (UNIT_VTABLE(u)->dump)
                         UNIT_VTABLE(u)->dump(u, f, prefix2);
 
@@ -1399,6 +1401,7 @@ void unit_add_to_target_deps_queue(Unit *u) {
         if (u->in_target_deps_queue)
                 return;
 
+        /*将unit加入到deps_queue*/
         LIST_PREPEND(target_deps_queue, m->target_deps_queue, u);
         u->in_target_deps_queue = true;
 }
@@ -1414,6 +1417,7 @@ int unit_add_default_target_dependency(Unit *u, Unit *target) {
          * that loop check below is reliable */
         if (u->load_state != UNIT_LOADED ||
             target->load_state != UNIT_LOADED)
+        	/*target如果未加载，则返回*/
                 return 0;
 
         /* If either side wants no automatic dependencies, then let's
@@ -1520,12 +1524,14 @@ static int unit_add_startup_units(Unit *u) {
         return set_put(u->manager->startup_units, u);
 }
 
+/*加载指定unit*/
 int unit_load(Unit *u) {
         int r;
 
         assert(u);
 
         if (u->in_load_queue) {
+        	/*准备加载，先自load_queue上移除*/
                 LIST_REMOVE(load_queue, u->manager->load_queue, u);
                 u->in_load_queue = false;
         }
@@ -1548,7 +1554,7 @@ int unit_load(Unit *u) {
                 u->fragment_mtime = now(CLOCK_REALTIME);
         }
 
-        //加载unit
+        //通地vtable实现unit加载(各type有自已的load函数，例如service_load）
         if (UNIT_VTABLE(u)->load) {
                 r = UNIT_VTABLE(u)->load(u);
                 if (r < 0)
@@ -1561,12 +1567,16 @@ int unit_load(Unit *u) {
         }
 
         if (u->load_state == UNIT_LOADED) {
+        	/*此unit加载成功*/
+
+        		/*将unit加入到deps_queue,用于解决依赖*/
                 unit_add_to_target_deps_queue(u);
 
                 r = unit_add_slice_dependencies(u);
                 if (r < 0)
                         goto fail;
 
+                /*处理对mount有依赖的*/
                 r = unit_add_mount_dependencies(u);
                 if (r < 0)
                         goto fail;

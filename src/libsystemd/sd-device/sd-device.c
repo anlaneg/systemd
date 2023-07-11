@@ -28,6 +28,7 @@
 #include "strxcpyx.h"
 #include "util.h"
 
+/*初始化一个sd_device对象*/
 int device_new_aux(sd_device **ret) {
         sd_device *device;
 
@@ -145,11 +146,13 @@ int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
 
         /* must be a subdirectory of /sys */
         if (!path_startswith(_syspath, "/sys/"))
+        		/*地址必须以/sys/开头*/
                 return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "sd-device: Syspath '%s' is not a subdirectory of /sys",
                                        _syspath);
 
         if (verify) {
+        		/*解析_syspath,并返回完整路径*/
                 r = chase_symlinks(_syspath, NULL, 0, &syspath);
                 if (r == -ENOENT)
                         return -ENODEV; /* the device does not exist (any more?) */
@@ -186,6 +189,7 @@ int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
                         path = strjoina(syspath, "/uevent");
                         r = access(path, F_OK);
                         if (r < 0) {
+                        	/*所有/sys/devices/目录下设备必须要有uevent文件*/
                                 if (errno == ENOENT)
                                         /* this is not a valid device */
                                         return -ENODEV;
@@ -205,6 +209,7 @@ int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
 
         devpath = syspath + STRLEN("/sys");
 
+        /*添加DEVPATH属性*/
         r = device_add_property_internal(device, "DEVPATH", devpath);
         if (r < 0)
                 return r;
@@ -233,7 +238,8 @@ _public_ int sd_device_new_from_syspath(sd_device **ret, const char *syspath) {
         return 0;
 }
 
-_public_ int sd_device_new_from_devnum(sd_device **ret, char type, dev_t devnum) {
+/*syspath地址为/sys/dev/[block|char]/$major:$minor,*/
+_public_ int sd_device_new_from_devnum(sd_device **ret, char type/*字符设备或块设备*/, dev_t devnum) {
         char *syspath;
         char id[DECIMAL_STR_MAX(unsigned) * 2 + 1];
 
@@ -336,6 +342,7 @@ int device_set_devtype(sd_device *device, const char *_devtype) {
         if (r < 0)
                 return r;
 
+        /*设置devtype*/
         free_and_replace(device->devtype, devtype);
 
         return 0;
@@ -458,7 +465,7 @@ static int handle_uevent_line(sd_device *device, const char *key, const char *va
         assert(minor);
 
         if (streq(key, "DEVTYPE")) {
-        	/*uevent指明DEVTYPE属性*/
+        		/*uevent指明DEVTYPE属性*/
                 r = device_set_devtype(device, value);
                 if (r < 0)
                         return r;
@@ -707,6 +714,7 @@ static int device_new_from_child(sd_device **ret, sd_device *child) {
         assert(ret);
         assert(child);
 
+        /*取子设备的syspath*/
         r = sd_device_get_syspath(child, &syspath);
         if (r < 0)
                 return r;
@@ -714,17 +722,20 @@ static int device_new_from_child(sd_device **ret, sd_device *child) {
         path = strdup(syspath);
         if (!path)
                 return -ENOMEM;
+        /*跳过/sys*/
         subdir = path + STRLEN("/sys");
 
         for (;;) {
                 char *pos;
 
+                /*反查最后一个'/'*/
                 pos = strrchr(subdir, '/');
                 if (!pos || pos < subdir + 2)
                         break;
 
                 *pos = '\0';
 
+                /*将最后一层目录隐取，利用path查device*/
                 r = sd_device_new_from_syspath(ret, path);
                 if (r < 0)
                         continue;
@@ -743,6 +754,7 @@ _public_ int sd_device_get_parent(sd_device *child, sd_device **ret) {
         if (!child->parent_set) {
                 child->parent_set = true;
 
+                /*加载此设备的父设备*/
                 (void) device_new_from_child(&child->parent, child);
         }
 

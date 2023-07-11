@@ -324,6 +324,7 @@ int trigger_main(int argc, char *argv[], void *userdata) {
         for (; optind < argc; optind++) {
                 _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
 
+                /*argv[optind]对应的是device id,且包含前缀，查询对应的设备*/
                 r = find_device(argv[optind], NULL, &dev);
                 if (r < 0)
                         return log_error_errno(r, "Failed to open the device '%s': %m", argv[optind]);

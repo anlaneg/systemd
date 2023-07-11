@@ -63,7 +63,7 @@ int udev_ctrl_new_from_fd(struct udev_ctrl **ret, int fd) {
         assert(ret);
 
         if (fd < 0) {
-        	//创建unix socket
+        		//创建unix socket
                 sock = socket(AF_LOCAL, SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC, 0);
                 if (sock < 0)
                         return log_error_errno(errno, "Failed to create socket: %m");
@@ -332,7 +332,7 @@ int udev_ctrl_send(struct udev_ctrl *uctrl, enum udev_ctrl_msg_type type, int in
         struct udev_ctrl_msg_wire ctrl_msg_wire = {
                 .version = "udev-" STRINGIFY(PROJECT_VERSION),
                 .magic = UDEV_CTRL_MAGIC,
-                .type = type,
+                .type = type,/*消息类型*/
         };
 
         if (uctrl->maybe_disconnected)

@@ -18,6 +18,7 @@
 int manager_parse_config_file(Manager *m) {
         assert(m);
 
+        /*通过networkd-network-gperf.gperf生成的hash*/
         return config_parse_many_nulstr(PKGSYSCONFDIR "/networkd.conf",
                                         CONF_PATHS_NULSTR("systemd/networkd.conf.d"),
                                         "DHCP\0",

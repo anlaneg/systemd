@@ -23,6 +23,7 @@ int proc_cmdline(char **ret) {
         /* For testing purposes it is sometimes useful to be able to override what we consider /proc/cmdline to be */
         e = secure_getenv("SYSTEMD_PROC_CMDLINE");
         if (e) {
+        	/*有环境变量，则以环境变量为准*/
                 char *m;
 
                 m = strdup(e);
@@ -37,7 +38,7 @@ int proc_cmdline(char **ret) {
         	/*容器情况下处理cmdline*/
                 return get_process_cmdline(1, 0, false, ret);
         else
-            /*读取cmdline,将其内容存入到ret中*/
+            /*读取/proc/cmdline,将其内容存入到ret中*/
                 return read_one_line_file("/proc/cmdline", ret);
 }
 
@@ -119,6 +120,7 @@ int proc_cmdline_parse(proc_cmdline_parse_t parse_item, void *data, ProcCmdlineF
 
         assert(parse_item);
 
+        /*获取命令行*/
         r = proc_cmdline(&line);
         if (r < 0)
                 return r;

@@ -44,6 +44,7 @@ _public_ int sd_listen_fds(int unset_environment) {
         int n, r, fd;
         pid_t pid;
 
+        /*取环境变量，获知listen pid*/
         e = getenv("LISTEN_PID");
         if (!e) {
                 r = 0;
@@ -77,8 +78,9 @@ _public_ int sd_listen_fds(int unset_environment) {
                 goto finish;
         }
 
+        /*遍历所有listen fds*/
         for (fd = SD_LISTEN_FDS_START; fd < SD_LISTEN_FDS_START + n; fd ++) {
-                r = fd_cloexec(fd, true);
+                r = fd_cloexec(fd, true);/*exec时关闭此fd*/
                 if (r < 0)
                         goto finish;
         }
@@ -205,6 +207,7 @@ static int sd_is_socket_internal(int fd, int type, int listening) {
                 return -errno;
 
         if (!S_ISSOCK(st_fd.st_mode))
+        	/*此fd不是socket,返回false*/
                 return 0;
 
         if (type != 0) {
@@ -219,6 +222,7 @@ static int sd_is_socket_internal(int fd, int type, int listening) {
                         return -EINVAL;
 
                 if (other_type != type)
+                	/*type不匹配，返回false*/
                         return 0;
         }
 
@@ -239,6 +243,7 @@ static int sd_is_socket_internal(int fd, int type, int listening) {
         return 1;
 }
 
+/*检查fd对应的family及type*/
 _public_ int sd_is_socket(int fd, int family, int type, int listening) {
         int r;
 
@@ -470,6 +475,7 @@ _public_ int sd_pid_notify_with_fds(
                 goto finish;
         }
 
+        /*取notify socket地址*/
         e = getenv("NOTIFY_SOCKET");
         if (!e)
                 return 0;

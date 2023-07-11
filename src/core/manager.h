@@ -125,7 +125,7 @@ struct Manager {
          * not, and the list of jobs may neither. */
 
         /* Active jobs and units */
-	    //保存units
+	    //保存加载的所有units
         Hashmap *units;  /* name string => Unit object n:1 */
         Hashmap *units_by_invocation_id;
         Hashmap *jobs;   /* job id => Job object 1:1 */
@@ -135,6 +135,7 @@ struct Manager {
         LIST_HEAD(Unit, units_by_type[_UNIT_TYPE_MAX]);//
 
         /* Units that need to be loaded */
+        /*需要被加载的units*/
         LIST_HEAD(Unit, load_queue); /* this is actually more a stack than a queue, but uh. */
 
         /* Jobs that need to be run */
@@ -161,7 +162,7 @@ struct Manager {
         LIST_HEAD(Unit, cgroup_empty_queue);
 
         /* Target units whose default target dependencies haven't been set yet */
-        LIST_HEAD(Unit, target_deps_queue);
+        LIST_HEAD(Unit, target_deps_queue);/*用于解决target移赖的队列*/
 
         /* Units that might be subject to StopWhenUnneeded= clean-up */
         LIST_HEAD(Unit, stop_when_unneeded_queue);
@@ -185,8 +186,8 @@ struct Manager {
 
         sd_event_source *run_queue_event_source;
 
-        char *notify_socket;
-        int notify_fd;
+        char *notify_socket;/*notify socket地址*/
+        int notify_fd;/*notify socket fd*/
         sd_event_source *notify_event_source;
 
         int cgroups_agent_fd;

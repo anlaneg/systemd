@@ -20,12 +20,14 @@ int mkdir_safe_internal(const char *path, mode_t mode, uid_t uid, gid_t gid, Mkd
 
         assert(_mkdir != mkdir);
 
+        /*调用mkdir回调*/
         if (_mkdir(path, mode) >= 0) {
                 r = chmod_and_chown(path, mode, uid, gid);
                 if (r < 0)
                         return r;
         }
 
+        /*读取link stats*/
         if (lstat(path, &st) < 0)
                 return -errno;
 

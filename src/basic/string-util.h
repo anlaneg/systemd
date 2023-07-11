@@ -110,9 +110,12 @@ char *strjoin_real(const char *x, ...) _sentinel_;
                 char *_d_, *_p_;                                        \
                 size_t _len_ = 0;                                          \
                 size_t _i_;                                           \
+                /*遍历_appendees_,计算每个成员的字符串长度，合并到_len_中*/\
                 for (_i_ = 0; _i_ < ELEMENTSOF(_appendees_) && _appendees_[_i_]; _i_++) \
                         _len_ += strlen(_appendees_[_i_]);              \
+                        /*申请足量的内存*/\
                 _p_ = _d_ = newa(char, _len_ + 1);                      \
+                /*将各成员连成字符串*/\
                 for (_i_ = 0; _i_ < ELEMENTSOF(_appendees_) && _appendees_[_i_]; _i_++) \
                         _p_ = stpcpy(_p_, _appendees_[_i_]);            \
                 *_p_ = 0;                                               \

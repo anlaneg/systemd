@@ -176,17 +176,21 @@ const char* split(const char **state, size_t *l, const char *separator, SplitFla
         return current;
 }
 
+/*返回 s + suffix*/
 char *strnappend(const char *s, const char *suffix, size_t b) {
         size_t a;
         char *r;
 
         if (!s && !suffix)
+        	/*两者均为NULL，返回空串*/
                 return strdup("");
 
         if (!s)
+        	/*s为NULL，直接返回suffix*/
                 return strndup(suffix, b);
 
         if (!suffix)
+        	/*suffix为NULL，直接返回s*/
                 return strdup(s);
 
         assert(s);
@@ -196,17 +200,21 @@ char *strnappend(const char *s, const char *suffix, size_t b) {
         if (b > ((size_t) -1) - a)
                 return NULL;
 
+        /*申请足量内存*/
         r = new(char, a+b+1);
         if (!r)
                 return NULL;
 
+        /*先填写r*/
         memcpy(r, s, a);
+        /*再填写suffix*/
         memcpy(r+a, suffix, b);
         r[a+b] = 0;
 
         return r;
 }
 
+/*将s + suffix合并*/
 char *strappend(const char *s, const char *suffix) {
         return strnappend(s, suffix, strlen_ptr(suffix));
 }

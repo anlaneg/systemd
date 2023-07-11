@@ -23,6 +23,7 @@ typedef enum ServiceRestart {
         _SERVICE_RESTART_INVALID = -1
 } ServiceRestart;
 
+/*支持的serivce类型*/
 typedef enum ServiceType {
         SERVICE_SIMPLE,   /* we fork and go on right-away (i.e. modern socket activated daemons) */
         SERVICE_FORKING,  /* forks by itself (i.e. traditional daemons) */
@@ -81,21 +82,21 @@ struct ServiceFDStore {
         LIST_FIELDS(ServiceFDStore, fd_store);
 };
 
-//Service类型的Unit(继续自unit)
+//Service类型的Unit(继承自unit)
 struct Service {
         Unit meta;
 
-        ServiceType type;
-        ServiceRestart restart;
+        ServiceType type;/*来源于[Service]下Type配置*/
+        ServiceRestart restart;/*来源于[Service]下Restart配置*/
         ExitStatusSet restart_prevent_status;
         ExitStatusSet restart_force_status;
         ExitStatusSet success_status;
 
         /* If set we'll read the main daemon PID from this file */
-        char *pid_file;
+        char *pid_file;/*来源于Service.PIDFile配置*/
 
         usec_t restart_usec;
-        usec_t timeout_start_usec;
+        usec_t timeout_start_usec;/*serivce启动超时时间*/
         usec_t timeout_stop_usec;
         usec_t runtime_max_usec;
 
@@ -146,7 +147,7 @@ struct Service {
         ServiceResult result;
         ServiceResult reload_result;
 
-        bool main_pid_known:1;
+        bool main_pid_known:1;/*主进程pid是否已知*/
         bool main_pid_alien:1;
         bool bus_name_good:1;
         bool forbid_restart:1;

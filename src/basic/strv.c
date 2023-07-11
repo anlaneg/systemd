@@ -228,17 +228,19 @@ rollback:
         return -ENOMEM;
 }
 
-int strv_extend_strv_concat(char ***a, char **b, const char *suffix) {
+int strv_extend_strv_concat(char ***a, char **b/*一组字符串*/, const char *suffix) {
         int r;
         char **s;
 
         STRV_FOREACH(s, b) {
                 char *v;
 
+                /*字符串合并*/
                 v = strappend(*s, suffix);
                 if (!v)
                         return -ENOMEM;
 
+                /*将字符串合并到a中*/
                 r = strv_push(a, v);
                 if (r < 0) {
                         free(v);

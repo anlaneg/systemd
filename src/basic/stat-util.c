@@ -118,6 +118,7 @@ int null_or_empty_path(const char *fn) {
         return null_or_empty(&st);
 }
 
+/*文件fstat调用失败，文件过大或过小均返回失败*/
 int null_or_empty_fd(int fd) {
         struct stat st;
 

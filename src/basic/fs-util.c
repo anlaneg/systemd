@@ -226,6 +226,7 @@ int chmod_and_chown(const char *path, mode_t mode, uid_t uid, gid_t gid) {
         if (fd < 0)
                 return -errno;
 
+        /*构造此fd对应的path*/
         xsprintf(fd_path, "/proc/self/fd/%i", fd);
 
         if (mode != MODE_INVALID) {
@@ -704,7 +705,8 @@ static int log_autofs_mount_point(int fd, const char *path, unsigned flags) {
                                  n1, path);
 }
 
-int chase_symlinks(const char *path, const char *original_root, unsigned flags, char **ret/*出参，*/) {
+/*按要求检查path路径，返回表示父目录的fd及通过ret返回完整路径内容*/
+int chase_symlinks(const char *path, const char *original_root, unsigned flags, char **ret/*出参，返回path路径后的内容*/) {
         _cleanup_free_ char *buffer = NULL, *done = NULL, *root = NULL;
         _cleanup_close_ int fd = -1;
         unsigned max_follow = CHASE_SYMLINKS_MAX; /* how many symlinks to follow before giving up and returning ELOOP */
@@ -837,7 +839,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                 m = n + strcspn(todo + n, "/");         /* The entire length of the component */
 
                 /* Extract the first component. */
-                /*n的位置是首个非'/'符，m是自todo+n开始首个'/'位置，first为首个目录（可能含多个'/')*/
+                /*n的位置是首个非'/'符，m是自todo+n开始首个'/'位置，则m与n之间为一个目录/空，记为first*/
                 first = strndup(todo, m);
                 if (!first)
                         return -ENOMEM;
@@ -846,6 +848,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
 
                 /* Empty? Then we reached the end. */
                 if (isempty(first))
+                	/*已达到目录处理结尾，跳出*/
                         break;
 
                 /* Just a single slash? Then we reached the end. */
@@ -866,12 +869,14 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
 
                 /* Two dots? Then chop off the last bit of what we already found out. */
                 if (path_equal(first, "/..")) {
+                	/*遇到'/../'这种路径，需要切换到父目录*/
                         _cleanup_free_ char *parent = NULL;
                         _cleanup_close_ int fd_parent = -1;
 
                         /* If we already are at the top, then going up will not change anything. This is in-line with
                          * how the kernel handles this. */
                         if (empty_or_root(done))
+                        	/*已经到达root了，则直接eat掉再试*/
                                 continue;
 
                         parent = dirname_malloc(done);
@@ -914,7 +919,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                 /* Otherwise let's see what this is. */
                 child = openat(fd, first + n, O_CLOEXEC|O_NOFOLLOW|O_PATH);/*在fd位置，继续下一层处理*/
                 if (child < 0) {
-
+                		/*first指明的目录打开失败*/
                         if (errno == ENOENT &&
                             (flags & CHASE_NONEXISTENT) &&
                             (isempty(todo) || path_is_normalized(todo))) {
@@ -937,6 +942,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                         return -errno;
                 }
 
+                /*尝试访问此目录*/
                 if (fstat(child, &st) < 0)
                         return -errno;
                 if ((flags & CHASE_SAFE) &&
@@ -951,7 +957,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                         return log_autofs_mount_point(child, path, flags);
 
                 /*当前目录为link*/
-                if (S_ISLNK(st.st_mode) && !((flags & CHASE_NOFOLLOW) && isempty(todo))) {
+                if (S_ISLNK(st.st_mode) && !((flags & CHASE_NOFOLLOW/*未指明不flollow link*/) && isempty(todo))) {
                         char *joined;
 
                         _cleanup_free_ char *destination = NULL;
@@ -969,6 +975,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                                 return -EINVAL;
 
                         if (path_is_absolute(destination)) {
+                        	/*目标为绝对路径，切换到绝对路径，并跟踪*/
 
                                 /* An absolute destination. Start the loop from the beginning, but use the root
                                  * directory as base. */
@@ -1001,7 +1008,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
 
                                 /* Prefix what's left to do with what we just read, and start the loop again, but
                                  * remain in the current directory. */
-                                joined = strjoin(destination, todo);
+                                joined = strjoin(destination, todo);/*将剩余内容附加到link目标点上*/
                         } else
                                 joined = strjoin("/", destination, todo);
                         if (!joined)
@@ -1041,6 +1048,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
         }
 
         if (ret)
+        	/*返回剩余内容*/
                 *ret = TAKE_PTR(done);
 
         if (flags & CHASE_OPEN) {

@@ -56,6 +56,7 @@ static inline int udev_ctrl_send_start_exec_queue(struct udev_ctrl *uctrl) {
         return udev_ctrl_send(uctrl, UDEV_CTRL_START_EXEC_QUEUE, 0, NULL);
 }
 
+/*发送reload命令*/
 static inline int udev_ctrl_send_reload(struct udev_ctrl *uctrl) {
         return udev_ctrl_send(uctrl, UDEV_CTRL_RELOAD, 0, NULL);
 }

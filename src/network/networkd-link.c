@@ -4236,6 +4236,7 @@ int link_save(Link *link) {
         if (r < 0)
                 goto fail;
 
+        /*写link状态文件*/
         if (rename(temp_path, link->state_file) < 0) {
                 r = -errno;
                 goto fail;

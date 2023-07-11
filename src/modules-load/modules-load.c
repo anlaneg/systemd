@@ -151,9 +151,11 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
+                	/*显示帮助*/
                         return help();
 
                 case ARG_VERSION:
+                	/*显示版本*/
                         return version();
 
                 case '?':
@@ -170,6 +172,7 @@ static int run(int argc, char *argv[]) {
         _cleanup_(kmod_unrefp) struct kmod_ctx *ctx = NULL;
         int r, k;
 
+        /*解析参数*/
         r = parse_argv(argc, argv);
         if (r <= 0)
                 return r;
@@ -182,6 +185,7 @@ static int run(int argc, char *argv[]) {
         if (r < 0)
                 log_warning_errno(r, "Failed to parse kernel command line, ignoring: %m");
 
+        /*初始化kmod_ctx*/
         ctx = kmod_new(NULL, NULL);
         if (!ctx) {
                 log_error("Failed to allocate memory for kmod.");
@@ -233,5 +237,5 @@ static int run(int argc, char *argv[]) {
         return r;
 }
 
-/*main函数定义*/
+/*systemd-modules-load进程main函数定义*/
 DEFINE_MAIN_FUNCTION(run);

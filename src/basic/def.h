@@ -66,6 +66,7 @@
         "/usr/lib/" n "\0"                      \
         _CONF_PATHS_SPLIT_USR_NULSTR(n)
 
+/*配置文件路径*/
 #define CONF_PATHS_USR(n)                       \
         "/etc/" n,                              \
         "/run/" n,                              \

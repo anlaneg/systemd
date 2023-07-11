@@ -48,8 +48,8 @@ struct link_config {
 
         char *description;
         struct ether_addr *mac;
-        MACPolicy mac_policy;
-        NamePolicy *name_policy;
+        MACPolicy mac_policy;/*只容许一种，例如persistent*/
+        NamePolicy *name_policy;/*容许配置多个，例如kernel database onboard slot path*/
         char *name;
         char *alias;
         uint32_t mtu;

@@ -189,7 +189,8 @@ typedef enum Disabled {
                 return 0;                                               \
         }
 
-#define DEFINE_CONFIG_PARSE_ENUM(function, name, type, msg)             \
+/*枚举类型配置解析函数*/
+#define DEFINE_CONFIG_PARSE_ENUM(function/*函数名*/, name/*类型名称*/, type, msg)             \
         CONFIG_PARSER_PROTOTYPE(function) {                             \
                 type *i = data, x;                                      \
                                                                         \

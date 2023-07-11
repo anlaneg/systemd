@@ -120,6 +120,7 @@ int manager_connect_bus(Manager *m) {
         assert(m);
 
         if (m->bus)
+        	/*bus已初始化，退出*/
                 return 0;
 
         r = bus_open_system_watch_bind_with_description(&m->bus, "bus-api-network");

@@ -138,6 +138,7 @@ static int netdev_bridge_post_create(NetDev *netdev, Link *link, sd_netlink_mess
         return r;
 }
 
+/*初始化bridge netdev*/
 static void bridge_init(NetDev *n) {
         Bridge *b;
 
@@ -154,6 +155,7 @@ static void bridge_init(NetDev *n) {
         b->ageing_time = USEC_INFINITY;
 }
 
+/*定义桥netdev设备的vtable*/
 const NetDevVTable bridge_vtable = {
         .object_size = sizeof(Bridge),
         .init = bridge_init,

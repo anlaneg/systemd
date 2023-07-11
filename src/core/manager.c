@@ -875,6 +875,7 @@ static int manager_setup_notify(Manager *m) {
                 return 0;
 
         if (m->notify_fd < 0) {
+        	/*初始化notify_fd*/
                 _cleanup_close_ int fd = -1;
                 union sockaddr_union sa = {};
                 int salen;
@@ -889,6 +890,7 @@ static int manager_setup_notify(Manager *m) {
 
                 fd_inc_rcvbuf(fd, NOTIFY_RCVBUF_SIZE);
 
+                /*构造notify_socket对应的unix socket地址*/
                 m->notify_socket = strappend(m->prefix[EXEC_DIRECTORY_RUNTIME], "/systemd/notify");
                 if (!m->notify_socket)
                         return log_oom();
@@ -900,6 +902,7 @@ static int manager_setup_notify(Manager *m) {
                 (void) mkdir_parents_label(m->notify_socket, 0755);
                 (void) sockaddr_un_unlink(&sa.un);
 
+                /*绑定notify_socket地址*/
                 r = bind(fd, &sa.sa, salen);
                 if (r < 0)
                         return log_error_errno(errno, "bind(%s) failed: %m", m->notify_socket);
@@ -914,6 +917,7 @@ static int manager_setup_notify(Manager *m) {
         }
 
         if (!m->notify_event_source) {
+        	/*关注notify_fd的poll in事件，注册回调处理它*/
                 r = sd_event_add_io(m->event, &m->notify_event_source, m->notify_fd, EPOLLIN, manager_dispatch_notify_fd, m);
                 if (r < 0)
                         return log_error_errno(r, "Failed to allocate notify event source: %m");
@@ -1882,6 +1886,7 @@ static int manager_dispatch_target_deps_queue(Manager *m) {
         while ((u = m->target_deps_queue)) {
                 assert(u->in_target_deps_queue);
 
+                /*将unit自deps_queue中移除*/
                 LIST_REMOVE(target_deps_queue, u->manager->target_deps_queue, u);
                 u->in_target_deps_queue = false;
 
@@ -1920,7 +1925,7 @@ unsigned manager_dispatch_load_queue(Manager *m) {
         while ((u = m->load_queue)) {
                 assert(u->in_load_queue);
 
-                //加载unit
+                //加载挂接在m->load_queue上的所有unit
                 unit_load(u);
                 n++;
         }
@@ -1929,6 +1934,7 @@ unsigned manager_dispatch_load_queue(Manager *m) {
 
         /* Dispatch the units waiting for their target dependencies to be added now, as all targets that we know about
          * should be loaded and have aliases resolved */
+        /*加载成功的，依赖已放入deps_queue，这里开始处理*/
         (void) manager_dispatch_target_deps_queue(m);
 
         return n;
@@ -1936,7 +1942,7 @@ unsigned manager_dispatch_load_queue(Manager *m) {
 
 int manager_load_unit_prepare(
                 Manager *m,
-                const char *name,
+                const char *name/*unit名称*/,
                 const char *path,
                 sd_bus_error *e,
                 Unit **_ret/*出参，返回加载后的unit*/) {
@@ -1947,7 +1953,7 @@ int manager_load_unit_prepare(
         int r;
 
         assert(m);
-        assert(name || path);
+        assert(name || path);/*两者必给其一*/
         assert(_ret);
 
         /* This will prepare the unit for loading, but not actually
@@ -1982,7 +1988,7 @@ int manager_load_unit_prepare(
                 return 1;
         }
 
-        //构造unit
+        //此unit还未加载，先按unit类型构造unit对象
         ret = cleanup_ret = unit_new(m, unit_vtable[t]->object_size);
         if (!ret)
                 return -ENOMEM;
@@ -1998,6 +2004,7 @@ int manager_load_unit_prepare(
         if (r < 0)
                 return r;
 
+        /*将此unit加入到load队列*/
         unit_add_to_load_queue(ret);
         unit_add_to_dbus_queue(ret);
         unit_add_to_gc_queue(ret);
@@ -2010,7 +2017,7 @@ int manager_load_unit_prepare(
 
 int manager_load_unit(
                 Manager *m,
-                const char *name,
+                const char *name/*unit名称*/,
                 const char *path,
                 sd_bus_error *e,
                 Unit **_ret/*出参，返回加载后的unit*/) {
@@ -2023,7 +2030,7 @@ int manager_load_unit(
         /* This will load the service information files, but not actually
          * start any services or anything. */
 
-        r = manager_load_unit_prepare(m, name, path, e, _ret);
+        r = manager_load_unit_prepare(m, name, path, e, _ret);/*准备load此unit*/
         if (r != 0)
                 return r;//加载失败
 
@@ -2142,6 +2149,7 @@ void manager_clear_jobs(Manager *m) {
                 job_finish_and_invalidate(j, JOB_CANCELED, false, false);
 }
 
+/*具体完成已挂接在run_queue上的unit*/
 static int manager_dispatch_run_queue(sd_event_source *source, void *userdata) {
         Manager *m = userdata;
         Job *j;
@@ -2341,6 +2349,7 @@ static int manager_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t 
                 return 0;
         }
 
+        /*收取notify_fd获得的信息*/
         n = recvmsg(m->notify_fd, &msghdr, MSG_DONTWAIT|MSG_CMSG_CLOEXEC|MSG_TRUNC);
         if (n < 0) {
                 if (IN_SET(errno, EAGAIN, EINTR))

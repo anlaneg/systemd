@@ -29,7 +29,7 @@ int udev_parse_config_full(
         _cleanup_free_ char *log_val = NULL, *children_max = NULL, *exec_delay = NULL, *event_timeout = NULL, *resolve_names = NULL;
         int r;
 
-        //解析udev配置，将指定的key取值填充到其对应的变量中
+        //解析udev配置文件，将指定的key取值填充到其对应的变量中
         r = parse_env_file(NULL, "/etc/udev/udev.conf",
                            "udev_log", &log_val,
                            "children_max", &children_max,
@@ -50,6 +50,7 @@ int udev_parse_config_full(
                 if (n >= 2 &&
                     ((log_val[0] == '"' && log_val[n-1] == '"') ||
                      (log_val[0] == '\'' && log_val[n-1] == '\''))) {
+                		/*以字符串形式指明log级别的，移除前导及后继的字符*/
                         log_val[n - 1] = '\0';
                         log = log_val + 1;
                 } else
@@ -63,6 +64,7 @@ int udev_parse_config_full(
         }
 
         if (ret_children_max && children_max) {
+        	/*解析children_max配置并通过children_max出参带出函数*/
                 r = safe_atou(children_max, ret_children_max);
                 if (r < 0)
                         log_notice_errno(r, "/etc/udev/udev.conf: failed to set parse children_max=%s, ignoring: %m", children_max);

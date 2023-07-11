@@ -351,7 +351,7 @@ static int get_mac(sd_device *device, MACPolicy policy, struct ether_addr *mac) 
 }
 
 int link_config_apply(link_config_ctx *ctx, link_config *config,
-                      sd_device *device, const char **name) {
+                      sd_device *device, const char **name/*出参，新名称*/) {
         struct ether_addr generated_mac;
         struct ether_addr *mac = NULL;
         const char *new_name = NULL;
@@ -422,7 +422,7 @@ int link_config_apply(link_config_ctx *ctx, link_config *config,
 
         /*只有两者均开启name policy才执行policy处理*/
         if (ctx->enable_name_policy && config->name_policy)
-                for (NamePolicy *p = config->name_policy; !new_name && *p != _NAMEPOLICY_INVALID; p++) {
+                for (NamePolicy *p = config->name_policy; !new_name/*没有产生新名称*/ && *p != _NAMEPOLICY_INVALID/*仍有policy*/; p++) {
                         policy = *p;
 
                         switch (policy) {
@@ -462,6 +462,7 @@ int link_config_apply(link_config_ctx *ctx, link_config *config,
                 }
 
         if (new_name)
+        	/*显示匹配哪条策略，确定了哪个名称*/
                 log_device_debug(device, "Policy *%s* yields \"%s\".", name_policy_to_string(policy), new_name);
         else if (config->name) {
                 new_name = config->name;
@@ -469,7 +470,7 @@ int link_config_apply(link_config_ctx *ctx, link_config *config,
         } else
                 log_device_debug(device, "Policies didn't yield a name and Name= is not given, not renaming.");
  no_rename:
-
+ 	 	/*没有找到名称，mac_policy中设置了策略，生成mac地址*/
         if (IN_SET(config->mac_policy, MACPOLICY_PERSISTENT, MACPOLICY_RANDOM)) {
         		/*mac policy为random或者persistent，则获取generated_mac*/
                 if (get_mac(device, config->mac_policy, &generated_mac) > 0)
@@ -527,6 +528,7 @@ static const char* const name_policy_table[_NAMEPOLICY_MAX] = {
 };
 
 DEFINE_STRING_TABLE_LOOKUP(name_policy, NamePolicy);
+/*容许匹配一组，设置进name_policy*/
 DEFINE_CONFIG_PARSE_ENUMV(config_parse_name_policy, name_policy, NamePolicy,
                           _NAMEPOLICY_INVALID,
                           "Failed to parse interface name policy");

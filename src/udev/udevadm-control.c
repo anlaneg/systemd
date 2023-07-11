@@ -125,6 +125,7 @@ int control_main(int argc, char *argv[], void *userdata) {
                                 return log_error_errno(r, "Failed to send request to start exec queue: %m");
                         break;
                 case 'R':
+                	/*指明reload规则*/
                         r = udev_ctrl_send_reload(uctrl);
                         if (r == -ENOANO)
                                 log_warning("Cannot specify --reload after --exit, ignoring.");

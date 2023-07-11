@@ -287,7 +287,7 @@ static int parse_line(
 int config_parse(const char *unit/*unit名称*/,
                  const char *filename/*配置文件名称*/,
                  FILE *f/*配置文件操作对象*/,
-                 const char *sections,
+                 const char *sections/*此unit容许出现的sections*/,
                  ConfigItemLookup lookup,
                  const void *table,
                  ConfigParseFlags flags,
@@ -472,7 +472,7 @@ static int config_parse_many_files(
 int config_parse_many_nulstr(
                 const char *conf_file,//配置文件
                 const char *conf_file_dirs,//配置文件所在目录集合（多个字符串连续存放）
-                const char *sections,
+                const char *sections,/*容许的section*/
                 ConfigItemLookup lookup,
                 const void *table,
                 ConfigParseFlags flags,
@@ -491,10 +491,10 @@ int config_parse_many_nulstr(
 
 /* Parse each config file in the directories specified as strv. */
 int config_parse_many(
-                const char *conf_file,
-                const char* const* conf_file_dirs,
+                const char *conf_file/*配置文件名称*/,
+                const char* const* conf_file_dirs/*配置文件目录集合*/,
                 const char *dropin_dirname,
-                const char *sections,
+                const char *sections/*容许的sections列表*/,
                 ConfigItemLookup lookup,
                 const void *table,
                 ConfigParseFlags flags,
@@ -505,15 +505,18 @@ int config_parse_many(
         const char *suffix;
         int r;
 
+        /*通过dropin_dirname生成可能的dropin_dirs*/
         suffix = strjoina("/", dropin_dirname);
         r = strv_extend_strv_concat(&dropin_dirs, (char**) conf_file_dirs, suffix);
         if (r < 0)
                 return r;
 
+        /*在dropin_dirname中查找.conf文件*/
         r = conf_files_list_strv(&files, ".conf", NULL, 0, (const char* const*) dropin_dirs);
         if (r < 0)
                 return r;
 
+        /*解析.conf配置文件*/
         return config_parse_many_files(conf_file, files, sections, lookup, table, flags, userdata);
 }
 

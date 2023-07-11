@@ -231,10 +231,12 @@ _public_ int sd_bus_new(sd_bus **ret) {
 
         assert_return(ret, -EINVAL);
 
+        /*申请sd_bus内存*/
         b = new(sd_bus, 1);
         if (!b)
                 return -ENOMEM;
 
+        /*初始化sd_bus*/
         *b = (sd_bus) {
                 .n_ref = 1,
                 .input_fd = -1,
@@ -258,6 +260,7 @@ _public_ int sd_bus_new(sd_bus **ret) {
         return 0;
 }
 
+/*设置bus->address*/
 _public_ int sd_bus_set_address(sd_bus *bus, const char *address) {
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
@@ -303,6 +306,7 @@ _public_ int sd_bus_set_exec(sd_bus *bus, const char *path, char *const argv[]) 
         return strv_free_and_replace(bus->exec_argv, a);
 }
 
+/*设置bus->bus_client*/
 _public_ int sd_bus_set_bus_client(sd_bus *bus, int b) {
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
@@ -394,6 +398,7 @@ _public_ int sd_bus_set_trusted(sd_bus *bus, int b) {
         return 0;
 }
 
+/*设置bus->description*/
 _public_ int sd_bus_set_description(sd_bus *bus, const char *description) {
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
@@ -1192,6 +1197,7 @@ _public_ int sd_bus_start(sd_bus *bus) {
                 return r;
         }
 
+        /*发送hello*/
         return bus_send_hello(bus);
 }
 

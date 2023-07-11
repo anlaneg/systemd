@@ -17,7 +17,7 @@ typedef enum LookupPathsFlags {
 struct LookupPaths {
         /* Where we look for unit files. This includes the individual special paths below, but also any vendor
          * supplied, static unit file paths. */
-        char **search_path;//用于查询unit的路径
+        char **search_path;//用于查找unit的目录路径集合
 
         /* Where we shall create or remove our installation symlinks, aka "configuration", and where the user/admin
          * shall place his own unit files. */

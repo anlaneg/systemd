@@ -73,6 +73,7 @@ ssize_t string_table_lookup(const char * const *table, size_t len, const char *k
                 return (type) -1;                                       \
         }                                                               \
 
+/*string数组表 type与string映射函数实现，sting与type映射函数实现*/
 #define _DEFINE_STRING_TABLE_LOOKUP(name,type,scope)                    \
         _DEFINE_STRING_TABLE_LOOKUP_TO_STRING(name,type,scope)          \
         _DEFINE_STRING_TABLE_LOOKUP_FROM_STRING(name,type,scope)

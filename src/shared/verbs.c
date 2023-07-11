@@ -46,7 +46,8 @@ bool running_in_chroot_or_offline(void) {
         return r > 0;
 }
 
-int dispatch_verb(int argc, char *argv[], const Verb verbs[]/*各命令指行函数*/, void *userdata) {
+/*按argv[0]确定子命令，映射对应的verbs,执行参数检查，并调用verbs->dispatch*/
+int dispatch_verb(int argc, char *argv[], const Verb verbs[]/*各命令对应的执行函数*/, void *userdata) {
         const Verb *verb;
         const char *name;
         unsigned i;
@@ -61,13 +62,14 @@ int dispatch_verb(int argc, char *argv[], const Verb verbs[]/*各命令指行函
         left = argc - optind;
         argv += optind;
         optind = 0;
-        name = argv[0];
+        name = argv[0];/*取第一个参数作用命令名称*/
 
         for (i = 0;; i++) {
                 bool found;
 
                 /* At the end of the list? */
                 if (!verbs[i].dispatch) {
+                	/*未找到对应的处理函数，报错*/
                         if (name)
                                 log_error("Unknown operation %s.", name);
                         else
@@ -76,14 +78,14 @@ int dispatch_verb(int argc, char *argv[], const Verb verbs[]/*各命令指行函
                 }
 
                 if (name)
-                    /*提供了参数，检查参数是否区配*/
+                    /*检查verbs[i]的命令与name是否匹配*/
                         found = streq(name, verbs[i].verb);
                 else
-                    /*命令有default标记，没有提供参数，使用默认命令*/
+                    /*未提供name，当前命令有default标记，则使用默认命令*/
                         found = verbs[i].flags & VERB_DEFAULT;
 
                 if (found) {
-                    /*命中*/
+                    /*命中，确定要执行的动作，跳出*/
                         verb = &verbs[i];
                         break;
                 }
@@ -94,7 +96,7 @@ int dispatch_verb(int argc, char *argv[], const Verb verbs[]/*各命令指行函
         if (!name)
                 left = 1;
 
-        /*子命令参数校验*/
+        /*子命令参数数目校验*/
         if (verb->min_args != VERB_ANY &&
             (unsigned) left < verb->min_args)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
@@ -106,6 +108,7 @@ int dispatch_verb(int argc, char *argv[], const Verb verbs[]/*各命令指行函
                                        "Too many arguments.");
 
         if ((verb->flags & VERB_ONLINE_ONLY) && running_in_chroot_or_offline()) {
+        	/*此命令仅容许在chroot中运行，退出*/
                 if (name)
                         log_info("Running in chroot, ignoring request: %s", name);
                 else
@@ -114,6 +117,7 @@ int dispatch_verb(int argc, char *argv[], const Verb verbs[]/*各命令指行函
         }
 
         if (verb->flags & VERB_MUST_BE_ROOT) {
+        	/*必须以root权限运行*/
                 r = must_be_root();
                 if (r < 0)
                         return r;

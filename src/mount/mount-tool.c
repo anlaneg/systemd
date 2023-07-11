@@ -170,6 +170,7 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
+        /*程序名称如为systemd-umount，则action更改为umount*/
         if (strstr(program_invocation_short_name, "systemd-umount"))
                         arg_action = ACTION_UMOUNT;
 
@@ -222,11 +223,13 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 't':
+                		/*设置mount-type*/
                         if (free_and_strdup(&arg_mount_type, optarg) < 0)
                                 return log_oom();
                         break;
 
                 case 'o':
+                		/*设置mount-options*/
                         if (free_and_strdup(&arg_mount_options, optarg) < 0)
                                 return log_oom();
                         break;
@@ -248,10 +251,12 @@ static int parse_argv(int argc, char *argv[]) {
                         if (r < 0)
                                 return log_error_errno(r, "Failed to parse --fsck= argument: %s", optarg);
 
+                        /*指定fsck*/
                         arg_fsck = r;
                         break;
 
                 case ARG_DESCRIPTION:
+                	/*设置description*/
                         if (free_and_strdup(&arg_description, optarg) < 0)
                                 return log_oom();
                         break;
@@ -296,6 +301,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 'u':
+                	/*指定动作为umount*/
                         arg_action = ACTION_UMOUNT;
                         break;
 
@@ -527,6 +533,7 @@ static int start_transient_mount(
                         return log_error_errno(r, "Could not watch jobs: %m");
         }
 
+        /*构造mount target*/
         r = unit_name_from_path(arg_mount_where, ".mount", &mount_unit);
         if (r < 0)
                 return log_error_errno(r, "Failed to make mount unit name: %m");
@@ -546,7 +553,7 @@ static int start_transient_mount(
                 return bus_log_create_error(r);
 
         /* Name and mode */
-        r = sd_bus_message_append(m, "ss", mount_unit, "fail");
+        r = sd_bus_message_append(m, "ss", mount_unit, "fail");/*启动mount_unit*/
         if (r < 0)
                 return bus_log_create_error(r);
 
@@ -1518,6 +1525,7 @@ finish:
         return r;
 }
 
+/*systemd-mount程序入口*/
 static int run(int argc, char* argv[]) {
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         int r;
@@ -1532,11 +1540,13 @@ static int run(int argc, char* argv[]) {
         if (arg_action == ACTION_LIST)
                 return list_devices();
 
+        /*连接到systemd*/
         r = bus_connect_transport_systemd(arg_transport, arg_host, arg_user, &bus);
         if (r < 0)
                 return log_error_errno(r, "Failed to create bus connection: %m");
 
         if (arg_action == ACTION_UMOUNT)
+        	/*执行umount*/
                 return action_umount(bus, argc, argv);
 
         if (!path_is_normalized(arg_mount_what)) {
@@ -1603,6 +1613,7 @@ static int run(int argc, char* argv[]) {
 
         case ACTION_MOUNT:
         case ACTION_DEFAULT:
+        	/*执行mount*/
                 r = start_transient_mount(bus, argv + optind);
                 break;
 

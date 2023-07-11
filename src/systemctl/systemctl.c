@@ -2750,6 +2750,7 @@ static int check_triggering_units(sd_bus *bus, const char *name) {
         return 0;
 }
 
+/*start_unit函数支持的动作与函数映射*/
 static const struct {
         const char *verb;
         const char *method;
@@ -2768,6 +2769,7 @@ static const struct {
         { "force-reload",          "ReloadOrTryRestartUnit" }
 };
 
+/*由verb映射对应的处理函数名称*/
 static const char *verb_to_method(const char *verb) {
        uint i;
 
@@ -2892,8 +2894,8 @@ static int on_properties_changed(sd_bus_message *m, void *userdata, sd_bus_error
 
 static int start_unit_one(
                 sd_bus *bus,
-                const char *method,
-                const char *name,
+                const char *method/*要执行的方法名*/,
+                const char *name/*unit名称*/,
                 const char *mode,
                 sd_bus_error *error,
                 BusWaitForJobs *w,
@@ -2949,6 +2951,7 @@ static int start_unit_one(
         if (arg_dry_run)
                 return 0;
 
+        /*通过bus调用此方法*/
         r = sd_bus_call_method(
                         bus,
                         "org.freedesktop.systemd1",
@@ -3116,19 +3119,23 @@ static int start_unit(int argc, char *argv[], void *userdata) {
         if (arg_action == ACTION_SYSTEMCTL) {
                 enum action action;
 
+                /*确定用户输出的参数，例如start，查询action*/
                 action = verb_to_action(argv[0]);
 
                 if (action != _ACTION_INVALID) {
+                	/*查询到，执行这些特别的方法*/
                         method = "StartUnit";
                         mode = action_table[action].mode;
                         one_name = action_table[action].target;
                 } else {
+                	/*未查询到*/
                         if (streq(argv[0], "isolate")) {
                                 method = "StartUnit";
                                 mode = "isolate";
 
                                 suffix = ".target";
                         } else {
+                        	/*通过verb查询处理method名称，例如systemctl start就走这个流程*/
                                 method = verb_to_method(argv[0]);
                                 mode = arg_job_mode;
                         }
@@ -3187,7 +3194,7 @@ static int start_unit(int argc, char *argv[], void *userdata) {
         STRV_FOREACH(name, names) {
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
 
-                r = start_unit_one(bus, method, *name, mode, &error, w, arg_wait ? &wait_context : NULL);
+                r = start_unit_one(bus, method/*要执行的方法名*/, *name, mode, &error, w, arg_wait ? &wait_context : NULL);
                 if (ret == EXIT_SUCCESS && r < 0)
                         ret = translate_bus_error_to_exit_status(r, &error);
 
@@ -5609,12 +5616,14 @@ static int show(int argc, char *argv[], void *userdata) {
 
         assert(argv);
 
+        /*检查show函数对应的具体是哪个命令（show,status,help)*/
         show_mode = systemctl_show_mode_from_string(argv[0]);
         if (show_mode < 0)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Invalid argument.");
 
         if (show_mode == SYSTEMCTL_SHOW_HELP && argc <= 1)
+        	/*help子命令必须指定unit names*/
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "This command expects one or more unit names. Did you mean --help?");
 
@@ -8578,7 +8587,7 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argv);
 
         if (program_invocation_short_name) {
-
+        		/*调用进来的程序如果是以下名称，则执行其相应的函数*/
                 if (strstr(program_invocation_short_name, "halt")) {
                         arg_action = ACTION_HALT;
                         return halt_parse_argv(argc, argv);
@@ -8588,6 +8597,7 @@ static int parse_argv(int argc, char *argv[]) {
                         return halt_parse_argv(argc, argv);
 
                 } else if (strstr(program_invocation_short_name, "reboot")) {
+                	/*执行机器重启*/
                         if (kexec_loaded())
                                 arg_action = ACTION_KEXEC;
                         else
@@ -8633,6 +8643,7 @@ static int parse_argv(int argc, char *argv[]) {
                 }
         }
 
+        /*systemctl命令解析*/
         arg_action = ACTION_SYSTEMCTL;
         return systemctl_parse_argv(argc, argv);
 }
@@ -8707,7 +8718,8 @@ static int systemctl_main(int argc, char *argv[]) {
                 { "list-machines",         VERB_ANY, VERB_ANY, VERB_ONLINE_ONLY|VERB_MUST_BE_ROOT, list_machines },
                 { "clear-jobs",            VERB_ANY, 1,        VERB_ONLINE_ONLY, trivial_method       },
                 { "cancel",                VERB_ANY, VERB_ANY, VERB_ONLINE_ONLY, cancel_job           },
-                { "start",                 2,        VERB_ANY, VERB_ONLINE_ONLY, start_unit           },
+                /*启动service,注意以下多个verbs都调用start_unit*/
+				{ "start",                 2,        VERB_ANY, VERB_ONLINE_ONLY, start_unit           },
                 { "stop",                  2,        VERB_ANY, VERB_ONLINE_ONLY, start_unit           },
                 { "condstop",              2,        VERB_ANY, VERB_ONLINE_ONLY, start_unit           }, /* For compatibility with ALTLinux */
                 { "reload",                2,        VERB_ANY, VERB_ONLINE_ONLY, start_unit           },
@@ -8726,7 +8738,8 @@ static int systemctl_main(int argc, char *argv[]) {
                 { "is-failed",             2,        VERB_ANY, VERB_ONLINE_ONLY, check_unit_failed    },
                 { "show",                  VERB_ANY, VERB_ANY, VERB_ONLINE_ONLY, show                 },
                 { "cat",                   2,        VERB_ANY, VERB_ONLINE_ONLY, cat                  },
-                { "status",                VERB_ANY, VERB_ANY, VERB_ONLINE_ONLY, show                 },
+                /*显示service状态*/
+				{ "status",                VERB_ANY, VERB_ANY, VERB_ONLINE_ONLY, show                 },
                 { "help",                  VERB_ANY, VERB_ANY, VERB_ONLINE_ONLY, show                 },
                 { "daemon-reload",         VERB_ANY, 1,        VERB_ONLINE_ONLY, daemon_reload        },
                 { "daemon-reexec",         VERB_ANY, 1,        VERB_ONLINE_ONLY, daemon_reload        },
@@ -8769,6 +8782,7 @@ static int systemctl_main(int argc, char *argv[]) {
                 {}
         };
 
+        /*按verbs表执行systemctl对应的动作*/
         return dispatch_verb(argc, argv, verbs, NULL);
 }
 
@@ -9008,7 +9022,7 @@ static int logind_cancel_shutdown(void) {
 static int run(int argc, char *argv[]) {
         int r;
 
-        argv_cmdline = argv[0];
+        argv_cmdline = argv[0];/*取进程名称*/
 
         setlocale(LC_ALL, "");
         log_parse_environment();
@@ -9024,6 +9038,7 @@ static int run(int argc, char *argv[]) {
          * ellipsized. */
         original_stdout_is_tty = isatty(STDOUT_FILENO);
 
+        /*解析命令行*/
         r = parse_argv(argc, argv);
         if (r <= 0)
                 goto finish;
@@ -9041,6 +9056,7 @@ static int run(int argc, char *argv[]) {
         switch (arg_action) {
 
         case ACTION_SYSTEMCTL:
+        	/*处理程序systemctl命令*/
                 r = systemctl_main(argc, argv);
                 break;
 
@@ -9052,6 +9068,7 @@ static int run(int argc, char *argv[]) {
         case ACTION_POWEROFF:
         case ACTION_REBOOT:
         case ACTION_KEXEC:
+        	/*执行halt,poweroff,reboot命令*/
                 r = halt_main();
                 break;
 
@@ -9105,4 +9122,5 @@ finish:
         return r;
 }
 
+/*systemctl入口*/
 DEFINE_MAIN_FUNCTION_WITH_POSITIVE_FAILURE(run);

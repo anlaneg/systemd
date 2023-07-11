@@ -417,6 +417,7 @@ char* path_startswith(const char *path, const char *prefix) {
          */
 
         if ((path[0] == '/') != (prefix[0] == '/'))
+        	/*快速检查，两者第一个字符不相等，返回NULL*/
                 return NULL;
 
         for (;;) {
@@ -426,6 +427,7 @@ char* path_startswith(const char *path, const char *prefix) {
                 prefix += strspn(prefix, "/");
 
                 if (*prefix == 0)
+                	/*prefix消耗光了，则path即为移除前缀后的内容*/
                         return (char*) path;
 
                 if (*path == 0)

@@ -89,8 +89,10 @@ static int help_main(int argc, char *argv[], void *userdata) {
         return help();
 }
 
+/*udevadm应用*/
 static int udevadm_main(int argc, char *argv[]) {
         static const Verb verbs[] = {
+        		/*device信息显示*/
                 { "info",         VERB_ANY, VERB_ANY, 0, info_main    },
                 { "trigger",      VERB_ANY, VERB_ANY, 0, trigger_main },
                 { "settle",       VERB_ANY, VERB_ANY, 0, settle_main  },
@@ -104,6 +106,7 @@ static int udevadm_main(int argc, char *argv[]) {
                 {}
         };
 
+        /*检查参数，按上面verbs映射表进行执行*/
         return dispatch_verb(argc, argv, verbs, NULL);
 }
 

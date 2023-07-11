@@ -675,6 +675,7 @@ static int builtin_path_id(sd_device *dev, int argc, char *argv[], bool test) {
         return 0;
 }
 
+/*执行path_id内置命令，添加ID_PATH*/
 const struct udev_builtin udev_builtin_path_id = {
         .name = "path_id",
         .cmd = builtin_path_id,

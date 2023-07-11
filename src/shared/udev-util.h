@@ -23,6 +23,7 @@ int udev_parse_config_full(
                 ResolveNameTiming *ret_resolve_name_timing);
 
 static inline int udev_parse_config(void) {
+	/*解析udev配置,设置log级别*/
         return udev_parse_config_full(NULL, NULL, NULL, NULL);
 }
 

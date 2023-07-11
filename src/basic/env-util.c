@@ -199,12 +199,14 @@ char **strv_env_merge(size_t n_lists, ...) {
         /* Merges an arbitrary number of environment sets */
 
         va_start(ap, n_lists);
+        /*先获取环境变量内容总长度n*/
         for (i = 0; i < n_lists; i++) {
                 l = va_arg(ap, char**);
                 n += strv_length(l);
         }
         va_end(ap);
 
+        /*申请足够空间*/
         ret = new(char*, n+1);
         if (!ret)
                 return NULL;
@@ -212,6 +214,7 @@ char **strv_env_merge(size_t n_lists, ...) {
         *ret = NULL;
         k = ret;
 
+        /*遍历所有list,将环境变量合入到申请的空间ret中*/
         va_start(ap, n_lists);
         for (i = 0; i < n_lists; i++) {
                 l = va_arg(ap, char**);

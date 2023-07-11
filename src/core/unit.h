@@ -116,7 +116,7 @@ typedef struct Unit {
         char *id; /* One name is special because we use it for identification. Points to an entry in the names set */
         char *instance;//实例名称
 
-        Set *names;
+        Set *names;/*unit名称，容许多个*/
 
         /* For each dependency type we maintain a Hashmap whose key is the Unit* object, and the value encodes why the
          * dependency exists, using the UnitDependencyInfo type */
@@ -316,13 +316,13 @@ typedef struct Unit {
         bool perpetual;
 
         /* Booleans indicating membership of this unit in the various queues */
-        bool in_load_queue:1;
+        bool in_load_queue:1;/*此unit是否在u->manager->load_queue队列中*/
         bool in_dbus_queue:1;
         bool in_cleanup_queue:1;
         bool in_gc_queue:1;
         bool in_cgroup_realize_queue:1;
         bool in_cgroup_empty_queue:1;
-        bool in_target_deps_queue:1;
+        bool in_target_deps_queue:1;/*此unit是否在u->manager->target_deps_queue队列中*/
         bool in_stop_when_unneeded_queue:1;
 
         bool sent_dbus_new_signal:1;
@@ -392,7 +392,7 @@ static inline bool UNIT_WRITE_FLAGS_NOOP(UnitWriteFlags flags) {
 
 typedef struct UnitVTable {
         /* How much memory does an object of this unit type need */
-        size_t object_size;
+        size_t object_size;/*此类unit object内存占用大小*/
 
         /* If greater than 0, the offset into the object where
          * ExecContext is found, if the unit type has that */

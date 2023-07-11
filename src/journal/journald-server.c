@@ -1777,6 +1777,7 @@ static int server_connect_notify(Server *s) {
           https://github.com/systemd/systemd/issues/1505
         */
 
+        /*取notify socket地址*/
         e = getenv("NOTIFY_SOCKET");
         if (!e)
                 return 0;
@@ -1791,6 +1792,7 @@ static int server_connect_notify(Server *s) {
 
         (void) fd_inc_sndbuf(s->notify_fd, NOTIFY_SNDBUF_SIZE);
 
+        /*连接到notify socket*/
         r = connect(s->notify_fd, &sa.sa, salen);
         if (r < 0)
                 return log_error_errno(errno, "Failed to connect to notify socket: %m");

@@ -77,7 +77,7 @@ typedef struct NetDev {
 
         unsigned n_ref;
 
-        char *filename;
+        char *filename;/*配置文件名称*/
 
         Condition *match_host;
         Condition *match_virt;
@@ -88,7 +88,7 @@ typedef struct NetDev {
         NetDevState state;
         NetDevKind kind;
         char *description;
-        char *ifname;
+        char *ifname;/*设备名称*/
         struct ether_addr *mac;
         uint32_t mtu;
         int ifindex;

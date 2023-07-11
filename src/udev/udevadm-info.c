@@ -110,6 +110,7 @@ static int print_device_chain(sd_device *device) {
         printf("    DRIVER==\"%s\"\n", str);
         print_all_attributes(device, "ATTR");
 
+        /*取这个设备的父设备，并进行显不*/
         for (child = device; sd_device_get_parent(child, &parent) >= 0; child = parent) {
                 (void) sd_device_get_devpath(parent, &str);
                 printf("  looking at parent device '%s':\n", str);
@@ -293,6 +294,7 @@ static int query_device(QueryType query, sd_device* device) {
         }
 
         case QUERY_PROPERTY: {
+        	/*罗列此设备属性*/
                 const char *key, *value;
 
                 FOREACH_DEVICE_PROPERTY(device, key, value)
@@ -337,6 +339,7 @@ static int help(void) {
         return 0;
 }
 
+/*udevadm info命令处理*/
 int info_main(int argc, char *argv[], void *userdata) {
         _cleanup_strv_free_ char **devices = NULL;
         _cleanup_free_ char *name = NULL;
@@ -365,13 +368,16 @@ int info_main(int argc, char *argv[], void *userdata) {
                 switch (c) {
                 case 'n':
                 case 'p': {
+                		/*分辨参数，确定path要附加的前缀*/
                         const char *prefix = c == 'n' ? "/dev/" : "/sys/";
                         char *path;
 
+                        /*如果optarg已有相应前缀，则不再附加前缀，否则附加前缀*/
                         path = path_join(path_startswith(optarg, prefix) ? NULL : prefix, optarg);
                         if (!path)
                                 return log_oom();
 
+                        /*将path保存到devices数组中（以便支持多个参数）*/
                         r = strv_consume(&devices, path);
                         if (r < 0)
                                 return log_oom();
@@ -379,6 +385,7 @@ int info_main(int argc, char *argv[], void *userdata) {
                 }
 
                 case 'q':
+                	/*执行的为查询动作，确定按哪种key进行查询*/
                         action = ACTION_QUERY;
                         if (streq(optarg, "property") || streq(optarg, "env"))
                                 query = QUERY_PROPERTY;
@@ -435,30 +442,36 @@ int info_main(int argc, char *argv[], void *userdata) {
                 return stat_device(name, arg_export, arg_export_prefix);
         }
 
+        /*将其它参数均合入到devices*/
         r = strv_extend_strv(&devices, argv + optind, false);
         if (r < 0)
                 return log_error_errno(r, "Failed to build argument list: %m");
 
         if (strv_isempty(devices))
+        	/*未指定设备，报错*/
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "A device name or path is required");
         if (action == ACTION_ATTRIBUTE_WALK && strv_length(devices) > 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Only one device may be specified with -a/--attribute-walk");
 
+        /*遍历给定的所有设备*/
         char **p;
         STRV_FOREACH(p, devices) {
                 _cleanup_(sd_device_unrefp) sd_device *device = NULL;
 
-                r = find_device(*p, NULL, &device);
+                /*采用路径确定设备*/
+                r = find_device(*p, NULL/*前缀已合入，故为NULL*/, &device);
                 if (r == -EINVAL)
                         return log_error_errno(r, "Bad argument \"%s\", expected an absolute path in /dev/ or /sys or a unit name: %m", *p);
                 if (r < 0)
                         return log_error_errno(r, "Unknown device \"%s\": %m",  *p);
 
                 if (action == ACTION_QUERY)
+                	/*查询此设备信息*/
                         r = query_device(query, device);
                 else if (action == ACTION_ATTRIBUTE_WALK)
+                	/*显示此设备属性*/
                         r = print_device_chain(device);
                 else
                         assert_not_reached("Unknown action");

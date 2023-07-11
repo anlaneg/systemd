@@ -161,6 +161,7 @@ static int service_set_main_pid(Service *s, pid_t pid) {
                 exec_status_start(&s->main_exec_status, pid);
         }
 
+        /*设置此service的主进程id*/
         s->main_pid = pid;
         s->main_pid_known = true;
 
@@ -744,6 +745,7 @@ static int service_add_extras(Service *s) {
         return 0;
 }
 
+/*实现.service文件的加载，填充传入的unit*/
 static int service_load(Unit *u) {
         Service *s = SERVICE(u);
         int r;
@@ -948,7 +950,7 @@ static int service_load_pid_file(Service *s, bool may_warn) {
 
         /* Let's read the PID file now that we chased it down. But we need to convert the O_PATH fd chase_symlinks() returned us into a proper fd first. */
         xsprintf(procfs, "/proc/self/fd/%i", fd);
-        r = read_one_line_file(procfs, &k);
+        r = read_one_line_file(procfs, &k);/*自此文件中读取一行数据*/
         if (r < 0)
                 return log_unit_error_errno(UNIT(s), r, "Can't convert PID files %s O_PATH file descriptor to proper file descriptor: %m", s->pid_file);
 
@@ -1378,6 +1380,7 @@ static int service_allocate_exec_fd(
         return 0;
 }
 
+/*检查service是否需要notify_socket环境变量支持*/
 static bool service_exec_needs_notify_socket(Service *s, ExecFlags flags) {
         assert(s);
 
@@ -1399,8 +1402,8 @@ static bool service_exec_needs_notify_socket(Service *s, ExecFlags flags) {
 
 static int service_spawn(
                 Service *s,
-                ExecCommand *c,
-                usec_t timeout,
+                ExecCommand *c/*要执行的命令*/,
+                usec_t timeout/*命令超时时间*/,
                 ExecFlags flags,
                 pid_t *_pid) {
 
@@ -1463,6 +1466,7 @@ static int service_spawn(
         if (!our_env)
                 return -ENOMEM;
 
+        /*service如需要nofity socket,添加NOTIFY_SOCKET环境变量，知会notify socket地址*/
         if (service_exec_needs_notify_socket(s, flags))
                 if (asprintf(our_env + n_env++, "NOTIFY_SOCKET=%s", UNIT(s)->manager->notify_socket) < 0)
                         return -ENOMEM;
@@ -1536,6 +1540,7 @@ static int service_spawn(
         if (r < 0)
                 return r;
 
+        /*将exec_params.environment与our_env揉合成final_env*/
         final_env = strv_env_merge(2, exec_params.environment, our_env, NULL);
         if (!final_env)
                 return -ENOMEM;
@@ -1544,6 +1549,7 @@ static int service_spawn(
         SET_FLAG(exec_params.flags, EXEC_NSS_BYPASS_BUS,
                  MANAGER_IS_SYSTEM(UNIT(s)->manager) && unit_has_name(UNIT(s), SPECIAL_DBUS_SERVICE));
 
+        /*采用final_env更新exec_params.environment*/
         strv_free_and_replace(exec_params.environment, final_env);
         exec_params.fds = fds;
         exec_params.fd_names = fd_names;
@@ -2059,6 +2065,7 @@ static void service_enter_start(Service *s) {
         }
 
         if (!c) {
+        	/*service没有指定start命令*/
                 if (s->type != SERVICE_ONESHOT) {
                         /* There's no command line configured for the main command? Hmm, that is strange. This can only
                          * happen if the configuration changes at runtime. In this case, let's enter a failure
@@ -2078,6 +2085,7 @@ static void service_enter_start(Service *s) {
                 return;
         }
 
+        /*服务超时时间确定*/
         if (IN_SET(s->type, SERVICE_SIMPLE, SERVICE_IDLE))
                 /* For simple + idle this is the main process. We don't apply any timeout here, but
                  * service_enter_running() will later apply the .runtime_max_usec timeout. */
@@ -2086,8 +2094,8 @@ static void service_enter_start(Service *s) {
                 timeout = s->timeout_start_usec;
 
         r = service_spawn(s,
-                          c,
-                          timeout,
+                          c/*启动命令*/,
+                          timeout/*启动超时时间*/,
                           EXEC_PASS_FDS|EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN|EXEC_SET_WATCHDOG,
                           &pid);
         if (r < 0)
@@ -2136,6 +2144,7 @@ static void service_enter_start_pre(Service *s) {
 
         s->control_command = s->exec_command[SERVICE_EXEC_START_PRE];
         if (s->control_command) {
+        	/*有start pre命令，先执行start pre*/
 
                 r = service_adverse_to_leftover_processes(s);
                 if (r < 0)
@@ -4134,7 +4143,7 @@ const UnitVTable service_vtable = {
         .can_transient = true,
         .can_delegate = true,
 
-        .init = service_init,/*service初始化函数*/
+        .init = service_init,/*service 初始化函数*/
         .done = service_done,
         .load = service_load,/*service load函数*/
         .release_resources = service_release_resources,
@@ -4143,7 +4152,7 @@ const UnitVTable service_vtable = {
 
         .dump = service_dump,
 
-        .start = service_start,/*service start函数*/
+        .start = service_start,/*具体完成一个service的启动（执行）*/
         .stop = service_stop,
         .reload = service_reload,
 

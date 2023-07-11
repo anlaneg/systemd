@@ -1013,6 +1013,7 @@ int parse_time(const char *t, usec_t *usec, usec_t default_unit) {
         return 0;
 }
 
+/*解析秒数*/
 int parse_sec(const char *t, usec_t *usec) {
         return parse_time(t, usec, USEC_PER_SEC);
 }

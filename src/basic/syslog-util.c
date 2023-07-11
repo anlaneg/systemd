@@ -92,6 +92,7 @@ static const char *const log_level_table[] = {
         [LOG_DEBUG] = "debug"
 };
 
+/*log level的字符串正枚举互换*/
 DEFINE_STRING_TABLE_LOOKUP_WITH_FALLBACK(log_level, int, LOG_DEBUG);
 
 bool log_level_is_valid(int level) {

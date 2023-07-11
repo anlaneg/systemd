@@ -954,6 +954,7 @@ static int builtin_net_id(sd_device *dev, int argc, char *argv[], bool test) {
         return 0;
 }
 
+/*增加ID_NET_NAME_PATH等属性*/
 const struct udev_builtin udev_builtin_net_id = {
         .name = "net_id",
         .cmd = builtin_net_id,

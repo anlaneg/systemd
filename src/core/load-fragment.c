@@ -1813,6 +1813,7 @@ int config_parse_bus_name(
         return config_parse_string(unit, filename, line, section, section_line, lvalue, ltype, k, data, userdata);
 }
 
+/*解析并设置service的超时时间*/
 int config_parse_service_timeout(
                 const char *unit,
                 const char *filename,
@@ -1846,7 +1847,7 @@ int config_parse_service_timeout(
         }
 
         s->start_timeout_defined = true;
-        s->timeout_start_usec = usec;
+        s->timeout_start_usec = usec;/*这两种情况均更新start_usec*/
 
         if (streq(lvalue, "TimeoutSec"))
                 s->timeout_stop_usec = usec;
@@ -4236,6 +4237,7 @@ int config_parse_emergency_action(
         return 0;
 }
 
+/*解析PIDFile配置*/
 int config_parse_pid_file(
                 const char *unit,
                 const char *filename,
@@ -4283,8 +4285,10 @@ int config_parse_pid_file(
 
         e = path_startswith(n, "/var/run/");
         if (e) {
+        	/*pid文件位于'/var/run/'目录下*/
                 char *z;
 
+                /*建议使用/run/目录，更新成z*/
                 z = strjoin("/run/", e);
                 if (!z)
                         return log_oom();
@@ -4512,8 +4516,8 @@ static int load_from_path(Unit *u, const char *path) {
         if (!symlink_names)
                 return -ENOMEM;
 
-        //绝对路径
         if (path_is_absolute(path)) {
+        	/*传入的path是绝对路径*/
 
                 filename = strdup(path);
                 if (!filename)
@@ -4529,7 +4533,7 @@ static int load_from_path(Unit *u, const char *path) {
         } else  {
                 char **p;
 
-                //遍历search_path
+                //未传入绝对路径，遍历search_path
                 STRV_FOREACH(p, u->manager->lookup_paths.search_path) {
 
                         /* Instead of opening the path right away, we manually
@@ -4542,11 +4546,15 @@ static int load_from_path(Unit *u, const char *path) {
 
                         if (u->manager->unit_path_cache &&
                             !set_get(u->manager->unit_path_cache, filename))
+                        	/*cache中未查询到，失败*/
                                 r = -ENOENT;
                         else
+                        	/*打开unit对应的文件路径*/
                                 r = open_follow(&filename, &f, symlink_names, &id);
                         if (r >= 0)
+                        	/*打开成功，查找结束*/
                                 break;
+                        /*打开失败，需要继续查找*/
 
                         /* ENOENT means that the file is missing or is a dangling symlink.
                          * ENOTDIR means that one of paths we expect to be is a directory
@@ -4594,10 +4602,10 @@ static int load_from_path(Unit *u, const char *path) {
                 u->fragment_mtime = timespec_load(&st.st_mtim);
 
                 /* Now, parse the file contents */
-                //解析配置文件，并填充u对象
+                //解析.service unit配置文件，并填充u对象
                 r = config_parse(u->id, filename/*配置文件路径*/, f/*配置文件*/,
-                                 UNIT_VTABLE(u)->sections,
-                                 config_item_perf_lookup, load_fragment_gperf_lookup/*通过此函数完成配置文件中字段的解析及设置*/,
+                                 UNIT_VTABLE(u)->sections/*此unit容许出现的sections*/,
+                                 config_item_perf_lookup, load_fragment_gperf_lookup/*完成配置文件中字段的解析及设置(见src/core/load-fragment-gperf.gperf.m4）*/,
                                  CONFIG_PARSE_ALLOW_INCLUDE, u);
                 if (r < 0)
                         return r;

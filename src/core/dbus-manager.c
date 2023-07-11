@@ -535,10 +535,12 @@ static int method_start_unit_generic(sd_bus_message *message, Manager *m, JobTyp
         assert(message);
         assert(m);
 
+        /*取unit名称*/
         r = sd_bus_message_read(message, "s", &name);
         if (r < 0)
                 return r;
 
+        /*加载此unit*/
         r = manager_load_unit(m, name, NULL, error, &u);
         if (r < 0)
                 return r;
@@ -2545,7 +2547,7 @@ const sd_bus_vtable bus_manager_vtable[] = {
         SD_BUS_METHOD("GetUnitByInvocationID", "ay", "o", method_get_unit_by_invocation_id, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetUnitByControlGroup", "s", "o", method_get_unit_by_control_group, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("LoadUnit", "s", "o", method_load_unit, SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD("StartUnit", "ss", "o", method_start_unit, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("StartUnit", "ss", "o", method_start_unit, SD_BUS_VTABLE_UNPRIVILEGED),/*响应StartUnit*/
         SD_BUS_METHOD("StartUnitReplace", "sss", "o", method_start_unit_replace, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("StopUnit", "ss", "o", method_stop_unit, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("ReloadUnit", "ss", "o", method_reload_unit, SD_BUS_VTABLE_UNPRIVILEGED),
