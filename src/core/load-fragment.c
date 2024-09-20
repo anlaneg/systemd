@@ -509,7 +509,7 @@ int config_parse_exec_oom_score_adjust(
         return 0;
 }
 
-//解析配置文件行
+//解析配置文件(Service.ExecStartPre,Service.ExecStart,Service.ExecStartPost..)行
 int config_parse_exec(
                 const char *unit,
                 const char *filename,
@@ -2385,6 +2385,9 @@ int config_parse_log_extra_fields(
         }
 }
 
+/*解析ConditionPathExists配置信息，例如：
+ * ConditionPathExists=!/etc/ssh/sshd_not_to_be_run
+ * */
 int config_parse_unit_condition_path(
                 const char *unit,
                 const char *filename,
@@ -2394,12 +2397,12 @@ int config_parse_unit_condition_path(
                 const char *lvalue,
                 int ltype,
                 const char *rvalue,
-                void *data,
+                void *data/*condition链表*/,
                 void *userdata) {
 
         _cleanup_free_ char *p = NULL;
         Condition **list = data, *c;
-        ConditionType t = ltype;
+        ConditionType t = ltype;/*条件类型*/
         bool trigger, negate;
         Unit *u = userdata;
         int r;
@@ -2415,14 +2418,17 @@ int config_parse_unit_condition_path(
                 return 0;
         }
 
+        /*value首字符为'|'号，则trigger为真*/
         trigger = rvalue[0] == '|';
         if (trigger)
                 rvalue++;
 
+        /*如果value首字符或者次字符为'!',则negate为真*/
         negate = rvalue[0] == '!';
         if (negate)
                 rvalue++;
 
+        /*显示格式化内容到p*/
         r = unit_full_printf(u, rvalue, &p);
         if (r < 0) {
                 log_syntax(unit, LOG_ERR, filename, line, r, "Failed to resolve unit specifiers in %s, ignoring: %m", rvalue);
@@ -2437,6 +2443,7 @@ int config_parse_unit_condition_path(
         if (!c)
                 return log_oom();
 
+        /*将condition串到list上*/
         LIST_PREPEND(conditions, *list, c);
         return 0;
 }

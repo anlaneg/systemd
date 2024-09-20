@@ -38,23 +38,27 @@ int specifier_printf(const char *text, const Specifier table[], const void *user
         assert(text);
         assert(table);
 
-        l = strlen(text);
+        l = strlen(text);/*text字符串长度*/
         if (!GREEDY_REALLOC(ret, allocated, l + 1))
                 return -ENOMEM;
         t = ret;
 
+        /*遍历text中每个字符*/
         for (f = text; *f; f++, l--)
                 if (percent) {
                         if (*f == '%')
+                        	/*‘%’转义*/
                                 *(t++) = '%';
                         else {
                                 const Specifier *i;
 
+                                /*遍历table中的每一项，检查是否匹配*/
                                 for (i = table; i->specifier; i++)
                                         if (i->specifier == *f)
                                                 break;
 
                                 if (i->lookup) {
+                                	/*成功匹配，按照格式执行lookup回调，取相应数据*/
                                         _cleanup_free_ char *w = NULL;
                                         size_t k, j;
 
@@ -71,7 +75,7 @@ int specifier_printf(const char *text, const Specifier table[], const void *user
                                         t = ret + j + k;
                                 } else if (strchr(POSSIBLE_SPECIFIERS, *f))
                                         /* Oops, an unknown specifier. */
-                                        return -EBADSLT;
+                                        return -EBADSLT;/*非ascii可显示字符*/
                                 else {
                                         *(t++) = '%';
                                         *(t++) = *f;
@@ -80,8 +84,10 @@ int specifier_printf(const char *text, const Specifier table[], const void *user
 
                         percent = false;
                 } else if (*f == '%')
+                	/*遇到'%'，标记并继续处理（需要知道下一个字符才能知道如何处理）*/
                         percent = true;
                 else
+                	/*非转义字符，直接填充*/
                         *(t++) = *f;
 
         /* If string ended with a stray %, also end with % */

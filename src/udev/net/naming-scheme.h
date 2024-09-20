@@ -43,6 +43,7 @@ typedef struct NamingScheme {
 
 const NamingScheme* naming_scheme(void);
 
+/*检查nameingSchemeFlags上是否有相应flags*/
 static inline bool naming_scheme_has(NamingSchemeFlags flags) {
         return FLAGS_SET(naming_scheme()->flags, flags);
 }

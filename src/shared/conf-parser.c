@@ -32,12 +32,12 @@
 #include "utf8.h"
 
 int config_item_table_lookup(
-                const void *table,
-                const char *section,//对应的段
-                const char *lvalue,//段下的key
-                ConfigParserCallback *func,
-                int *ltype,
-                void **data,
+                const void *table/*要查询的表ConfigTableItem数组*/,
+                const char *section,/*lvalue对应的section*/
+                const char *lvalue,/*当前待解析的key*/
+                ConfigParserCallback *func/*出参，右值解析填充函数*/,
+                int *ltype/*出参，左值（key)的类型*/,
+                void **data/*出参，关联的data*/,
                 void *userdata) {
 
         const ConfigTableItem *t;
@@ -52,11 +52,14 @@ int config_item_table_lookup(
         for (t = table; t->lvalue; t++) {
 
                 if (!streq(lvalue, t->lvalue))
+                	/*不匹配，忽略*/
                         continue;
 
                 if (!streq_ptr(section, t->section))
+                	/*section不匹配，忽略*/
                         continue;
 
+                /*返回出参*/
                 *func = t->parse;
                 *ltype = t->ltype;
                 *data = t->data;
@@ -107,12 +110,12 @@ int config_item_perf_lookup(
 /* Run the user supplied parser for an assignment */
 static int next_assignment(
                 const char *unit,
-                const char *filename,
+                const char *filename/*文件名称*/,
                 unsigned line,
                 ConfigItemLookup lookup,
                 const void *table,
-                const char *section,
-                unsigned section_line,
+                const char *section/*section名称*/,
+                unsigned section_line/*section所在行号*/,
                 const char *lvalue,//key值
                 const char *rvalue,//value值
                 ConfigParseFlags flags,
@@ -129,12 +132,12 @@ static int next_assignment(
         assert(lvalue);
         assert(rvalue);
 
-        //获取解析用的func
+        //获取解析用的func，ltype,data
         r = lookup(table, section, lvalue, &func, &ltype, &data, userdata);
         if (r < 0)
                 return r;
 
-        //调用解析用的func
+        //调用解析用的func，完成右值解析及填充
         if (r > 0) {
                 if (func)
                         return func(unit, filename, line, section, section_line,
@@ -154,13 +157,13 @@ static int next_assignment(
 static int parse_line(
                 const char* unit,
                 const char *filename,
-                unsigned line,
+                unsigned line/*行号*/,
                 const char *sections/*容许的section名称数组*/,
                 ConfigItemLookup lookup,
-                const void *table,
+                const void *table/*要查询的表*/,
                 ConfigParseFlags flags,
                 char **section/*记录当前的section名称*/,
-                unsigned *section_line/*段所在行号*/,
+                unsigned *section_line/*出叁，section所在行号*/,
                 bool *section_ignored/*段名称是否被忽略*/,
                 char *l,
                 void *userdata) {
@@ -272,8 +275,8 @@ static int parse_line(
         return next_assignment(unit,
                                filename,
                                line,//行号
-                               lookup,
-                               table,
+                               lookup/*查询解析对应的函数*/,
+                               table/*要查询的表*/,
                                *section,//此行所属的section
                                *section_line,//此行所属的section所在的行号
                                strstrip(l),//此行表示的key
@@ -326,6 +329,7 @@ int config_parse(const char *unit/*unit名称*/,
                 //读取一行内容
                 r = read_line(f, LONG_LINE_MAX, &buf);
                 if (r == 0)
+                	/*读取完成，跳出*/
                         break;
                 if (r == -ENOBUFS) {
                         if (flags & CONFIG_PARSE_WARN)
@@ -776,6 +780,7 @@ int config_parse_strv(
         assert(data);
 
         if (isempty(rvalue)) {
+        	/*空串，则直接返回*/
                 *sv = strv_free(*sv);
                 return 0;
         }

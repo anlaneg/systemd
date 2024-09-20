@@ -42,10 +42,10 @@ typedef enum ConditionType {
 } ConditionType;
 
 typedef enum ConditionResult {
-        CONDITION_UNTESTED,
-        CONDITION_SUCCEEDED,
-        CONDITION_FAILED,
-        CONDITION_ERROR,
+        CONDITION_UNTESTED,/*未执行判定*/
+        CONDITION_SUCCEEDED,/*判定为真*/
+        CONDITION_FAILED,/*判定为假*/
+        CONDITION_ERROR,/*判定时出错*/
         _CONDITION_RESULT_MAX,
         _CONDITION_RESULT_INVALID = -1
 } ConditionResult;
@@ -54,7 +54,7 @@ typedef struct Condition {
         ConditionType type:8;
 
         bool trigger:1;
-        bool negate:1;
+        bool negate:1;/*对判定结果是否取反*/
 
         ConditionResult result:6;
 

@@ -534,7 +534,7 @@ static int service_arm_timer(Service *s, usec_t usec) {
                         UNIT(s)->manager->event,
                         &s->timer_event_source,
                         CLOCK_MONOTONIC,
-                        usec, 0,
+                        usec/*超时时间*/, 0,
                         service_dispatch_timer, s);
         if (r < 0)
                 return r;
@@ -1033,6 +1033,7 @@ static void service_search_main_pid(Service *s) {
                 log_unit_warning_errno(UNIT(s), r, "Failed to watch PID "PID_FMT" from: %m", pid);
 }
 
+/*设置service状态*/
 static void service_set_state(Service *s, ServiceState state) {
         ServiceState old_state;
         const UnitActiveState *table;
@@ -1956,6 +1957,7 @@ static void service_enter_running(Service *s, ServiceResult f) {
                 if (s->notify_state == NOTIFY_RELOADING)
                         service_enter_reload_by_notify(s);
                 else if (s->notify_state == NOTIFY_STOPPING)
+                	/*知会服务已停止*/
                         service_enter_stop_by_notify(s);
                 else {
                         service_set_state(s, SERVICE_RUNNING);
@@ -3524,6 +3526,7 @@ static int service_dispatch_timer(sd_event_source *source, usec_t usec, void *us
 
         case SERVICE_START_PRE:
         case SERVICE_START:
+        		/*针对service的指定操作超时*/
                 log_unit_warning(UNIT(s), "%s operation timed out. Terminating.", s->state == SERVICE_START ? "Start" : "Start-pre");
                 service_enter_signal(s, SERVICE_STOP_SIGTERM, SERVICE_FAILURE_TIMEOUT);
                 break;
@@ -3732,6 +3735,7 @@ static void service_notify_message(
         STRV_FOREACH_BACKWARDS(i, tags) {
 
                 if (streq(*i, "READY=1")) {
+                	/*收到ready信号*/
                         s->notify_state = NOTIFY_READY;
 
                         /* Type=notify services inform us about completed
@@ -3748,6 +3752,7 @@ static void service_notify_message(
                         break;
 
                 } else if (streq(*i, "RELOADING=1")) {
+                	/*收到reload信号*/
                         s->notify_state = NOTIFY_RELOADING;
 
                         if (s->state == SERVICE_RUNNING)
@@ -3757,6 +3762,7 @@ static void service_notify_message(
                         break;
 
                 } else if (streq(*i, "STOPPING=1")) {
+                	/*收到stopping信号*/
                         s->notify_state = NOTIFY_STOPPING;
 
                         if (s->state == SERVICE_RUNNING)
@@ -3770,6 +3776,7 @@ static void service_notify_message(
         /* Interpret STATUS= */
         e = strv_find_startswith(tags, "STATUS=");
         if (e) {
+        	/*检查status信号*/
                 _cleanup_free_ char *t = NULL;
 
                 if (!isempty(e)) {

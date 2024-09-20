@@ -197,7 +197,7 @@ static int get_virtfn_info(sd_device *dev, struct netnames *names, struct virtfn
         physfn_link_file = strjoina(syspath, "/physfn");
         r = chase_symlinks(physfn_link_file, NULL, 0, &physfn_pci_syspath);
         if (r < 0)
-                return r;
+                return r;/*不是一个vf*/
 
         /* Get physical function's pci device. */
         r = sd_device_new_from_syspath(&physfn_pcidev, physfn_pci_syspath);
@@ -209,6 +209,7 @@ static int get_virtfn_info(sd_device *dev, struct netnames *names, struct virtfn
         if (!dir)
                 return -errno;
 
+        /*遍历其父节点下所有virtfn*/
         FOREACH_DIRENT_ALL(dent, dir, break) {
                 _cleanup_free_ char *virtfn_link_file = NULL;
 
@@ -223,6 +224,7 @@ static int get_virtfn_info(sd_device *dev, struct netnames *names, struct virtfn
                         continue;
 
                 if (streq(syspath, virtfn_pci_syspath)) {
+                	/*要找了此syspath对应的virtfn,跳出*/
                         if (!snprintf_ok(suffix, sizeof(suffix), "v%s", &dent->d_name[6]))
                                 return -ENOENT;
 
@@ -233,7 +235,7 @@ static int get_virtfn_info(sd_device *dev, struct netnames *names, struct virtfn
                 return -ENOENT;
 
         ret->physfn_pcidev = TAKE_PTR(physfn_pcidev);
-        strncpy(ret->suffix, suffix, sizeof(ret->suffix));
+        strncpy(ret->suffix, suffix, sizeof(ret->suffix));/*例如vvirtfn0*/
 
         return 0;
 }
@@ -319,6 +321,7 @@ static bool is_pci_ari_enabled(sd_device *dev) {
         return streq(a, "1");
 }
 
+/*针对设备产生pci_slot,pci_path*/
 static int dev_pci_slot(sd_device *dev, struct netnames *names) {
         unsigned long dev_port = 0;
         unsigned domain, bus, slot, func, hotplug_slot = 0;
@@ -550,6 +553,7 @@ static int names_pci(sd_device *dev, struct netnames *names) {
         assert(dev);
         assert(names);
 
+        /*检查此设备对应的parent*/
         r = sd_device_get_parent(dev, &parent);
         if (r < 0)
                 return r;
@@ -557,11 +561,12 @@ static int names_pci(sd_device *dev, struct netnames *names) {
         parent = skip_virtio(parent);
 
         if (!parent)
-                return -ENOENT;
+                return -ENOENT;/*没有parent,则失败*/
 
         /* check if our direct parent is a PCI device with no other bus in-between */
         if (sd_device_get_subsystem(parent, &subsystem) >= 0 &&
             streq("pci", subsystem)) {
+        	/*pci子系统*/
                 names->type = NET_PCI;
                 names->pcidev = parent;
         } else {
@@ -903,6 +908,7 @@ static int builtin_net_id(sd_device *dev, int argc, char *argv[], bool test) {
 
         /* plain PCI device */
         if (names.type == NET_PCI) {
+        	/*pci设备属性填充，这些属性将被default命中，用于设备命名*/
                 char str[IFNAMSIZ];
 
                 if (names.pci_onboard[0] &&
@@ -954,7 +960,7 @@ static int builtin_net_id(sd_device *dev, int argc, char *argv[], bool test) {
         return 0;
 }
 
-/*增加ID_NET_NAME_PATH等属性*/
+/*增加ID_NET_NAME_PATH等属性，填充网络接口属性*/
 const struct udev_builtin udev_builtin_net_id = {
         .name = "net_id",
         .cmd = builtin_net_id,

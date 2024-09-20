@@ -1620,7 +1620,7 @@ fail:
         return log_unit_debug_errno(u, r, "Failed to load configuration: %m");
 }
 
-static bool unit_condition_test_list(Unit *u, Condition *first, const char *(*to_string)(ConditionType t)) {
+static bool unit_condition_test_list(Unit *u, Condition *first/*condition链表*/, const char *(*to_string)(ConditionType t)) {
         Condition *c;
         int triggered = -1;
 
@@ -1637,15 +1637,18 @@ static bool unit_condition_test_list(Unit *u, Condition *first, const char *(*to
         LIST_FOREACH(conditions, c, first) {
                 int r;
 
+                /*condition检测*/
                 r = condition_test(c);
                 if (r < 0)
+                	/*此时为判定过程中出错导致，显示日志*/
                         log_unit_warning(u,
                                          "Couldn't determine result for %s=%s%s%s, assuming failed: %m",
-                                         to_string(c->type),
+                                         to_string(c->type),/*条件类型*/
                                          c->trigger ? "|" : "",
                                          c->negate ? "!" : "",
                                          c->parameter);
                 else
+                	/*显示检测结果*/
                         log_unit_debug(u,
                                        "%s=%s%s%s %s.",
                                        to_string(c->type),
@@ -1668,17 +1671,19 @@ static bool unit_condition_test(Unit *u) {
         assert(u);
 
         dual_timestamp_get(&u->condition_timestamp);
+        /*执行此unit对应的所有判定*/
         u->condition_result = unit_condition_test_list(u, u->conditions, condition_type_to_string);
 
         unit_add_to_dbus_queue(u);
 
-        return u->condition_result;
+        return u->condition_result;/*返回判定结果*/
 }
 
 static bool unit_assert_test(Unit *u) {
         assert(u);
 
         dual_timestamp_get(&u->assert_timestamp);
+        /*执行此unit对应的所有断言判定*/
         u->assert_result = unit_condition_test_list(u, u->asserts, assert_type_to_string);
 
         unit_add_to_dbus_queue(u);
@@ -1796,6 +1801,7 @@ int unit_start(Unit *u) {
          * but we don't want to recheck the condition in that case. */
         if (state != UNIT_ACTIVATING &&
             !unit_condition_test(u)) {
+        	/*如果条件不通过，则不容许启动*/
                 log_unit_debug(u, "Starting requested but condition failed. Not starting unit.");
                 return -ECOMM;
         }
@@ -4521,6 +4527,7 @@ int unit_kill_context(
         if (c->kill_mode == KILL_NONE)
                 return 0;
 
+        /*取信号*/
         sig = operation_to_signal(c, k);
 
         send_sighup =
@@ -4535,6 +4542,7 @@ int unit_kill_context(
                 if (log_func)
                         log_func(main_pid, sig, u);
 
+                /*触发信号*/
                 r = kill_and_sigcont(main_pid, sig);
                 if (r < 0 && r != -ESRCH) {
                         _cleanup_free_ char *comm = NULL;

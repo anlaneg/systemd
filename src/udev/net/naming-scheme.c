@@ -15,8 +15,10 @@ static const NamingScheme* naming_scheme_from_name(const char *name) {
         size_t i;
 
         if (streq(name, "latest"))
+        	/*采用最后一个*/
                 return naming_schemes + ELEMENTSOF(naming_schemes) - 1;
 
+        /*按照name进行匹配*/
         for (i = 0; i < ELEMENTSOF(naming_schemes); i++)
                 if (streq(naming_schemes[i].name, name))
                         return naming_schemes + i;
@@ -38,13 +40,14 @@ const NamingScheme* naming_scheme(void) {
         /* Also acquire it from an env var */
         e = getenv("NET_NAMING_SCHEME");
         if (e) {
+        	/*优选环境变量*/
                 if (*e == ':') {
                         /* If prefixed with ':' the kernel cmdline takes precedence */
                         k = buffer ?: e + 1;
                 } else
                         k = e; /* Otherwise the env var takes precedence */
         } else
-                k = buffer;
+                k = buffer;/*次选命令行*/
 
         if (k) {
                 cache = naming_scheme_from_name(k);

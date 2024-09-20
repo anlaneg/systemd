@@ -22,16 +22,16 @@ typedef enum ConfigParseFlags {
 
 /* Argument list for parsers of specific configuration settings. */
 #define CONFIG_PARSER_ARGUMENTS                 \
-        const char *unit,                       \
-        const char *filename,                   \
-        unsigned line,                          \
-        const char *section,                    \
-        unsigned section_line,                  \
-        const char *lvalue,                     \
-        int ltype,                              \
-        const char *rvalue,                     \
-        void *data,                             \
-        void *userdata
+        const char *unit/*unit名称*/,                       \
+        const char *filename/*文件名称*/,                   \
+        unsigned line/*当前行号*/,                          \
+        const char *section/*当前行所属section*/,                    \
+        unsigned section_line/*当前section行对应行号*/,                  \
+        const char *lvalue/*当前key的名称*/,                     \
+        int ltype/*当前key的名称*/,                              \
+        const char *rvalue/*当前value对应的字面值*/,                     \
+        void *data/*当前key关联的data*/,                             \
+        void *userdata/*用户传入的不透明参数*/
 
 /* Prototype for a parser for a specific configuration setting */
 typedef int (*ConfigParserCallback)(CONFIG_PARSER_ARGUMENTS);
@@ -69,13 +69,13 @@ typedef const ConfigPerfItem* (*ConfigPerfItemLookup)(const char *section_and_lv
 
 /* Prototype for a generic high-level lookup function */
 typedef int (*ConfigItemLookup)(
-                const void *table,
-                const char *section,
-                const char *lvalue,
-                ConfigParserCallback *func,
-                int *ltype,
-                void **data,
-                void *userdata);
+                const void *table/*要查询的table*/,
+                const char *section/*当前lvalue所属的section*/,
+                const char *lvalue/*key值*/,
+                ConfigParserCallback *func/*出参，lvalue对应的解析回调*/,
+                int *ltype/*出参，key对应的类型*/,
+                void **data/*出参，lvalue对应的值*/,
+                void *userdata/*不透明参数*/);
 
 /* Linear table search implementation of ConfigItemLookup, based on
  * ConfigTableItem arrays */

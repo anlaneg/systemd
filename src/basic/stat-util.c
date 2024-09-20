@@ -94,16 +94,17 @@ bool null_or_empty(struct stat *st) {
         assert(st);
 
         if (S_ISREG(st->st_mode) && st->st_size <= 0)
-            /*普通文件，且文件大小为0*/
+            	/*普通文件，且文件大小为0*/
                 return true;
 
         /* We don't want to hardcode the major/minor of /dev/null,
          * hence we do a simpler "is this a device node?" check. */
 
         if (S_ISCHR(st->st_mode) || S_ISBLK(st->st_mode))
-            /*字符设备或者block设备*/
+            	/*字符设备或者block设备*/
                 return true;
 
+        /*非空文件*/
         return false;
 }
 
@@ -289,12 +290,15 @@ int stat_verify_regular(const struct stat *st) {
          * code. */
 
         if (S_ISDIR(st->st_mode))
+        	/*为目录*/
                 return -EISDIR;
 
         if (S_ISLNK(st->st_mode))
+        	/*为link文件*/
                 return -ELOOP;
 
         if (!S_ISREG(st->st_mode))
+        	/*非普通文件*/
                 return -EBADFD;
 
         return 0;

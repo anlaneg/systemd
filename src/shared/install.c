@@ -1223,6 +1223,7 @@ static int unit_file_load(
                 const char *root_dir,
                 SearchFlags flags) {
 
+		/*解析Install对应的section*/
         const ConfigTableItem items[] = {
                 { "Install", "Alias",           config_parse_alias,            0, &info->aliases           },
                 { "Install", "WantedBy",        config_parse_strv,             0, &info->wanted_by         },
@@ -1241,6 +1242,7 @@ static int unit_file_load(
         assert(info);
         assert(path);
 
+        /*打开给定的文件，获得fd*/
         if (!(flags & SEARCH_DROPIN)) {
                 /* Loading or checking for the main unit file… */
 
@@ -1287,6 +1289,7 @@ static int unit_file_load(
         if (fstat(fd, &st) < 0)
                 return -errno;
 
+        /*检查是否为空文件*/
         if (null_or_empty(&st)) {
                 if ((flags & SEARCH_DROPIN) == 0)
                         info->type = UNIT_FILE_TYPE_MASKED;
@@ -1294,11 +1297,11 @@ static int unit_file_load(
                 return 0;
         }
 
-        r = stat_verify_regular(&st);
+        r = stat_verify_regular(&st);/*需要是普通文件*/
         if (r < 0)
                 return r;
 
-        f = fdopen(fd, "r");
+        f = fdopen(fd, "r");/*将fd映射为FILE* */
         if (!f)
                 return -errno;
         fd = -1;
@@ -1306,7 +1309,7 @@ static int unit_file_load(
         /* c is only needed if we actually load the file (it's referenced from items[] btw, in case you wonder.) */
         assert(c);
 
-        r = config_parse(info->name, path, f,
+        r = config_parse(info->name, path/*文件路径*/, f/*FILE*/,
                          NULL,
                          config_item_table_lookup, items,
                          CONFIG_PARSE_RELAXED|CONFIG_PARSE_ALLOW_INCLUDE, info);
@@ -1747,7 +1750,7 @@ static int install_info_symlink_wants(
                 UnitFileInstallInfo *i,
                 const LookupPaths *paths,
                 const char *config_path,
-                char **list,
+                char **list/*wants列表*/,
                 const char *suffix,
                 UnitFileChange **changes,
                 size_t *n_changes) {

@@ -102,8 +102,8 @@ struct UnitFileInstallInfo {
         char *name;
         char *path;
 
-        char **aliases;
-        char **wanted_by;
+        char **aliases;/*unit的别名信息*/
+        char **wanted_by;/*unit的wantedby信息*/
         char **required_by;
         char **also;
 

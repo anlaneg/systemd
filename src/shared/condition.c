@@ -46,6 +46,7 @@
 #include "util.h"
 #include "virt.h"
 
+/*构造condition对象*/
 Condition* condition_new(ConditionType type, const char *parameter, bool trigger, bool negate) {
         Condition *c;
         int r;
@@ -512,6 +513,7 @@ static int condition_test_first_boot(Condition *c) {
         return (access("/run/systemd/first-boot", F_OK) >= 0) == !!r;
 }
 
+/*检查路径是否存在的condition判定回调*/
 static int condition_test_path_exists(Condition *c) {
         assert(c);
         assert(c->parameter);
@@ -606,9 +608,9 @@ static int condition_test_null(Condition *c) {
 
 int condition_test(Condition *c) {
 
-	/*定义一组函数指针*/
+	/*定义一组函数指针，用于condition判定*/
         static int (*const condition_tests[_CONDITION_TYPE_MAX])(Condition *c) = {
-                [CONDITION_PATH_EXISTS] = condition_test_path_exists,
+                [CONDITION_PATH_EXISTS] = condition_test_path_exists,/*用于检查路径是否存在*/
                 [CONDITION_PATH_EXISTS_GLOB] = condition_test_path_exists_glob,
                 [CONDITION_PATH_IS_DIRECTORY] = condition_test_path_is_directory,
                 [CONDITION_PATH_IS_SYMBOLIC_LINK] = condition_test_path_is_symbolic_link,
@@ -642,10 +644,12 @@ int condition_test(Condition *c) {
         /*按照condition type选择对应的回调，并调用*/
         r = condition_tests[c->type](c);
         if (r < 0) {
+        	/*判定时出错*/
                 c->result = CONDITION_ERROR;
                 return r;
         }
 
+        /*有判定结果，r>0本意为判定为真，但需考虑是否需要对结果取反*/
         b = (r > 0) == !c->negate;
         c->result = b ? CONDITION_SUCCEEDED : CONDITION_FAILED;
         return b;
@@ -730,6 +734,7 @@ static const char* const assert_type_table[_CONDITION_TYPE_MAX] = {
 
 DEFINE_STRING_TABLE_LOOKUP(assert_type, ConditionType);
 
+/*condition检测结果表*/
 static const char* const condition_result_table[_CONDITION_RESULT_MAX] = {
         [CONDITION_UNTESTED] = "untested",
         [CONDITION_SUCCEEDED] = "succeeded",

@@ -189,7 +189,7 @@ int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
                         path = strjoina(syspath, "/uevent");
                         r = access(path, F_OK);
                         if (r < 0) {
-                        	/*所有/sys/devices/目录下设备必须要有uevent文件*/
+                        		/*所有/sys/devices/目录下设备必须要有uevent文件*/
                                 if (errno == ENOENT)
                                         /* this is not a valid device */
                                         return -ENODEV;
@@ -230,11 +230,11 @@ _public_ int sd_device_new_from_syspath(sd_device **ret, const char *syspath) {
         if (r < 0)
                 return r;
 
-        r = device_set_syspath(device, syspath, true);
+        r = device_set_syspath(device, syspath, true/*要求校验*/);
         if (r < 0)
                 return r;
 
-        *ret = TAKE_PTR(device);
+        *ret = TAKE_PTR(device);/*成功设置*/
         return 0;
 }
 
@@ -706,6 +706,7 @@ _public_ int sd_device_get_syspath(sd_device *device, const char **ret) {
         return 0;
 }
 
+/*通过child设备加载父设备*/
 static int device_new_from_child(sd_device **ret, sd_device *child) {
         _cleanup_free_ char *path = NULL;
         const char *subdir, *syspath;
@@ -759,7 +760,7 @@ _public_ int sd_device_get_parent(sd_device *child, sd_device **ret) {
         }
 
         if (!child->parent)
-                return -ENOENT;
+                return -ENOENT;/*查找parent失败*/
 
         *ret = child->parent;
         return 0;
