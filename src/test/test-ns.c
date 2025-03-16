@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <stdlib.h>
@@ -26,16 +26,33 @@ int main(int argc, char *argv[]) {
                 NULL
         };
 
+        const char * const exec[] = {
+                "/lib",
+                "/usr",
+                "-/lib64",
+                "-/usr/lib64",
+                NULL
+        };
+
+        const char * const no_exec[] = {
+                "/var",
+                NULL
+        };
+
         const char *inaccessible[] = {
                 "/home/lennart/projects",
                 NULL
         };
 
-        static const NamespaceInfo ns_info = {
-                .private_dev = true,
-                .protect_control_groups = true,
-                .protect_kernel_tunables = true,
-                .protect_kernel_modules = true,
+        static const BindMount bind_mount = {
+                .source = (char*) "/usr/bin",
+                .destination = (char*) "/etc/systemd",
+                .read_only = true,
+        };
+
+        static const TemporaryFileSystem tmpfs = {
+                .path = (char*) "/var",
+                .options = (char*) "ro",
         };
 
         char *root_directory;
@@ -61,23 +78,38 @@ int main(int argc, char *argv[]) {
         else
                 log_info("Not chrooted");
 
-        r = setup_namespace(root_directory,
-                            NULL,
-                            &ns_info,
-                            (char **) writable,
-                            (char **) readonly,
-                            (char **) inaccessible,
-                            NULL,
-                            &(BindMount) { .source = (char*) "/usr/bin", .destination = (char*) "/etc/systemd", .read_only = true }, 1,
-                            &(TemporaryFileSystem) { .path = (char*) "/var", .options = (char*) "ro" }, 1,
-                            tmp_dir,
-                            var_tmp_dir,
-                            PROTECT_HOME_NO,
-                            PROTECT_SYSTEM_NO,
-                            0,
-                            0);
+        NamespaceParameters p = {
+                .runtime_scope = RUNTIME_SCOPE_SYSTEM,
+
+                .root_directory = root_directory,
+
+                .read_write_paths = (char**) writable,
+                .read_only_paths = (char**) readonly,
+                .inaccessible_paths = (char**) inaccessible,
+
+                .exec_paths = (char**) exec,
+                .no_exec_paths = (char**) no_exec,
+
+                .tmp_dir = tmp_dir,
+                .var_tmp_dir = var_tmp_dir,
+
+                .bind_mounts = &bind_mount,
+                .n_bind_mounts = 1,
+
+                .temporary_filesystems = &tmpfs,
+                .n_temporary_filesystems = 1,
+
+                .private_dev = true,
+                .protect_control_groups = true,
+                .protect_kernel_tunables = true,
+                .protect_kernel_modules = true,
+                .protect_proc = PROTECT_PROC_NOACCESS,
+                .proc_subset = PROC_SUBSET_PID,
+        };
+
+        r = setup_namespace(&p, NULL);
         if (r < 0) {
-                log_error_errno(r, "Failed to setup namespace: %m");
+                log_error_errno(r, "Failed to set up namespace: %m");
 
                 log_info("Usage:\n"
                          "  sudo TEST_NS_PROJECTS=/home/lennart/projects ./test-ns\n"

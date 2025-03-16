@@ -1,13 +1,11 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <mqueue.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <string.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
 #include <sys/sem.h>
@@ -60,7 +58,7 @@ static int clean_sysvipc_shm(uid_t delete_uid, gid_t delete_gid, bool rm) {
 
                 r = read_line(f, LONG_LINE_MAX, &line);
                 if (r < 0)
-                        return log_warning_errno(errno, "Failed to read /proc/sysvipc/shm: %m");
+                        return log_warning_errno(r, "Failed to read /proc/sysvipc/shm: %m");
                 if (r == 0)
                         break;
 
@@ -220,8 +218,7 @@ static int clean_sysvipc_msg(uid_t delete_uid, gid_t delete_gid, bool rm) {
         return ret;
 }
 
-static int clean_posix_shm_internal(DIR *dir, uid_t uid, gid_t gid, bool rm) {
-        struct dirent *de;
+static int clean_posix_shm_internal(const char *dirname, DIR *dir, uid_t uid, gid_t gid, bool rm) {
         int ret = 0, r;
 
         assert(dir);
@@ -236,19 +233,21 @@ static int clean_posix_shm_internal(DIR *dir, uid_t uid, gid_t gid, bool rm) {
                         if (errno == ENOENT)
                                 continue;
 
-                        ret = log_warning_errno(errno, "Failed to stat() POSIX shared memory segment %s: %m", de->d_name);
+                        ret = log_warning_errno(errno, "Failed to stat() POSIX shared memory segment %s/%s: %m",
+                                                dirname, de->d_name);
                         continue;
                 }
 
                 if (S_ISDIR(st.st_mode)) {
-                        _cleanup_closedir_ DIR *kid;
+                        _cleanup_closedir_ DIR *kid = NULL;
 
                         kid = xopendirat(dirfd(dir), de->d_name, O_NOFOLLOW|O_NOATIME);
                         if (!kid) {
                                 if (errno != ENOENT)
-                                        ret = log_warning_errno(errno, "Failed to enter shared memory directory %s: %m", de->d_name);
+                                        ret = log_warning_errno(errno, "Failed to enter shared memory directory %s/%s: %m",
+                                                                dirname, de->d_name);
                         } else {
-                                r = clean_posix_shm_internal(kid, uid, gid, rm);
+                                r = clean_posix_shm_internal(de->d_name, kid, uid, gid, rm);
                                 if (r < 0)
                                         ret = r;
                         }
@@ -264,7 +263,8 @@ static int clean_posix_shm_internal(DIR *dir, uid_t uid, gid_t gid, bool rm) {
                                 if (errno == ENOENT)
                                         continue;
 
-                                ret = log_warning_errno(errno, "Failed to remove POSIX shared memory directory %s: %m", de->d_name);
+                                ret = log_warning_errno(errno, "Failed to remove POSIX shared memory directory %s/%s: %m",
+                                                        dirname, de->d_name);
                         } else {
                                 log_debug("Removed POSIX shared memory directory %s", de->d_name);
                                 if (ret == 0)
@@ -309,12 +309,11 @@ static int clean_posix_shm(uid_t uid, gid_t gid, bool rm) {
                 return log_warning_errno(errno, "Failed to open /dev/shm: %m");
         }
 
-        return clean_posix_shm_internal(dir, uid, gid, rm);
+        return clean_posix_shm_internal("/dev/shm", dir, uid, gid, rm);
 }
 
 static int clean_posix_mq(uid_t uid, gid_t gid, bool rm) {
         _cleanup_closedir_ DIR *dir = NULL;
-        struct dirent *de;
         int ret = 0;
 
         dir = opendir("/dev/mqueue");

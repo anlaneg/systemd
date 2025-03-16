@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #pragma once
 
@@ -8,6 +8,8 @@
 
 #include "sd-id128.h"
 
+#include "io-util.h"
+#include "iovec-wrapper.h"
 #include "time-util.h"
 
 /* Make sure not to make this smaller than the maximum coredump size.
@@ -22,15 +24,7 @@
 #define LINE_CHUNK 8*1024u
 
 /* The maximum number of fields in an entry */
-#define ENTRY_FIELD_COUNT_MAX 1024
-
-struct iovec_wrapper {
-        struct iovec *iovec;
-        size_t size_bytes;
-        size_t count;
-};
-
-size_t iovw_size(struct iovec_wrapper *iovw);
+#define ENTRY_FIELD_COUNT_MAX 1024u
 
 typedef struct JournalImporter {
         int fd;
@@ -38,7 +32,6 @@ typedef struct JournalImporter {
         char *name;
 
         char *buf;
-        size_t size;       /* total size of the buffer */
         size_t offset;     /* offset to the beginning of live data in the buffer */
         size_t scanned;    /* number of bytes since the beginning of data without a newline */
         size_t filled;     /* total number of bytes in the buffer */
@@ -52,6 +45,9 @@ typedef struct JournalImporter {
         dual_timestamp ts;
         sd_id128_t boot_id;
 } JournalImporter;
+
+#define JOURNAL_IMPORTER_INIT(_fd) { .fd = (_fd), .iovw = {} }
+#define JOURNAL_IMPORTER_MAKE(_fd) (JournalImporter) JOURNAL_IMPORTER_INIT(_fd)
 
 void journal_importer_cleanup(JournalImporter *);
 int journal_importer_process_data(JournalImporter *);

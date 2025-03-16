@@ -1,10 +1,10 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <string.h>
 
 #include "alloc-util.h"
 #include "logind-device.h"
-#include "util.h"
+#include "logind-seat-dbus.h"
 
 Device* device_new(Manager *m, const char *sysfs, bool master) {
         Device *d;
@@ -27,7 +27,7 @@ Device* device_new(Manager *m, const char *sysfs, bool master) {
 
         d->manager = m;
         d->master = master;
-        dual_timestamp_get(&d->timestamp);
+        dual_timestamp_now(&d->timestamp);
 
         return d;
 }
@@ -66,7 +66,6 @@ void device_free(Device *d) {
 }
 
 void device_attach(Device *d, Seat *s) {
-        Device *i;
         bool had_master;
 
         assert(d);
@@ -90,14 +89,13 @@ void device_attach(Device *d, Seat *s) {
 
         if (d->master || !s->devices)
                 LIST_PREPEND(devices, s->devices, d);
-        else {
+        else
                 LIST_FOREACH(devices, i, s->devices) {
                         if (!i->devices_next || !i->master) {
                                 LIST_INSERT_AFTER(devices, s->devices, i, d);
                                 break;
                         }
                 }
-        }
 
         if (!had_master && d->master && s->started) {
                 seat_save(s);

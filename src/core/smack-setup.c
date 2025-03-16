@@ -1,17 +1,17 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /***
   Copyright © 2013 Intel Corporation
   Authors:
         Nathaniel Chen <nathaniel.chen@intel.com>
 ***/
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <stdio_ext.h>
 #include <stdlib.h>
-#include <string.h>
+#include <unistd.h>
+
+#include "sd-messages.h"
 
 #include "alloc-util.h"
 #include "dirent-util.h"
@@ -21,16 +21,38 @@
 #include "macro.h"
 #include "smack-setup.h"
 #include "string-util.h"
-#include "util.h"
 
 #if ENABLE_SMACK
 
-static int write_access2_rules(const char* srcdir) {
-        _cleanup_close_ int load2_fd = -1, change_fd = -1;
+static int fdopen_unlocked_at(int dfd, const char *dir, const char *name, int *status, FILE **ret_file) {
+        int fd, r;
+        FILE *f;
+
+        fd = openat(dfd, name, O_RDONLY|O_CLOEXEC);
+        if (fd < 0) {
+                if (*status == 0)
+                        *status = -errno;
+
+                return log_warning_errno(errno, "Failed to open \"%s/%s\": %m", dir, name);
+        }
+
+        r = fdopen_unlocked(fd, "r", &f);
+        if (r < 0) {
+                if (*status == 0)
+                        *status = r;
+
+                safe_close(fd);
+                return log_error_errno(r, "Failed to open \"%s/%s\": %m", dir, name);
+        }
+
+        *ret_file = f;
+        return 0;
+}
+
+static int write_access2_rules(const char *srcdir) {
+        _cleanup_close_ int load2_fd = -EBADF, change_fd = -EBADF;
         _cleanup_closedir_ DIR *dir = NULL;
-        struct dirent *entry;
-        int dfd = -1;
-        int r = 0;
+        int dfd = -EBADF, r = 0;
 
         load2_fd = open("/sys/fs/smackfs/load2", O_RDWR|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
         if (load2_fd < 0)  {
@@ -58,28 +80,13 @@ static int write_access2_rules(const char* srcdir) {
         assert(dfd >= 0);
 
         FOREACH_DIRENT(entry, dir, return 0) {
-                int fd;
                 _cleanup_fclose_ FILE *policy = NULL;
 
                 if (!dirent_is_file(entry))
                         continue;
 
-                fd = openat(dfd, entry->d_name, O_RDONLY|O_CLOEXEC);
-                if (fd < 0) {
-                        if (r == 0)
-                                r = -errno;
-                        log_warning_errno(errno, "Failed to open '%s': %m", entry->d_name);
+                if (fdopen_unlocked_at(dfd, srcdir, entry->d_name, &r, &policy) < 0)
                         continue;
-                }
-
-                policy = fdopen(fd, "r");
-                if (!policy) {
-                        if (r == 0)
-                                r = -errno;
-                        safe_close(fd);
-                        log_error_errno(errno, "Failed to open '%s': %m", entry->d_name);
-                        continue;
-                }
 
                 /* load2 write rules in the kernel require a line buffered stream */
                 for (;;) {
@@ -114,12 +121,10 @@ static int write_access2_rules(const char* srcdir) {
         return r;
 }
 
-static int write_cipso2_rules(const char* srcdir) {
-        _cleanup_close_ int cipso2_fd = -1;
+static int write_cipso2_rules(const char *srcdir) {
+        _cleanup_close_ int cipso2_fd = -EBADF;
         _cleanup_closedir_ DIR *dir = NULL;
-        struct dirent *entry;
-        int dfd = -1;
-        int r = 0;
+        int dfd = -EBADF, r = 0;
 
         cipso2_fd = open("/sys/fs/smackfs/cipso2", O_RDWR|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
         if (cipso2_fd < 0)  {
@@ -140,28 +145,13 @@ static int write_cipso2_rules(const char* srcdir) {
         assert(dfd >= 0);
 
         FOREACH_DIRENT(entry, dir, return 0) {
-                int fd;
                 _cleanup_fclose_ FILE *policy = NULL;
 
                 if (!dirent_is_file(entry))
                         continue;
 
-                fd = openat(dfd, entry->d_name, O_RDONLY|O_CLOEXEC);
-                if (fd < 0) {
-                        if (r == 0)
-                                r = -errno;
-                        log_error_errno(errno, "Failed to open '%s': %m", entry->d_name);
+                if (fdopen_unlocked_at(dfd, srcdir, entry->d_name, &r, &policy) < 0)
                         continue;
-                }
-
-                policy = fdopen(fd, "r");
-                if (!policy) {
-                        if (r == 0)
-                                r = -errno;
-                        safe_close(fd);
-                        log_error_errno(errno, "Failed to open '%s': %m", entry->d_name);
-                        continue;
-                }
 
                 /* cipso2 write rules in the kernel require a line buffered stream */
                 for (;;) {
@@ -190,12 +180,10 @@ static int write_cipso2_rules(const char* srcdir) {
         return r;
 }
 
-static int write_netlabel_rules(const char* srcdir) {
+static int write_netlabel_rules(const char *srcdir) {
         _cleanup_fclose_ FILE *dst = NULL;
         _cleanup_closedir_ DIR *dir = NULL;
-        struct dirent *entry;
-        int dfd = -1;
-        int r = 0;
+        int dfd = -EBADF, r = 0;
 
         dst = fopen("/sys/fs/smackfs/netlabel", "we");
         if (!dst)  {
@@ -216,27 +204,10 @@ static int write_netlabel_rules(const char* srcdir) {
         assert(dfd >= 0);
 
         FOREACH_DIRENT(entry, dir, return 0) {
-                int fd;
                 _cleanup_fclose_ FILE *policy = NULL;
 
-                fd = openat(dfd, entry->d_name, O_RDONLY|O_CLOEXEC);
-                if (fd < 0) {
-                        if (r == 0)
-                                r = -errno;
-                        log_warning_errno(errno, "Failed to open %s: %m", entry->d_name);
+                if (fdopen_unlocked_at(dfd, srcdir, entry->d_name, &r, &policy) < 0)
                         continue;
-                }
-
-                policy = fdopen(fd, "r");
-                if (!policy) {
-                        if (r == 0)
-                                r = -errno;
-                        safe_close(fd);
-                        log_error_errno(errno, "Failed to open %s: %m", entry->d_name);
-                        continue;
-                }
-
-                (void) __fsetlocking(policy, FSETLOCKING_BYCALLER);
 
                 /* load2 write rules in the kernel require a line buffered stream */
                 for (;;) {
@@ -269,10 +240,10 @@ static int write_netlabel_rules(const char* srcdir) {
 }
 
 static int write_onlycap_list(void) {
-        _cleanup_close_ int onlycap_fd = -1;
+        _cleanup_close_ int onlycap_fd = -EBADF;
         _cleanup_free_ char *list = NULL;
         _cleanup_fclose_ FILE *f = NULL;
-        size_t len = 0, allocated = 0;
+        size_t len = 0;
         int r;
 
         f = fopen("/etc/smack/onlycap", "re");
@@ -297,7 +268,7 @@ static int write_onlycap_list(void) {
                         continue;
 
                 l = strlen(buf);
-                if (!GREEDY_REALLOC(list, allocated, len + l + 1))
+                if (!GREEDY_REALLOC(list, len + l + 1))
                         return log_oom();
 
                 stpcpy(list + len, buf)[0] = ' ';
@@ -334,7 +305,7 @@ int mac_smack_setup(bool *loaded_policy) {
         assert(loaded_policy);
 
         r = write_access2_rules("/etc/smack/accesses.d/");
-        switch(r) {
+        switch (r) {
         case -ENOENT:
                 log_debug("Smack is not enabled in the kernel.");
                 return 0;
@@ -349,7 +320,7 @@ int mac_smack_setup(bool *loaded_policy) {
                 return 0;
         }
 
-#ifdef SMACK_RUN_LABEL
+#if HAVE_SMACK_RUN_LABEL
         r = write_string_file("/proc/self/attr/current", SMACK_RUN_LABEL, WRITE_STRING_FILE_DISABLE_BUFFER);
         if (r < 0)
                 log_warning_errno(r, "Failed to set SMACK label \"" SMACK_RUN_LABEL "\" on self: %m");
@@ -366,7 +337,7 @@ int mac_smack_setup(bool *loaded_policy) {
 #endif
 
         r = write_cipso2_rules("/etc/smack/cipso.d/");
-        switch(r) {
+        switch (r) {
         case -ENOENT:
                 log_debug("Smack/CIPSO is not enabled in the kernel.");
                 return 0;
@@ -382,7 +353,7 @@ int mac_smack_setup(bool *loaded_policy) {
         }
 
         r = write_netlabel_rules("/etc/smack/netlabel.d/");
-        switch(r) {
+        switch (r) {
         case -ENOENT:
                 log_debug("Smack/CIPSO is not enabled in the kernel.");
                 return 0;
@@ -398,7 +369,7 @@ int mac_smack_setup(bool *loaded_policy) {
         }
 
         r = write_onlycap_list();
-        switch(r) {
+        switch (r) {
         case -ENOENT:
                 log_debug("Smack is not enabled in the kernel.");
                 break;
@@ -409,8 +380,9 @@ int mac_smack_setup(bool *loaded_policy) {
                 log_info("Successfully wrote Smack onlycap list.");
                 break;
         default:
-                log_emergency_errno(r, "Failed to write Smack onlycap list: %m");
-                return r;
+                return log_struct_errno(LOG_EMERG, r,
+                                        LOG_MESSAGE("Failed to write Smack onlycap list: %m"),
+                                        "MESSAGE_ID=" SD_MESSAGE_SMACK_FAILED_WRITE_STR);
         }
 
         *loaded_policy = true;

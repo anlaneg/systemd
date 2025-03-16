@@ -1,11 +1,6 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <fcntl.h>
-#include <linux/magic.h>
-#if HAVE_ACL
-#include <sys/acl.h>
-#endif
-#include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/vfs.h>
 #include <unistd.h>
@@ -13,8 +8,9 @@
 #include "acl-util.h"
 #include "dirent-util.h"
 #include "fd-util.h"
+#include "fileio.h"
 #include "fs-util.h"
-#include "missing.h"
+#include "missing_magic.h"
 #include "nspawn-def.h"
 #include "nspawn-patch-uid.h"
 #include "stat-util.h"
@@ -26,27 +22,23 @@
 #if HAVE_ACL
 
 static int get_acl(int fd, const char *name, acl_type_t type, acl_t *ret) {
-        char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int) + 1];
         acl_t acl;
 
         assert(fd >= 0);
         assert(ret);
 
         if (name) {
-                _cleanup_close_ int child_fd = -1;
+                _cleanup_close_ int child_fd = -EBADF;
 
                 child_fd = openat(fd, name, O_PATH|O_CLOEXEC|O_NOFOLLOW);
                 if (child_fd < 0)
                         return -errno;
 
-                xsprintf(procfs_path, "/proc/self/fd/%i", child_fd);
-                acl = acl_get_file(procfs_path, type);
+                acl = acl_get_file(FORMAT_PROC_FD_PATH(child_fd), type);
         } else if (type == ACL_TYPE_ACCESS)
                 acl = acl_get_fd(fd);
-        else {
-                xsprintf(procfs_path, "/proc/self/fd/%i", fd);
-                acl = acl_get_file(procfs_path, type);
-        }
+        else
+                acl = acl_get_file(FORMAT_PROC_FD_PATH(fd), type);
         if (!acl)
                 return -errno;
 
@@ -55,27 +47,23 @@ static int get_acl(int fd, const char *name, acl_type_t type, acl_t *ret) {
 }
 
 static int set_acl(int fd, const char *name, acl_type_t type, acl_t acl) {
-        char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int) + 1];
         int r;
 
         assert(fd >= 0);
         assert(acl);
 
         if (name) {
-                _cleanup_close_ int child_fd = -1;
+                _cleanup_close_ int child_fd = -EBADF;
 
                 child_fd = openat(fd, name, O_PATH|O_CLOEXEC|O_NOFOLLOW);
                 if (child_fd < 0)
                         return -errno;
 
-                xsprintf(procfs_path, "/proc/self/fd/%i", child_fd);
-                r = acl_set_file(procfs_path, type, acl);
+                r = acl_set_file(FORMAT_PROC_FD_PATH(child_fd), type, acl);
         } else if (type == ACL_TYPE_ACCESS)
                 r = acl_set_fd(fd, acl);
-        else {
-                xsprintf(procfs_path, "/proc/self/fd/%i", fd);
-                r = acl_set_file(procfs_path, type, acl);
-        }
+        else
+                r = acl_set_file(FORMAT_PROC_FD_PATH(fd), type, acl);
         if (r < 0)
                 return -errno;
 
@@ -103,7 +91,7 @@ static int shift_acl(acl_t acl, uid_t shift, acl_t *ret) {
 
                 if (IN_SET(tag, ACL_USER, ACL_GROUP)) {
 
-                        /* We don't distuingish here between uid_t and gid_t, let's make sure the compiler checks that
+                        /* We don't distinguish here between uid_t and gid_t, let's make sure the compiler checks that
                          * this is actually OK */
                         assert_cc(sizeof(uid_t) == sizeof(gid_t));
 
@@ -193,7 +181,9 @@ static int patch_acls(int fd, const char *name, const struct stat *st, uid_t shi
 
         if (S_ISDIR(st->st_mode)) {
                 acl_free(acl);
-                acl_free(shifted);
+
+                if (shifted)
+                        acl_free(shifted);
 
                 acl = shifted = NULL;
 
@@ -251,7 +241,7 @@ static int patch_fd(int fd, const char *name, const struct stat *st, uid_t shift
                 if (name) {
                         if (!S_ISLNK(st->st_mode))
                                 r = fchmodat(fd, name, st->st_mode, 0);
-                        else /* AT_SYMLINK_NOFOLLOW is not available for fchmodat() */
+                        else /* Changing the mode of a symlink is not supported by Linux kernel. Don't bother. */
                                 r = 0;
                 } else
                         r = fchmod(fd, st->st_mode);
@@ -325,8 +315,6 @@ static int recurse_fd(int fd, bool donate_fd, const struct stat *st, uid_t shift
                 goto read_only;
 
         if (S_ISDIR(st->st_mode)) {
-                struct dirent *de;
-
                 if (!donate_fd) {
                         int copy;
 
@@ -340,12 +328,11 @@ static int recurse_fd(int fd, bool donate_fd, const struct stat *st, uid_t shift
                         donate_fd = true;
                 }
 
-                d = fdopendir(fd);
+                d = take_fdopendir(&fd);
                 if (!d) {
                         r = -errno;
                         goto finish;
                 }
-                fd = -1;
 
                 FOREACH_DIRENT_ALL(de, d, r = -errno; goto finish) {
                         struct stat fst;
@@ -402,7 +389,7 @@ read_only:
 
                 /* When we hit a ready-only subtree we simply skip it, but log about it. */
                 (void) fd_get_path(fd, &name);
-                log_debug("Skippping read-only file or directory %s.", strna(name));
+                log_debug("Skipping read-only file or directory %s.", strna(name));
                 r = changed;
         }
 
@@ -421,7 +408,7 @@ static int fd_patch_uid_internal(int fd, bool donate_fd, uid_t shift, uid_t rang
 
         /* Recursively adjusts the UID/GIDs of all files of a directory tree. This is used to automatically fix up an
          * OS tree to the used user namespace UID range. Note that this automatic adjustment only works for UID ranges
-         * following the concept that the upper 16bit of a UID identify the container, and the lower 16bit are the actual
+         * following the concept that the upper 16-bit of a UID identify the container, and the lower 16-bit are the actual
          * UID within the container. */
 
         if ((shift & 0xFFFF) != 0) {
@@ -436,7 +423,7 @@ static int fd_patch_uid_internal(int fd, bool donate_fd, uid_t shift, uid_t rang
         }
 
         if (range != 0x10000) {
-                /* We only support containers with 16bit UID ranges for the patching logic */
+                /* We only support containers with 16-bit UID ranges for the patching logic */
                 r = -EOPNOTSUPP;
                 goto finish;
         }
@@ -453,7 +440,7 @@ static int fd_patch_uid_internal(int fd, bool donate_fd, uid_t shift, uid_t rang
         }
 
         /* Try to detect if the range is already right. Of course, this a pretty drastic optimization, as we assume
-         * that if the top-level dir has the right upper 16bit assigned, then everything below will have too... */
+         * that if the top-level dir has the right upper 16-bit assigned, then everything below will have too... */
         if (((uint32_t) (st.st_uid ^ shift) >> 16) == 0)
                 return 0;
 

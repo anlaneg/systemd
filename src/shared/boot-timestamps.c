@@ -1,8 +1,8 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "acpi-fpdt.h"
 #include "boot-timestamps.h"
-#include "efivars.h"
+#include "efi-loader.h"
 #include "macro.h"
 #include "time-util.h"
 
@@ -15,7 +15,7 @@ int boot_timestamps(const dual_timestamp *n, dual_timestamp *firmware, dual_time
         assert(loader);
 
         if (!n) {
-                dual_timestamp_get(&_n);
+                dual_timestamp_now(&_n);
                 n = &_n;
         }
 

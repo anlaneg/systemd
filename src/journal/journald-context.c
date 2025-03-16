@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #if HAVE_SELINUX
 #include <selinux/selinux.h>
@@ -7,11 +7,14 @@
 #include "alloc-util.h"
 #include "audit-util.h"
 #include "cgroup-util.h"
+#include "env-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
-#include "io-util.h"
+#include "iovec-util.h"
+#include "journal-internal.h"
 #include "journal-util.h"
+#include "journald-client.h"
 #include "journald-context.h"
 #include "parse-util.h"
 #include "path-util.h"
@@ -48,7 +51,7 @@
  *    previously had trouble associating the log message with the service.
  *
  * NB: With and without the metadata cache: the implicitly added entry metadata in the journal (with the exception of
- *     UID/PID/GID and SELinux label) must be understood as possibly slightly out of sync (i.e. sometimes slighly older
+ *     UID/PID/GID and SELinux label) must be understood as possibly slightly out of sync (i.e. sometimes slightly older
  *     and sometimes slightly newer than what was current at the log event).
  */
 
@@ -68,7 +71,7 @@
 static size_t cache_max(void) {
         static size_t cached = -1;
 
-        if (cached == (size_t) -1) {
+        if (cached == SIZE_MAX) {
                 uint64_t mem_total;
                 int r;
 
@@ -76,18 +79,14 @@ static size_t cache_max(void) {
                 if (r < 0) {
                         log_warning_errno(r, "Cannot query /proc/meminfo for MemTotal: %m");
                         cached = CACHE_MAX_FALLBACK;
-                } else {
+                } else
                         /* Cache entries are usually a few kB, but the process cmdline is controlled by the
                          * user and can be up to _SC_ARG_MAX, usually 2MB. Let's say that approximately up to
                          * 1/8th of memory may be used by the cache.
                          *
                          * In the common case, this formula gives 64 cache entries for each GB of RAM.
                          */
-                        long l = sysconf(_SC_ARG_MAX);
-                        assert(l > 0);
-
-                        cached = CLAMP(mem_total / 8 / (uint64_t) l, CACHE_MAX_MIN, CACHE_MAX_MAX);
-                }
+                        cached = CLAMP(mem_total / 8 / sc_arg_max(), CACHE_MAX_MIN, CACHE_MAX_MAX);
         }
 
         return cached;
@@ -105,46 +104,41 @@ static int client_context_compare(const void *a, const void *b) {
 }
 
 static int client_context_new(Server *s, pid_t pid, ClientContext **ret) {
-        ClientContext *c;
+        _cleanup_free_ ClientContext *c = NULL;
         int r;
 
         assert(s);
         assert(pid_is_valid(pid));
         assert(ret);
 
-        r = hashmap_ensure_allocated(&s->client_contexts, NULL);
-        if (r < 0)
-                return r;
-
         r = prioq_ensure_allocated(&s->client_contexts_lru, client_context_compare);
         if (r < 0)
                 return r;
 
-        c = new0(ClientContext, 1);
+        c = new(ClientContext, 1);
         if (!c)
                 return -ENOMEM;
 
-        c->pid = pid;
+        *c = (ClientContext) {
+                .pid = pid,
+                .uid = UID_INVALID,
+                .gid = GID_INVALID,
+                .auditid = AUDIT_SESSION_INVALID,
+                .loginuid = UID_INVALID,
+                .owner_uid = UID_INVALID,
+                .lru_index = PRIOQ_IDX_NULL,
+                .timestamp = USEC_INFINITY,
+                .extra_fields_mtime = NSEC_INFINITY,
+                .log_level_max = -1,
+                .log_ratelimit_interval = s->ratelimit_interval,
+                .log_ratelimit_burst = s->ratelimit_burst,
+        };
 
-        c->uid = UID_INVALID;
-        c->gid = GID_INVALID;
-        c->auditid = AUDIT_SESSION_INVALID;
-        c->loginuid = UID_INVALID;
-        c->owner_uid = UID_INVALID;
-        c->lru_index = PRIOQ_IDX_NULL;
-        c->timestamp = USEC_INFINITY;
-        c->extra_fields_mtime = NSEC_INFINITY;
-        c->log_level_max = -1;
-        c->log_rate_limit_interval = s->rate_limit_interval;
-        c->log_rate_limit_burst = s->rate_limit_burst;
-
-        r = hashmap_put(s->client_contexts, PID_TO_PTR(pid), c);
-        if (r < 0) {
-                free(c);
+        r = hashmap_ensure_put(&s->client_contexts, NULL, PID_TO_PTR(pid), c);
+        if (r < 0)
                 return r;
-        }
 
-        *ret = c;
+        *ret = TAKE_PTR(c);
         return 0;
 }
 
@@ -185,8 +179,11 @@ static void client_context_reset(Server *s, ClientContext *c) {
 
         c->log_level_max = -1;
 
-        c->log_rate_limit_interval = s->rate_limit_interval;
-        c->log_rate_limit_burst = s->rate_limit_burst;
+        c->log_ratelimit_interval = s->ratelimit_interval;
+        c->log_ratelimit_burst = s->ratelimit_burst;
+
+        c->log_filter_allowed_patterns = set_free_free(c->log_filter_allowed_patterns);
+        c->log_filter_denied_patterns = set_free_free(c->log_filter_denied_patterns);
 }
 
 static ClientContext* client_context_free(Server *s, ClientContext *c) {
@@ -213,7 +210,7 @@ static void client_context_read_uid_gid(ClientContext *c, const struct ucred *uc
         if (ucred && uid_is_valid(ucred->uid))
                 c->uid = ucred->uid;
         else
-                (void) get_process_uid(c->pid, &c->uid);
+                (void) pid_get_uid(c->pid, &c->uid);
 
         if (ucred && gid_is_valid(ucred->gid))
                 c->gid = ucred->gid;
@@ -227,13 +224,13 @@ static void client_context_read_basic(ClientContext *c) {
         assert(c);
         assert(pid_is_valid(c->pid));
 
-        if (get_process_comm(c->pid, &t) >= 0)
+        if (pid_get_comm(c->pid, &t) >= 0)
                 free_and_replace(c->comm, t);
 
         if (get_process_exe(c->pid, &t) >= 0)
                 free_and_replace(c->exe, t);
 
-        if (get_process_cmdline(c->pid, 0, false, &t) >= 0)
+        if (pid_get_cmdline(c->pid, SIZE_MAX, PROCESS_CMDLINE_QUOTE, &t) >= 0)
                 free_and_replace(c->cmdline, t);
 
         if (get_process_capeff(c->pid, &t) >= 0)
@@ -266,7 +263,7 @@ static int client_context_read_label(
 
                 /* If we got no SELinux label passed in, let's try to acquire one */
 
-                if (getpidcon(c->pid, &con) >= 0) {
+                if (getpidcon(c->pid, &con) >= 0 && con) {
                         free_and_replace(c->label, con);
                         c->label_size = strlen(c->label);
                 }
@@ -296,6 +293,8 @@ static int client_context_read_cgroup(Server *s, ClientContext *c, const char *u
 
                 return r;
         }
+
+        (void) client_context_read_log_filter_patterns(c, t);
 
         /* Let's shortcut this if the cgroup path didn't change */
         if (streq_ptr(c->cgroup, t))
@@ -328,19 +327,29 @@ static int client_context_read_invocation_id(
                 Server *s,
                 ClientContext *c) {
 
-        _cleanup_free_ char *value = NULL;
-        const char *p;
+        _cleanup_free_ char *p = NULL, *value = NULL;
         int r;
 
         assert(s);
         assert(c);
 
-        /* Read the invocation ID of a unit off a unit. PID 1 stores it in a per-unit symlink in /run/systemd/units/ */
+        /* Read the invocation ID of a unit off a unit.
+         * PID 1 stores it in a per-unit symlink in /run/systemd/units/
+         * User managers store it in a per-unit symlink under /run/user/<uid>/systemd/units/ */
 
         if (!c->unit)
                 return 0;
 
-        p = strjoina("/run/systemd/units/invocation:", c->unit);
+        if (c->user_unit) {
+                r = asprintf(&p, "/run/user/" UID_FMT "/systemd/units/invocation:%s", c->owner_uid, c->user_unit);
+                if (r < 0)
+                        return r;
+        } else {
+                p = strjoin("/run/systemd/units/invocation:", c->unit);
+                if (!p)
+                        return -ENOMEM;
+        }
+
         r = readlink_malloc(p, &value);
         if (r < 0)
                 return r;
@@ -366,7 +375,7 @@ static int client_context_read_log_level_max(
 
         ll = log_level_from_string(value);
         if (ll < 0)
-                return -EINVAL;
+                return ll;
 
         c->log_level_max = ll;
         return 0;
@@ -376,8 +385,8 @@ static int client_context_read_extra_fields(
                 Server *s,
                 ClientContext *c) {
 
-        size_t size = 0, n_iovec = 0, n_allocated = 0, left;
         _cleanup_free_ struct iovec *iovec = NULL;
+        size_t size = 0, n_iovec = 0, left;
         _cleanup_free_ void *data = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         struct stat st;
@@ -443,7 +452,7 @@ static int client_context_read_extra_fields(
                 if (!journal_field_valid((const char *) field, eq - field, false))
                         return -EBADMSG;
 
-                if (!GREEDY_REALLOC(iovec, n_allocated, n_iovec+1))
+                if (!GREEDY_REALLOC(iovec, n_iovec+1))
                         return -ENOMEM;
 
                 iovec[n_iovec++] = IOVEC_MAKE(field, v);
@@ -462,7 +471,7 @@ static int client_context_read_extra_fields(
         return 0;
 }
 
-static int client_context_read_log_rate_limit_interval(ClientContext *c) {
+static int client_context_read_log_ratelimit_interval(ClientContext *c) {
         _cleanup_free_ char *value = NULL;
         const char *p;
         int r;
@@ -477,10 +486,10 @@ static int client_context_read_log_rate_limit_interval(ClientContext *c) {
         if (r < 0)
                 return r;
 
-        return safe_atou64(value, &c->log_rate_limit_interval);
+        return safe_atou64(value, &c->log_ratelimit_interval);
 }
 
-static int client_context_read_log_rate_limit_burst(ClientContext *c) {
+static int client_context_read_log_ratelimit_burst(ClientContext *c) {
         _cleanup_free_ char *value = NULL;
         const char *p;
         int r;
@@ -495,7 +504,7 @@ static int client_context_read_log_rate_limit_burst(ClientContext *c) {
         if (r < 0)
                 return r;
 
-        return safe_atou(value, &c->log_rate_limit_burst);
+        return safe_atou(value, &c->log_ratelimit_burst);
 }
 
 static void client_context_really_refresh(
@@ -517,21 +526,21 @@ static void client_context_really_refresh(
         client_context_read_basic(c);
         (void) client_context_read_label(c, label, label_size);
 
-        (void) audit_session_from_pid(c->pid, &c->auditid);
-        (void) audit_loginuid_from_pid(c->pid, &c->loginuid);
+        (void) audit_session_from_pid(&PIDREF_MAKE_FROM_PID(c->pid), &c->auditid);
+        (void) audit_loginuid_from_pid(&PIDREF_MAKE_FROM_PID(c->pid), &c->loginuid);
 
         (void) client_context_read_cgroup(s, c, unit_id);
         (void) client_context_read_invocation_id(s, c);
         (void) client_context_read_log_level_max(s, c);
         (void) client_context_read_extra_fields(s, c);
-        (void) client_context_read_log_rate_limit_interval(c);
-        (void) client_context_read_log_rate_limit_burst(c);
+        (void) client_context_read_log_ratelimit_interval(c);
+        (void) client_context_read_log_ratelimit_burst(c);
 
         c->timestamp = timestamp;
 
         if (c->in_lru) {
                 assert(c->n_ref == 0);
-                assert_se(prioq_reshuffle(s->client_contexts_lru, c, &c->lru_index) >= 0);
+                prioq_reshuffle(s->client_contexts_lru, c, &c->lru_index);
         }
 }
 
@@ -600,10 +609,10 @@ static void client_context_try_shrink_to(Server *s, size_t limit) {
 
                         assert(c->n_ref == 0);
 
-                        if (!pid_is_unwaited(c->pid))
+                        if (pid_is_unwaited(c->pid) == 0)
                                 client_context_free(s, c);
                         else
-                                idx ++;
+                                idx++;
                 }
 
                 s->last_cache_pid_flush = t;
@@ -627,6 +636,10 @@ static void client_context_try_shrink_to(Server *s, size_t limit) {
         }
 }
 
+void client_context_flush_regular(Server *s) {
+        client_context_try_shrink_to(s, 0);
+}
+
 void client_context_flush_all(Server *s) {
         assert(s);
 
@@ -635,10 +648,10 @@ void client_context_flush_all(Server *s) {
         s->my_context = client_context_release(s, s->my_context);
         s->pid1_context = client_context_release(s, s->pid1_context);
 
-        client_context_try_shrink_to(s, 0);
+        client_context_flush_regular(s);
 
-        assert(prioq_size(s->client_contexts_lru) == 0);
-        assert(hashmap_size(s->client_contexts) == 0);
+        assert(prioq_isempty(s->client_contexts_lru));
+        assert(hashmap_isempty(s->client_contexts));
 
         s->client_contexts_lru = prioq_free(s->client_contexts_lru);
         s->client_contexts = hashmap_free(s->client_contexts);
@@ -769,14 +782,18 @@ void client_context_acquire_default(Server *s) {
 
                 r = client_context_acquire(s, ucred.pid, &ucred, NULL, 0, NULL, &s->my_context);
                 if (r < 0)
-                        log_warning_errno(r, "Failed to acquire our own context, ignoring: %m");
+                        log_ratelimit_warning_errno(r, JOURNAL_LOG_RATELIMIT,
+                                                    "Failed to acquire our own context, ignoring: %m");
         }
 
-        if (!s->pid1_context) {
+        if (!s->namespace && !s->pid1_context) {
+                /* Acquire PID1's context, but only if we are in non-namespaced mode, since PID 1 is only
+                 * going to log to the non-namespaced journal instance. */
 
                 r = client_context_acquire(s, 1, NULL, NULL, 0, NULL, &s->pid1_context);
                 if (r < 0)
-                        log_warning_errno(r, "Failed to acquire PID1's context, ignoring: %m");
+                        log_ratelimit_warning_errno(r, JOURNAL_LOG_RATELIMIT,
+                                                    "Failed to acquire PID1's context, ignoring: %m");
 
         }
 }

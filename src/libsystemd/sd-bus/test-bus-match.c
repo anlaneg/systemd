@@ -1,11 +1,11 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "bus-match.h"
 #include "bus-message.h"
 #include "bus-slot.h"
-#include "bus-util.h"
 #include "log.h"
 #include "macro.h"
+#include "memory-util.h"
 #include "tests.h"
 
 static bool mask[32];
@@ -37,34 +37,33 @@ static bool mask_contains(unsigned a[], unsigned n) {
 }
 
 static int match_add(sd_bus_slot *slots, struct bus_match_node *root, const char *match, int value) {
-        struct bus_match_component *components = NULL;
-        unsigned n_components = 0;
+        struct bus_match_component *components;
+        size_t n_components;
         sd_bus_slot *s;
         int r;
 
         s = slots + value;
-        zero(*s);
 
         r = bus_match_parse(match, &components, &n_components);
         if (r < 0)
                 return r;
 
+        CLEANUP_ARRAY(components, n_components, bus_match_parse_free);
+
         s->userdata = INT_TO_PTR(value);
         s->match_callback.callback = filter;
 
-        r = bus_match_add(root, components, n_components, &s->match_callback);
-        bus_match_parse_free(components, n_components);
-
-        return r;
+        return bus_match_add(root, components, n_components, &s->match_callback);
 }
 
 static void test_match_scope(const char *match, enum bus_match_scope scope) {
         struct bus_match_component *components = NULL;
-        unsigned n_components = 0;
+        size_t n_components = 0;
+
+        CLEANUP_ARRAY(components, n_components, bus_match_parse_free);
 
         assert_se(bus_match_parse(match, &components, &n_components) >= 0);
         assert_se(bus_match_get_scope(components, n_components) == scope);
-        bus_match_parse_free(components, n_components);
 }
 
 int main(int argc, char *argv[]) {
@@ -74,8 +73,7 @@ int main(int argc, char *argv[]) {
 
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
-        enum bus_match_node_type i;
-        sd_bus_slot slots[19];
+        sd_bus_slot slots[19] = {};
         int r;
 
         test_setup_logging(LOG_INFO);
@@ -105,7 +103,7 @@ int main(int argc, char *argv[]) {
         assert_se(match_add(slots, &root, "arg4has='po'", 17) >= 0);
         assert_se(match_add(slots, &root, "arg4='pi'", 18) >= 0);
 
-        bus_match_dump(&root, 0);
+        bus_match_dump(stdout, &root, 0);
 
         assert_se(sd_bus_message_new_signal(bus, &m, "/foo/bar", "bar.x", "waldo") >= 0);
         assert_se(sd_bus_message_append(m, "ssssas", "one", "two", "/prefix/three", "prefix.four", 3, "pi", "pa", "po") >= 0);
@@ -118,13 +116,13 @@ int main(int argc, char *argv[]) {
         assert_se(bus_match_remove(&root, &slots[8].match_callback) >= 0);
         assert_se(bus_match_remove(&root, &slots[13].match_callback) >= 0);
 
-        bus_match_dump(&root, 0);
+        bus_match_dump(stdout, &root, 0);
 
         zero(mask);
         assert_se(bus_match_run(NULL, &root, m) == 0);
         assert_se(mask_contains((unsigned[]) { 9, 5, 10, 12, 14, 7, 15, 16, 17 }, 9));
 
-        for (i = 0; i < _BUS_MATCH_NODE_TYPE_MAX; i++) {
+        for (enum bus_match_node_type i = 0; i < _BUS_MATCH_NODE_TYPE_MAX; i++) {
                 char buf[32];
                 const char *x;
 

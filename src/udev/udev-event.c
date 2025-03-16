@@ -1,51 +1,23 @@
-/* SPDX-License-Identifier: GPL-2.0+ */
-
-#include <ctype.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <net/if.h>
-#include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-
-#include "sd-event.h"
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "alloc-util.h"
+#include "device-internal.h"
 #include "device-private.h"
 #include "device-util.h"
-#include "fd-util.h"
-#include "format-util.h"
-#include "libudev-util.h"
+#include "fs-util.h"
+#include "netif-naming-scheme.h"
 #include "netlink-util.h"
 #include "path-util.h"
-#include "process-util.h"
-#include "rlimit-util.h"
-#include "signal-util.h"
-#include "stdio-util.h"
 #include "string-util.h"
 #include "strv.h"
-#include "strxcpyx.h"
-#include "udev-builtin.h"
+#include "udev-event.h"
 #include "udev-node.h"
-#include "udev-watch.h"
-#include "udev.h"
+#include "udev-trace.h"
+#include "udev-util.h"
+#include "user-util.h"
 
-typedef struct Spawn {
-        const char *cmd;
-        pid_t pid;
-        usec_t timeout_warn_usec;
-        usec_t timeout_usec;
-        usec_t event_birth_usec;
-        bool accept_failure;
-        int fd_stdout;
-        int fd_stderr;
-        char *result;
-        size_t result_size;
-        size_t result_len;
-} Spawn;
-
-UdevEvent *udev_event_new(sd_device *dev, usec_t exec_delay_usec, sd_netlink *rtnl) {
+UdevEvent *udev_event_new(sd_device *dev, UdevWorker *worker, EventMode mode) {
+        int log_level = worker ? worker->log_level : log_get_max_level();
         UdevEvent *event;
 
         assert(dev);
@@ -55,10 +27,16 @@ UdevEvent *udev_event_new(sd_device *dev, usec_t exec_delay_usec, sd_netlink *rt
                 return NULL;
 
         *event = (UdevEvent) {
+                .worker = worker,
+                .rtnl = worker ? sd_netlink_ref(worker->rtnl) : NULL,
                 .dev = sd_device_ref(dev),
                 .birth_usec = now(CLOCK_MONOTONIC),
-                .exec_delay_usec = exec_delay_usec,
-                .rtnl = sd_netlink_ref(rtnl),
+                .uid = UID_INVALID,
+                .gid = GID_INVALID,
+                .mode = MODE_INVALID,
+                .log_level_was_debug = log_level == LOG_DEBUG,
+                .default_log_level = log_level,
+                .event_mode = mode,
         };
 
         return event;
@@ -71,686 +49,221 @@ UdevEvent *udev_event_free(UdevEvent *event) {
         sd_device_unref(event->dev);
         sd_device_unref(event->dev_db_clone);
         sd_netlink_unref(event->rtnl);
-        hashmap_free_free_key(event->run_list);
-        hashmap_free_free_free(event->seclabel_list);
+        ordered_hashmap_free_free_key(event->run_list);
+        ordered_hashmap_free_free_free(event->seclabel_list);
         free(event->program_result);
         free(event->name);
+        strv_free(event->altnames);
 
         return mfree(event);
 }
 
-enum subst_type {
-        SUBST_DEVNODE,
-        SUBST_ATTR,
-        SUBST_ENV,
-        SUBST_KERNEL,
-        SUBST_KERNEL_NUMBER,
-        SUBST_DRIVER,
-        SUBST_DEVPATH,
-        SUBST_ID,
-        SUBST_MAJOR,
-        SUBST_MINOR,
-        SUBST_RESULT,
-        SUBST_PARENT,
-        SUBST_NAME,
-        SUBST_LINKS,
-        SUBST_ROOT,
-        SUBST_SYS,
-};
-
-struct subst_map_entry {
-        const char *name;
-        const char fmt;
-        enum subst_type type;
-};
-
-static const struct subst_map_entry map[] = {
-           { .name = "devnode",  .fmt = 'N', .type = SUBST_DEVNODE },
-           { .name = "tempnode", .fmt = 'N', .type = SUBST_DEVNODE },
-           { .name = "attr",     .fmt = 's', .type = SUBST_ATTR },
-           { .name = "sysfs",    .fmt = 's', .type = SUBST_ATTR },
-           { .name = "env",      .fmt = 'E', .type = SUBST_ENV },
-           { .name = "kernel",   .fmt = 'k', .type = SUBST_KERNEL },
-           { .name = "number",   .fmt = 'n', .type = SUBST_KERNEL_NUMBER },
-           { .name = "driver",   .fmt = 'd', .type = SUBST_DRIVER },
-           { .name = "devpath",  .fmt = 'p', .type = SUBST_DEVPATH },
-           { .name = "id",       .fmt = 'b', .type = SUBST_ID },
-           { .name = "major",    .fmt = 'M', .type = SUBST_MAJOR },
-           { .name = "minor",    .fmt = 'm', .type = SUBST_MINOR },
-           { .name = "result",   .fmt = 'c', .type = SUBST_RESULT },
-           { .name = "parent",   .fmt = 'P', .type = SUBST_PARENT },
-           { .name = "name",     .fmt = 'D', .type = SUBST_NAME },
-           { .name = "links",    .fmt = 'L', .type = SUBST_LINKS },
-           { .name = "root",     .fmt = 'r', .type = SUBST_ROOT },
-           { .name = "sys",      .fmt = 'S', .type = SUBST_SYS },
-};
-
-static ssize_t subst_format_var(UdevEvent *event,
-                                const struct subst_map_entry *entry, char *attr,
-                                char *dest, size_t l) {
-        sd_device *parent, *dev = event->dev;
-        const char *val = NULL;
-        char *s = dest;
-        dev_t devnum;
+static int device_rename(sd_device *device, const char *name) {
+        _cleanup_free_ char *new_syspath = NULL;
+        const char *s;
         int r;
 
-        assert(entry);
+        assert(device);
+        assert(name);
 
-        switch (entry->type) {
-        case SUBST_DEVPATH:
-                r = sd_device_get_devpath(dev, &val);
-                if (r < 0)
-                        return r;
-                l = strpcpy(&s, l, val);
-                break;
-        case SUBST_KERNEL:
-                r = sd_device_get_sysname(dev, &val);
-                if (r < 0)
-                        return r;
-                l = strpcpy(&s, l, val);
-                break;
-        case SUBST_KERNEL_NUMBER:
-                r = sd_device_get_sysnum(dev, &val);
-                if (r == -ENOENT)
-                        goto null_terminate;
-                if (r < 0)
-                        return r;
-                l = strpcpy(&s, l, val);
-                break;
-        case SUBST_ID:
-                if (!event->dev_parent)
-                        goto null_terminate;
-                r = sd_device_get_sysname(event->dev_parent, &val);
-                if (r < 0)
-                        return r;
-                l = strpcpy(&s, l, val);
-                break;
-        case SUBST_DRIVER:
-                if (!event->dev_parent)
-                        goto null_terminate;
-                r = sd_device_get_driver(event->dev_parent, &val);
-                if (r == -ENOENT)
-                        goto null_terminate;
-                if (r < 0)
-                        return r;
-                l = strpcpy(&s, l, val);
-                break;
-        case SUBST_MAJOR:
-        case SUBST_MINOR: {
-                char buf[DECIMAL_STR_MAX(unsigned)];
+        if (!filename_is_valid(name))
+                return -EINVAL;
 
-                r = sd_device_get_devnum(dev, &devnum);
-                if (r < 0 && r != -ENOENT)
-                        return r;
-                xsprintf(buf, "%u", r < 0 ? 0 : entry->type == SUBST_MAJOR ? major(devnum) : minor(devnum));
-                l = strpcpy(&s, l, buf);
-                break;
-        }
-        case SUBST_RESULT: {
-                char *rest;
-                int i;
+        r = sd_device_get_syspath(device, &s);
+        if (r < 0)
+                return r;
 
-                if (!event->program_result)
-                        goto null_terminate;
+        r = path_extract_directory(s, &new_syspath);
+        if (r < 0)
+                return r;
 
-                /* get part of the result string */
-                i = 0;
-                if (attr)
-                        i = strtoul(attr, &rest, 10);
-                if (i > 0) {
-                        char result[UTIL_PATH_SIZE], tmp[UTIL_PATH_SIZE], *cpos;
+        if (!path_extend(&new_syspath, name))
+                return -ENOMEM;
 
-                        strscpy(result, sizeof(result), event->program_result);
-                        cpos = result;
-                        while (--i) {
-                                while (cpos[0] != '\0' && !isspace(cpos[0]))
-                                        cpos++;
-                                while (isspace(cpos[0]))
-                                        cpos++;
-                                if (cpos[0] == '\0')
-                                        break;
-                        }
-                        if (i > 0) {
-                                log_error("requested part of result string not found");
-                                break;
-                        }
-                        strscpy(tmp, sizeof(tmp), cpos);
-                        /* %{2+}c copies the whole string from the second part on */
-                        if (rest[0] != '+') {
-                                cpos = strchr(tmp, ' ');
-                                if (cpos)
-                                        cpos[0] = '\0';
-                        }
-                        l = strpcpy(&s, l, tmp);
-                } else
-                        l = strpcpy(&s, l, event->program_result);
-                break;
-        }
-        case SUBST_ATTR: {
-                char vbuf[UTIL_NAME_SIZE];
-                size_t len;
-                int count;
+        if (!path_is_safe(new_syspath))
+                return -EINVAL;
 
-                if (!attr)
-                        return -EINVAL;
+        /* At the time this is called, the renamed device may not exist yet. Hence, we cannot validate
+         * the new syspath. */
+        r = device_set_syspath(device, new_syspath, /* verify = */ false);
+        if (r < 0)
+                return r;
 
-                /* try to read the value specified by "[dmi/id]product_name" */
-                if (util_resolve_subsys_kernel(attr, vbuf, sizeof(vbuf), true) == 0)
-                        val = vbuf;
-
-                /* try to read the attribute the device */
-                if (!val)
-                        (void) sd_device_get_sysattr_value(dev, attr, &val);
-
-                /* try to read the attribute of the parent device, other matches have selected */
-                if (!val && event->dev_parent && event->dev_parent != dev)
-                        (void) sd_device_get_sysattr_value(event->dev_parent, attr, &val);
-
-                if (!val)
-                        goto null_terminate;
-
-                /* strip trailing whitespace, and replace unwanted characters */
-                if (val != vbuf)
-                        strscpy(vbuf, sizeof(vbuf), val);
-                len = strlen(vbuf);
-                while (len > 0 && isspace(vbuf[--len]))
-                        vbuf[len] = '\0';
-                count = util_replace_chars(vbuf, UDEV_ALLOWED_CHARS_INPUT);
-                if (count > 0)
-                        log_device_debug(dev, "%i character(s) replaced", count);
-                l = strpcpy(&s, l, vbuf);
-                break;
-        }
-        case SUBST_PARENT:
-                r = sd_device_get_parent(dev, &parent);
-                if (r == -ENODEV)
-                        goto null_terminate;
-                if (r < 0)
-                        return r;
-                r = sd_device_get_devname(parent, &val);
-                if (r == -ENOENT)
-                        goto null_terminate;
-                if (r < 0)
-                        return r;
-                l = strpcpy(&s, l, val + STRLEN("/dev/"));
-                break;
-        case SUBST_DEVNODE:
-                r = sd_device_get_devname(dev, &val);
-                if (r == -ENOENT)
-                        goto null_terminate;
-                if (r < 0)
-                        return r;
-                l = strpcpy(&s, l, val);
-                break;
-        case SUBST_NAME:
-                if (event->name)
-                        l = strpcpy(&s, l, event->name);
-                else if (sd_device_get_devname(dev, &val) >= 0)
-                        l = strpcpy(&s, l, val + STRLEN("/dev/"));
-                else {
-                        r = sd_device_get_sysname(dev, &val);
-                        if (r < 0)
-                                return r;
-                        l = strpcpy(&s, l, val);
-                }
-                break;
-        case SUBST_LINKS:
-                FOREACH_DEVICE_DEVLINK(dev, val)
-                        if (s == dest)
-                                l = strpcpy(&s, l, val + STRLEN("/dev/"));
-                        else
-                                l = strpcpyl(&s, l, " ", val + STRLEN("/dev/"), NULL);
-                if (s == dest)
-                        goto null_terminate;
-                break;
-        case SUBST_ROOT:
-                l = strpcpy(&s, l, "/dev");
-                break;
-        case SUBST_SYS:
-                l = strpcpy(&s, l, "/sys");
-                break;
-        case SUBST_ENV:
-                if (!attr)
-                        goto null_terminate;
-                r = sd_device_get_property_value(dev, attr, &val);
-                if (r == -ENOENT)
-                        goto null_terminate;
-                if (r < 0)
-                        return r;
-                l = strpcpy(&s, l, val);
-                break;
-        default:
-                assert_not_reached("Unknown format substitution type");
-        }
-
-        return s - dest;
-
-null_terminate:
-        *s = '\0';
-        return 0;
-}
-
-ssize_t udev_event_apply_format(UdevEvent *event,
-                                const char *src, char *dest, size_t size,
-                                bool replace_whitespace) {
-        const char *from;
-        char *s;
-        size_t l;
-
-        assert(event);
-        assert(event->dev);
-        assert(src);
-        assert(dest);
-        assert(size > 0);
-
-        from = src;
-        s = dest;
-        l = size;
-
-        for (;;) {
-                const struct subst_map_entry *entry = NULL;
-                char attrbuf[UTIL_PATH_SIZE], *attr;
-                bool format_dollar = false;
-                ssize_t subst_len;
-
-                while (from[0] != '\0') {
-                		/*遇到$符，进行变量解析*/
-                        if (from[0] == '$') {
-                                /* substitute named variable */
-                                unsigned i;
-
-                                if (from[1] == '$') {
-                                        from++;
-                                        goto copy;
-                                }
-
-                                for (i = 0; i < ELEMENTSOF(map); i++) {
-                                        if (startswith(&from[1], map[i].name)) {
-                                                entry = &map[i];
-                                                from += strlen(map[i].name)+1;
-                                                format_dollar = true;
-                                                goto subst;
-                                        }
-                                }
-                        } else if (from[0] == '%') {
-                                /* substitute format char */
-                                unsigned i;
-
-                                if (from[1] == '%') {
-                                        from++;
-                                        goto copy;
-                                }
-
-                                for (i = 0; i < ELEMENTSOF(map); i++) {
-                                        if (from[1] == map[i].fmt) {
-                                                entry = &map[i];
-                                                from += 2;
-                                                goto subst;
-                                        }
-                                }
-                        }
-copy:
-                        /* copy char */
-                        if (l < 2) /* need space for this char and the terminating NUL */
-                                goto out;
-                        s[0] = from[0];
-                        from++;
-                        s++;
-                        l--;
-                }
-
-                goto out;
-subst:
-                /* extract possible $format{attr} */
-                if (from[0] == '{') {
-                	/*遇到属性名称，取相应的attr*/
-                        unsigned i;
-
-                        from++;
-                        for (i = 0; from[i] != '}'; i++)
-                                if (from[i] == '\0') {
-                                        log_error("missing closing brace for format '%s'", src);
-                                        goto out;
-                                }
-
-                        if (i >= sizeof(attrbuf))
-                                goto out;
-                        memcpy(attrbuf, from, i);
-                        attrbuf[i] = '\0';
-                        from += i+1;
-                        attr = attrbuf;
-                } else
-                        attr = NULL;
-
-                subst_len = subst_format_var(event, entry, attr, s, l);
-                if (subst_len < 0) {
-                        if (format_dollar)
-                                log_device_warning_errno(event->dev, subst_len, "Failed to substitute variable '$%s', ignoring: %m", entry->name);
-                        else
-                                log_device_warning_errno(event->dev, subst_len, "Failed to apply format '%%%c', ignoring: %m", entry->fmt);
-
-                        continue;
-                }
-
-                /* SUBST_RESULT handles spaces itself */
-                if (replace_whitespace && entry->type != SUBST_RESULT)
-                        /* util_replace_whitespace can replace in-place,
-                         * and does nothing if subst_len == 0
-                         */
-                        subst_len = util_replace_whitespace(s, s, subst_len);
-
-                s += subst_len;
-                l -= subst_len;
-        }
-
-out:
-        assert(l >= 1);
-        s[0] = '\0';
-        return l;
-}
-
-static int on_spawn_io(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
-        Spawn *spawn = userdata;
-        char buf[4096], *p;
-        size_t size;
-        ssize_t l;
-
-        assert(spawn);
-        assert(fd == spawn->fd_stdout || fd == spawn->fd_stderr);
-        assert(!spawn->result || spawn->result_len < spawn->result_size);
-
-        if (fd == spawn->fd_stdout && spawn->result) {
-                p = spawn->result + spawn->result_len;
-                size = spawn->result_size - spawn->result_len;
-        } else {
-                p = buf;
-                size = sizeof(buf);
-        }
-
-        l = read(fd, p, size - 1);
-        if (l < 0) {
-                if (errno != EAGAIN)
-                        log_error_errno(errno, "Failed to read stdout of '%s': %m", spawn->cmd);
-
+        r = sd_device_get_property_value(device, "INTERFACE", &s);
+        if (r == -ENOENT)
                 return 0;
-        }
-
-        p[l] = '\0';
-        if (fd == spawn->fd_stdout && spawn->result)
-                spawn->result_len += l;
-
-        /* Log output only if we watch stderr. */
-        if (l > 0 && spawn->fd_stderr >= 0) {
-                _cleanup_strv_free_ char **v = NULL;
-                char **q;
-
-                v = strv_split_newlines(p);
-                if (!v)
-                        return 0;
-
-                STRV_FOREACH(q, v)
-                        log_debug("'%s'(%s) '%s'", spawn->cmd,
-                                  fd == spawn->fd_stdout ? "out" : "err", *q);
-        }
-
-        return 0;
-}
-
-static int on_spawn_timeout(sd_event_source *s, uint64_t usec, void *userdata) {
-        Spawn *spawn = userdata;
-        char timeout[FORMAT_TIMESPAN_MAX];
-
-        assert(spawn);
-
-        kill_and_sigcont(spawn->pid, SIGKILL);
-
-        log_error("Spawned process '%s' ["PID_FMT"] timed out after %s, killing", spawn->cmd, spawn->pid,
-                  format_timespan(timeout, sizeof(timeout), spawn->timeout_usec, USEC_PER_SEC));
-
-        return 1;
-}
-
-static int on_spawn_timeout_warning(sd_event_source *s, uint64_t usec, void *userdata) {
-        Spawn *spawn = userdata;
-        char timeout[FORMAT_TIMESPAN_MAX];
-
-        assert(spawn);
-
-        log_warning("Spawned process '%s' ["PID_FMT"] is taking longer than %s to complete", spawn->cmd, spawn->pid,
-                    format_timespan(timeout, sizeof(timeout), spawn->timeout_warn_usec, USEC_PER_SEC));
-
-        return 1;
-}
-
-static int on_spawn_sigchld(sd_event_source *s, const siginfo_t *si, void *userdata) {
-        Spawn *spawn = userdata;
-        int ret = -EIO;
-
-        assert(spawn);
-
-        switch (si->si_code) {
-        case CLD_EXITED:
-                if (si->si_status == 0)
-                        log_debug("Process '%s' succeeded.", spawn->cmd);
-                else
-                        log_full(spawn->accept_failure ? LOG_DEBUG : LOG_WARNING,
-                                 "Process '%s' failed with exit code %i.", spawn->cmd, si->si_status);
-                ret = si->si_status;
-                break;
-        case CLD_KILLED:
-        case CLD_DUMPED:
-                log_error("Process '%s' terminated by signal %s.", spawn->cmd, signal_to_string(si->si_status));
-                break;
-        default:
-                log_error("Process '%s' failed due to unknown reason.", spawn->cmd);
-        }
-
-        sd_event_exit(sd_event_source_get_event(s), ret);
-        return 1;
-}
-
-static int spawn_wait(Spawn *spawn) {
-        _cleanup_(sd_event_unrefp) sd_event *e = NULL;
-        int r;
-
-        assert(spawn);
-
-        r = sd_event_new(&e);
         if (r < 0)
                 return r;
 
-        if (spawn->timeout_usec > 0) {
-                usec_t usec, age_usec;
-
-                usec = now(CLOCK_MONOTONIC);
-                age_usec = usec - spawn->event_birth_usec;
-                if (age_usec < spawn->timeout_usec) {
-                        if (spawn->timeout_warn_usec > 0 &&
-                            spawn->timeout_warn_usec < spawn->timeout_usec &&
-                            spawn->timeout_warn_usec > age_usec) {
-                                spawn->timeout_warn_usec -= age_usec;
-
-                                r = sd_event_add_time(e, NULL, CLOCK_MONOTONIC,
-                                                      usec + spawn->timeout_warn_usec, USEC_PER_SEC,
-                                                      on_spawn_timeout_warning, spawn);
-                                if (r < 0)
-                                        return r;
-                        }
-
-                        spawn->timeout_usec -= age_usec;
-
-                        r = sd_event_add_time(e, NULL, CLOCK_MONOTONIC,
-                                              usec + spawn->timeout_usec, USEC_PER_SEC, on_spawn_timeout, spawn);
-                        if (r < 0)
-                                return r;
-                }
-        }
-
-        if (spawn->fd_stdout >= 0) {
-                r = sd_event_add_io(e, NULL, spawn->fd_stdout, EPOLLIN, on_spawn_io, spawn);
-                if (r < 0)
-                        return r;
-        }
-
-        if (spawn->fd_stderr >= 0) {
-                r = sd_event_add_io(e, NULL, spawn->fd_stderr, EPOLLIN, on_spawn_io, spawn);
-                if (r < 0)
-                        return r;
-        }
-
-        r = sd_event_add_child(e, NULL, spawn->pid, WEXITED, on_spawn_sigchld, spawn);
+        /* like DEVPATH_OLD, INTERFACE_OLD is not saved to the db, but only stays around for the current event */
+        r = device_add_property_internal(device, "INTERFACE_OLD", s);
         if (r < 0)
                 return r;
 
-        return sd_event_loop(e);
-}
-
-int udev_event_spawn(UdevEvent *event,
-                     usec_t timeout_usec,
-                     bool accept_failure,
-                     const char *cmd,
-                     char *result, size_t ressize) {
-        _cleanup_close_pair_ int outpipe[2] = {-1, -1}, errpipe[2] = {-1, -1};
-        _cleanup_strv_free_ char **argv = NULL;
-        char **envp = NULL;
-        Spawn spawn;
-        pid_t pid;
-        int r;
-
-        assert(event);
-        assert(event->dev);
-        assert(result || ressize == 0);
-
-        /* pipes from child to parent */
-        if (result || log_get_max_level() >= LOG_INFO)
-                if (pipe2(outpipe, O_NONBLOCK|O_CLOEXEC) != 0)
-                        return log_error_errno(errno, "Failed to create pipe for command '%s': %m", cmd);
-
-        if (log_get_max_level() >= LOG_INFO)
-                if (pipe2(errpipe, O_NONBLOCK|O_CLOEXEC) != 0)
-                        return log_error_errno(errno, "Failed to create pipe for command '%s': %m", cmd);
-
-        argv = strv_split_full(cmd, NULL, SPLIT_QUOTES|SPLIT_RELAX);
-        if (!argv)
-                return log_oom();
-
-        if (isempty(argv[0]))
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "Invalid command '%s'", cmd);
-
-        /* allow programs in /usr/lib/udev/ to be called without the path */
-        if (!path_is_absolute(argv[0])) {
-                char *program;
-
-                program = path_join(UDEVLIBEXECDIR, argv[0]);
-                if (!program)
-                        return log_oom();
-
-                free_and_replace(argv[0], program);
-        }
-
-        r = device_get_properties_strv(event->dev, &envp);
-        if (r < 0)
-                return log_device_error_errno(event->dev, r, "Failed to get device properties");
-
-        log_debug("Starting '%s'", cmd);
-
-        r = safe_fork("(spawn)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG, &pid);
-        if (r < 0)
-                return log_error_errno(r, "Failed to fork() to execute command '%s': %m", cmd);
-        if (r == 0) {
-                if (rearrange_stdio(-1, outpipe[WRITE_END], errpipe[WRITE_END]) < 0)
-                        _exit(EXIT_FAILURE);
-
-                (void) close_all_fds(NULL, 0);
-                (void) rlimit_nofile_safe();
-
-                execve(argv[0], argv, envp);
-                _exit(EXIT_FAILURE);
-        }
-
-        /* parent closed child's ends of pipes */
-        outpipe[WRITE_END] = safe_close(outpipe[WRITE_END]);
-        errpipe[WRITE_END] = safe_close(errpipe[WRITE_END]);
-
-        spawn = (Spawn) {
-                .cmd = cmd,
-                .pid = pid,
-                .accept_failure = accept_failure,
-                .timeout_warn_usec = udev_warn_timeout(timeout_usec),
-                .timeout_usec = timeout_usec,
-                .event_birth_usec = event->birth_usec,
-                .fd_stdout = outpipe[READ_END],
-                .fd_stderr = errpipe[READ_END],
-                .result = result,
-                .result_size = ressize,
-        };
-        r = spawn_wait(&spawn);
-        if (r < 0)
-                return log_error_errno(r, "Failed to wait for spawned command '%s': %m", cmd);
-
-        if (result)
-                result[spawn.result_len] = '\0';
-
-        return r; /* 0 for success, and positive if the program failed */
+        return device_add_property_internal(device, "INTERFACE", name);
 }
 
 /*处理接口重命名*/
 static int rename_netif(UdevEvent *event) {
-        sd_device *dev = event->dev;
-        const char *action, *oldname;
-        char name[IFNAMSIZ];
+        _cleanup_free_ char *old_syspath = NULL, *old_sysname = NULL;
+        const char *s;
+        sd_device *dev;
         int ifindex, r;
+
+        assert(event);
+
+        if (!EVENT_MODE_DESTRUCTIVE(event))
+                return 0;
 
         if (!event->name)
         	/*没有给定新名称，直接返回*/
                 return 0; /* No new name is requested. */
 
-        /*取旧的名称*/
-        r = sd_device_get_sysname(dev, &oldname);
-        if (r < 0)
-                return log_device_error_errno(dev, r, "Failed to get sysname: %m");
-
-        /*新旧名称相等，直接返回*/
-        if (streq(event->name, oldname))
-                return 0; /* The interface name is already requested name. */
-
-        r = sd_device_get_property_value(dev, "ACTION", &action);
-        if (r < 0)
-                return log_device_error_errno(dev, r, "Failed to get property 'ACTION': %m");
-
-        /*rename仅对add操作有效*/
-        if (!streq(action, "add"))
-                return 0; /* Rename the interface only when it is added. */
+        dev = ASSERT_PTR(event->dev);
 
         /*取接口ifindex*/
         r = sd_device_get_ifindex(dev, &ifindex);
         if (r == -ENOENT)
                 return 0; /* Device is not a network interface. */
         if (r < 0)
-                return log_device_error_errno(dev, r, "Failed to get ifindex: %m");
+                return log_device_warning_errno(dev, r, "Failed to get ifindex: %m");
+
+        if (naming_scheme_has(NAMING_REPLACE_STRICTLY) &&
+            !ifname_valid(event->name)) {
+                log_device_warning(dev, "Invalid network interface name, ignoring: %s", event->name);
+                return 0;
+        }
 
         /*要求kernel设置接口名称*/
-        strscpy(name, IFNAMSIZ, event->name);
-        r = rtnl_set_link_name(&event->rtnl, ifindex, name);
+        r = sd_device_get_sysname(dev, &s);
         if (r < 0)
-                return log_device_error_errno(dev, r, "Failed to rename network interface %i from '%s' to '%s': %m", ifindex, oldname, name);
+                return log_device_warning_errno(dev, r, "Failed to get sysname: %m");
+
+        if (streq(event->name, s))
+                return 0; /* The interface name is already requested name. */
+
+        old_sysname = strdup(s);
+        if (!old_sysname)
+                return -ENOMEM;
+
+        r = sd_device_get_syspath(dev, &s);
+        if (r < 0)
+                return log_device_warning_errno(dev, r, "Failed to get syspath: %m");
+
+        old_syspath = strdup(s);
+        if (!old_syspath)
+                return -ENOMEM;
 
         /*kernel名称已变更，更新缓存的名称*/
         r = device_rename(dev, event->name);
-        if (r < 0)
-                return log_warning_errno(r, "Network interface %i is renamed from '%s' to '%s', but could not update sd_device object: %m", ifindex, oldname, name);
+        if (r < 0) {
+                /* Here and below, use dev_db_clone for logging, otherwise, logged message is prefixed with
+                 * the new interface name, and e.g. 'networkctl status INTERFACE' does not show the message. */
+                log_device_warning_errno(event->dev_db_clone, r,
+                                         "Failed to update properties with new name '%s': %m", event->name);
+                goto revert;
+        }
 
-        log_device_debug(dev, "Network interface %i is renamed from '%s' to '%s'", ifindex, oldname, name);
+        /* Set ID_RENAMING boolean property here. It will be dropped when the corresponding move uevent is processed. */
+        r = device_add_property(dev, "ID_RENAMING", "1");
+        if (r < 0) {
+                log_device_warning_errno(event->dev_db_clone, r, "Failed to add 'ID_RENAMING' property: %m");
+                goto revert;
+        }
 
+        /* Also set ID_RENAMING boolean property to cloned sd_device object and save it to database
+         * before calling rtnl_set_link_name(). Otherwise, clients (e.g., systemd-networkd) may receive
+         * RTM_NEWLINK netlink message before the database is updated. */
+        r = device_add_property(event->dev_db_clone, "ID_RENAMING", "1");
+        if (r < 0) {
+                log_device_warning_errno(event->dev_db_clone, r, "Failed to add 'ID_RENAMING' property: %m");
+                goto revert;
+        }
+
+        r = device_add_property(event->dev_db_clone, "ID_PROCESSING", "1");
+        if (r < 0) {
+                log_device_warning_errno(event->dev_db_clone, r, "Failed to add 'ID_PROCESSING' property: %m");
+                goto revert;
+        }
+
+        r = device_update_db(event->dev_db_clone);
+        if (r < 0) {
+                log_device_debug_errno(event->dev_db_clone, r, "Failed to update database under /run/udev/data/: %m");
+                goto revert;
+        }
+
+        r = rtnl_set_link_name(&event->rtnl, ifindex, event->name, event->altnames);
+        if (r < 0) {
+                if (r == -EBUSY) {
+                        log_device_info(event->dev_db_clone,
+                                        "Network interface '%s' is already up, cannot rename to '%s'.",
+                                        old_sysname, event->name);
+                        r = 0;
+                } else
+                        log_device_error_errno(event->dev_db_clone, r,
+                                               "Failed to rename network interface %i from '%s' to '%s': %m",
+                                               ifindex, old_sysname, event->name);
+                goto revert;
+        }
+
+        log_device_debug(dev, "Network interface %i is renamed from '%s' to '%s'", ifindex, old_sysname, event->name);
         return 1;
+
+revert:
+        /* Restore 'dev_db_clone' */
+        (void) device_add_property(event->dev_db_clone, "ID_RENAMING", NULL);
+        (void) device_add_property(event->dev_db_clone, "ID_PROCESSING", NULL);
+        (void) device_update_db(event->dev_db_clone);
+
+        /* Restore 'dev' */
+        (void) device_set_syspath(dev, old_syspath, /* verify = */ false);
+        if (sd_device_get_property_value(dev, "INTERFACE_OLD", &s) >= 0) {
+                (void) device_add_property_internal(dev, "INTERFACE", s);
+                (void) device_add_property_internal(dev, "INTERFACE_OLD", NULL);
+        }
+        (void) device_add_property(dev, "ID_RENAMING", NULL);
+
+        return r;
+}
+
+static int assign_altnames(UdevEvent *event) {
+        sd_device *dev = ASSERT_PTR(ASSERT_PTR(event)->dev);
+        int ifindex, r;
+        const char *s;
+
+        if (!EVENT_MODE_DESTRUCTIVE(event))
+                return 0;
+
+        if (strv_isempty(event->altnames))
+                return 0;
+
+        r = sd_device_get_ifindex(dev, &ifindex);
+        if (r == -ENOENT)
+                return 0; /* Device is not a network interface. */
+        if (r < 0)
+                return log_device_warning_errno(dev, r, "Failed to get ifindex: %m");
+
+        r = sd_device_get_sysname(dev, &s);
+        if (r < 0)
+                return log_device_warning_errno(dev, r, "Failed to get sysname: %m");
+
+        /* Filter out the current interface name. */
+        strv_remove(event->altnames, s);
+
+        r = rtnl_append_link_alternative_names(&event->rtnl, ifindex, event->altnames);
+        if (r < 0)
+                log_device_full_errno(dev, r == -EOPNOTSUPP ? LOG_DEBUG : LOG_WARNING, r,
+                                      "Could not set AlternativeName= or apply AlternativeNamesPolicy=, ignoring: %m");
+
+        return 0;
 }
 
 static int update_devnode(UdevEvent *event) {
-        sd_device *dev = event->dev;
-        const char *action;
-        bool apply;
+        sd_device *dev = ASSERT_PTR(ASSERT_PTR(event)->dev);
         int r;
+
+        if (!EVENT_MODE_DESTRUCTIVE(event))
+                return 0;
 
         r = sd_device_get_devnum(dev, NULL);
         if (r == -ENOENT)
@@ -758,167 +271,186 @@ static int update_devnode(UdevEvent *event) {
         if (r < 0)
                 return log_device_error_errno(dev, r, "Failed to get devnum: %m");
 
-        /* remove/update possible left-over symlinks from old database entry */
-        if (event->dev_db_clone)
-                (void) udev_node_update_old_links(dev, event->dev_db_clone);
-
-        if (!event->owner_set) {
+        if (!uid_is_valid(event->uid)) {
                 r = device_get_devnode_uid(dev, &event->uid);
                 if (r < 0 && r != -ENOENT)
                         return log_device_error_errno(dev, r, "Failed to get devnode UID: %m");
         }
 
-        if (!event->group_set) {
+        if (!gid_is_valid(event->gid)) {
                 r = device_get_devnode_gid(dev, &event->gid);
                 if (r < 0 && r != -ENOENT)
                         return log_device_error_errno(dev, r, "Failed to get devnode GID: %m");
         }
 
-        if (!event->mode_set) {
+        if (event->mode == MODE_INVALID) {
                 r = device_get_devnode_mode(dev, &event->mode);
                 if (r < 0 && r != -ENOENT)
                         return log_device_error_errno(dev, r, "Failed to get devnode mode: %m");
-                if (r == -ENOENT) {
-                        if (event->gid > 0)
-                                /* default 0660 if a group is assigned */
-                                event->mode = 0660;
-                        else
-                                /* default 0600 */
-                                event->mode = 0600;
-                }
         }
 
-        r = sd_device_get_property_value(dev, "ACTION", &action);
-        if (r < 0)
-                return log_device_error_errno(dev, r, "Failed to get property 'ACTION': %m");
+        bool apply_mac = device_for_action(dev, SD_DEVICE_ADD);
 
-        apply = streq(action, "add") || event->owner_set || event->group_set || event->mode_set;
-        return udev_node_add(dev, apply, event->mode, event->uid, event->gid, event->seclabel_list);
+        r = udev_node_apply_permissions(dev, apply_mac, event->mode, event->uid, event->gid, event->seclabel_list);
+        if (r < 0)
+                return log_device_error_errno(dev, r, "Failed to apply devnode permissions: %m");
+
+        return udev_node_update(dev, event->dev_db_clone);
 }
 
-static void event_execute_rules_on_remove(
-                UdevEvent *event,
-                usec_t timeout_usec,
-                Hashmap *properties_list,
-                UdevRules *rules) {
-
-        sd_device *dev = event->dev;
+static int event_execute_rules_on_remove(UdevEvent *event, UdevRules *rules) {
+        sd_device *dev = ASSERT_PTR(ASSERT_PTR(event)->dev);
         int r;
 
         r = device_read_db_internal(dev, true);
         if (r < 0)
                 log_device_debug_errno(dev, r, "Failed to read database under /run/udev/data/: %m");
 
-        r = device_tag_index(dev, NULL, false);
-        if (r < 0)
-                log_device_debug_errno(dev, r, "Failed to remove corresponding tag files under /run/udev/tag/, ignoring: %m");
+        if (EVENT_MODE_DESTRUCTIVE(event)) {
+                r = device_tag_index(dev, NULL, false);
+                if (r < 0)
+                        log_device_debug_errno(dev, r, "Failed to remove corresponding tag files under /run/udev/tag/, ignoring: %m");
 
-        r = device_delete_db(dev);
-        if (r < 0)
-                log_device_debug_errno(dev, r, "Failed to delete database under /run/udev/data/, ignoring: %m");
+                r = device_delete_db(dev);
+                if (r < 0)
+                        log_device_debug_errno(dev, r, "Failed to delete database under /run/udev/data/, ignoring: %m");
+        }
 
-        if (sd_device_get_devnum(dev, NULL) >= 0)
-                (void) udev_watch_end(dev);
+        r = udev_rules_apply_to_event(rules, event);
 
-        (void) udev_rules_apply_to_event(rules, event, timeout_usec, properties_list);
+        if (EVENT_MODE_DESTRUCTIVE(event)) {
+                if (sd_device_get_devnum(dev, NULL) >= 0)
+                        (void) udev_node_remove(dev);
+        }
 
-        if (sd_device_get_devnum(dev, NULL) >= 0)
-                (void) udev_node_remove(dev);
+        return r;
 }
 
-int udev_event_execute_rules(UdevEvent *event,
-                             usec_t timeout_usec,
-                             Hashmap *properties_list,
-                             UdevRules *rules) {
-        sd_device *dev = event->dev;
-        const char *subsystem, *action;
+static int copy_all_tags(sd_device *d, sd_device *s) {
         int r;
 
-        assert(event);
-        assert(rules);
+        assert(d);
 
-        r = sd_device_get_subsystem(dev, &subsystem);
-        if (r < 0)
-                return log_device_error_errno(dev, r, "Failed to get subsystem: %m");
-
-        r = sd_device_get_property_value(dev, "ACTION", &action);
-        if (r < 0)
-                return log_device_error_errno(dev, r, "Failed to get property 'ACTION': %m");
-
-        /*action为remove执行remove指令*/
-        if (streq(action, "remove")) {
-                event_execute_rules_on_remove(event, timeout_usec, properties_list, rules);
+        if (!s)
                 return 0;
+
+        FOREACH_DEVICE_TAG(s, tag) {
+                r = device_add_tag(d, tag, false);
+                if (r < 0)
+                        return r;
         }
-
-        r = device_clone_with_db(dev, &event->dev_db_clone);
-        if (r < 0)
-                log_device_debug_errno(dev, r, "Failed to clone sd_device object, ignoring: %m");
-
-        if (event->dev_db_clone) {
-                r = sd_device_get_devnum(dev, NULL);
-                if (r < 0) {
-                        if (r != -ENOENT)
-                                log_device_debug_errno(dev, r, "Failed to get devnum, ignoring: %m");
-
-                        if (streq(action, "move")) {
-                                r = device_copy_properties(dev, event->dev_db_clone);
-                                if (r < 0)
-                                        log_device_debug_errno(dev, r, "Failed to copy properties from cloned device, ignoring: %m");
-                        }
-                } else
-                        /* Disable watch during event processing. */
-                        (void) udev_watch_end(event->dev_db_clone);
-        }
-
-        /*针对event执行规则列表*/
-        (void) udev_rules_apply_to_event(rules/*规则列表*/, event/*事件*/, timeout_usec, properties_list);
-
-        /*更新netif的名称（如果需要的话）*/
-        (void) rename_netif(event);
-        (void) update_devnode(event);
-
-        /* preserve old, or get new initialization timestamp */
-        r = device_ensure_usec_initialized(dev, event->dev_db_clone);
-        if (r < 0)
-                log_device_debug_errno(dev, r, "Failed to set initialization timestamp, ignoring: %m");
-
-        /* (re)write database file */
-        r = device_tag_index(dev, event->dev_db_clone, true);
-        if (r < 0)
-                log_device_debug_errno(dev, r, "Failed to update tags under /run/udev/tag/, ignoring: %m");
-
-        r = device_update_db(dev);
-        if (r < 0)
-                log_device_debug_errno(dev, r, "Failed to update database under /run/udev/data/, ignoring: %m");
-
-        device_set_is_initialized(dev);
-
-        event->dev_db_clone = sd_device_unref(event->dev_db_clone);
 
         return 0;
 }
 
-void udev_event_execute_run(UdevEvent *event, usec_t timeout_usec) {
-        const char *cmd;
-        void *val;
-        Iterator i;
+static int update_clone(UdevEvent *event) {
+        sd_device *dev = ASSERT_PTR(ASSERT_PTR(event)->dev_db_clone);
+        int r;
 
-        HASHMAP_FOREACH_KEY(val, cmd, event->run_list, i) {
-                enum udev_builtin_cmd builtin_cmd = PTR_TO_INT(val);
-                char command[UTIL_PATH_SIZE];
+        if (!EVENT_MODE_DESTRUCTIVE(event))
+                return 0;
 
-                udev_event_apply_format(event, cmd, command, sizeof(command), false);
+        /* Drop previously added property for safety to make IMPORT{db}="ID_RENAMING" not work. This is
+         * mostly for 'move' uevent, but let's do unconditionally. Why? If a network interface is renamed in
+         * initrd, then udevd may lose the 'move' uevent during switching root. Usually, we do not set the
+         * persistent flag for network interfaces, but user may set it. Just for safety. */
 
-                if (builtin_cmd >= 0 && builtin_cmd < _UDEV_BUILTIN_MAX)
-                        udev_builtin_run(event->dev, builtin_cmd, command, false);
-                else {
-                        if (event->exec_delay_usec > 0) {
-                                log_debug("delay execution of '%s'", command);
-                                (void) usleep(event->exec_delay_usec);
-                        }
+        r = device_add_property(dev, "ID_RENAMING", NULL);
+        if (r < 0)
+                return log_device_debug_errno(dev, r, "Failed to remove 'ID_RENAMING' property: %m");
 
-                        (void) udev_event_spawn(event, timeout_usec, false, command, NULL, 0);
-                }
+        /* If the database file already exists, append ID_PROCESSING property to the existing database,
+         * to indicate that the device is being processed by udevd. */
+        if (device_has_db(dev) > 0) {
+                r = device_add_property(dev, "ID_PROCESSING", "1");
+                if (r < 0)
+                        return log_device_warning_errno(dev, r, "Failed to add 'ID_PROCESSING' property: %m");
+
+                r = device_update_db(dev);
+                if (r < 0)
+                        return log_device_warning_errno(dev, r, "Failed to update database under /run/udev/data/: %m");
         }
+
+        return 0;
+}
+
+int udev_event_execute_rules(UdevEvent *event, UdevRules *rules) {
+        sd_device_action_t action;
+        sd_device *dev;
+        int r;
+
+        assert(event);
+        assert(IN_SET(event->event_mode, EVENT_UDEV_WORKER, EVENT_UDEVADM_TEST, EVENT_TEST_RULE_RUNNER));
+        dev = ASSERT_PTR(event->dev);
+        assert(rules);
+
+        r = sd_device_get_action(dev, &action);
+        if (r < 0)
+                return log_device_error_errno(dev, r, "Failed to get ACTION: %m");
+
+        if (action == SD_DEVICE_REMOVE)
+                return event_execute_rules_on_remove(event, rules);
+
+        r = device_clone_with_db(dev, &event->dev_db_clone);
+        if (r < 0)
+                return log_device_debug_errno(dev, r, "Failed to clone sd_device object: %m");
+
+        r = copy_all_tags(dev, event->dev_db_clone);
+        if (r < 0)
+                log_device_warning_errno(dev, r, "Failed to copy all tags from old database entry, ignoring: %m");
+
+        r = update_clone(event);
+        if (r < 0)
+                return r;
+
+        DEVICE_TRACE_POINT(rules_start, dev);
+
+        r = udev_rules_apply_to_event(rules, event);
+        if (r < 0)
+                return log_device_debug_errno(dev, r, "Failed to apply udev rules: %m");
+
+        DEVICE_TRACE_POINT(rules_finished, dev);
+
+        if (action == SD_DEVICE_ADD) {
+                r = rename_netif(event);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        (void) assign_altnames(event);
+        }
+
+        r = update_devnode(event);
+        if (r < 0)
+                return r;
+
+        /* preserve old, or get new initialization timestamp */
+        r = device_ensure_usec_initialized(dev, event->dev_db_clone);
+        if (r < 0)
+                return log_device_debug_errno(dev, r, "Failed to set initialization timestamp: %m");
+
+        if (EVENT_MODE_DESTRUCTIVE(event)) {
+                /* (re)write database file */
+                r = device_tag_index(dev, event->dev_db_clone, true);
+                if (r < 0)
+                        return log_device_debug_errno(dev, r, "Failed to update tags under /run/udev/tag/: %m");
+        }
+
+        /* If the database file for the device will be created below, add ID_PROCESSING=1 to indicate that
+         * the device is still being processed by udevd, as commands specified in RUN are invoked after
+         * the database is created. See issue #30056. */
+        if (device_should_have_db(dev) && !ordered_hashmap_isempty(event->run_list)) {
+                r = device_add_property(dev, "ID_PROCESSING", "1");
+                if (r < 0)
+                        return log_device_warning_errno(dev, r, "Failed to add 'ID_PROCESSING' property: %m");
+        }
+
+        if (EVENT_MODE_DESTRUCTIVE(event)) {
+                r = device_update_db(dev);
+                if (r < 0)
+                        return log_device_debug_errno(dev, r, "Failed to update database under /run/udev/data/: %m");
+        }
+
+        device_set_is_initialized(dev);
+
+        return 0;
 }

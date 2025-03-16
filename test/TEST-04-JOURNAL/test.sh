@@ -1,58 +1,29 @@
-#!/bin/bash
-# -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
-# ex: ts=8 sw=4 sts=4 et filetype=sh
+#!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
 set -e
+
 TEST_DESCRIPTION="Journal-related tests"
 
-. $TEST_BASE_DIR/test-functions
+# shellcheck source=test/test-functions
+. "${TEST_BASE_DIR:?}/test-functions"
 
-test_setup() {
-    create_empty_image
-    mkdir -p $TESTDIR/root
-    mount ${LOOPDEV}p1 $TESTDIR/root
+test_append_files() {
+    local workspace="${1:?}"
+    local dropin_dir
 
-    # Create what will eventually be our root filesystem onto an overlay
-    (
-        LOG_LEVEL=5
-        eval $(udevadm info --export --query=env --name=${LOOPDEV}p2)
+    image_install curl setterm unzstd
+    image_install -o openssl
+    # Necessary for RH-based systems, otherwise MHD fails with:
+    #   microhttpd: Failed to initialise TLS session.
+    image_install -o /etc/crypto-policies/back-ends/gnutls.config
 
-        setup_basic_environment
-
-        # mask some services that we do not want to run in these tests
-        ln -fs /dev/null $initdir/etc/systemd/system/systemd-hwdb-update.service
-        ln -fs /dev/null $initdir/etc/systemd/system/systemd-journal-catalog-update.service
-        ln -fs /dev/null $initdir/etc/systemd/system/systemd-networkd.service
-        ln -fs /dev/null $initdir/etc/systemd/system/systemd-networkd.socket
-        ln -fs /dev/null $initdir/etc/systemd/system/systemd-resolved.service
-        ln -fs /dev/null $initdir/etc/systemd/system/systemd-machined.service
-
-        # setup the testsuite service
-        cat >$initdir/etc/systemd/system/testsuite.service <<EOF
-[Unit]
-Description=Testsuite service
-
-[Service]
-ExecStart=/test-journal.sh
-Type=oneshot
-EOF
-
-        cat >$initdir/etc/systemd/system/forever-print-hola.service <<EOF
-[Unit]
-Description=ForeverPrintHola service
-
-[Service]
-Type=simple
-ExecStart=/bin/sh -x -c 'while :; do printf "Hola\n" || touch /i-lose-my-logs; sleep 1; done'
-EOF
-
-        cp test-journal.sh $initdir/
-
-        setup_testsuite
-    ) || return 1
-    setup_nspawn_root
-
-    ddebug "umount $TESTDIR/root"
-    umount $TESTDIR/root
+    # Since we nuke the journal repeatedly during this test, let's redirect
+    # stdout/stderr to the console as well to make the test a bit more debug-able.
+    if ! get_bool "${TEST_SHELL:-}"; then
+        dropin_dir="${workspace:?}/etc/systemd/system/TEST-04-JOURNAL.service.d/"
+        mkdir -p "$dropin_dir"
+        printf '[Service]\nStandardOutput=journal+console\nStandardError=journal+console' >"$dropin_dir/99-stdout.conf"
+    fi
 }
 
 do_test "$@"

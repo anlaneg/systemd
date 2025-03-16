@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 /* A structure for specifying (possibly repetitive) points in calendar
@@ -7,7 +7,6 @@
 #include <stdbool.h>
 
 #include "time-util.h"
-#include "util.h"
 
 typedef struct CalendarComponent {
         int start;
@@ -19,9 +18,9 @@ typedef struct CalendarComponent {
 
 typedef struct CalendarSpec {
         int weekdays_bits;
-        bool end_of_month;
-        bool utc;
-        int dst;
+        bool end_of_month:1;
+        bool utc:1;
+        signed int dst:2;
         char *timezone;
 
         CalendarComponent *year;
@@ -35,11 +34,10 @@ typedef struct CalendarSpec {
 
 CalendarSpec* calendar_spec_free(CalendarSpec *c);
 
-int calendar_spec_normalize(CalendarSpec *spec);
 bool calendar_spec_valid(CalendarSpec *spec);
 
-int calendar_spec_to_string(const CalendarSpec *spec, char **p);
-int calendar_spec_from_string(const char *p, CalendarSpec **spec);
+int calendar_spec_to_string(const CalendarSpec *spec, char **ret);
+int calendar_spec_from_string(const char *p, CalendarSpec **ret);
 
 int calendar_spec_next_usec(const CalendarSpec *spec, usec_t usec, usec_t *next);
 

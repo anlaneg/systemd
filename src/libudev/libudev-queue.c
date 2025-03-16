@@ -1,12 +1,9 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /***
   Copyright © 2009 Alan Jenkins <alan-jenkins@tuffmail.co.uk>
 ***/
 
 #include <errno.h>
-#include <stddef.h>
-#include <stdlib.h>
-#include <sys/inotify.h>
 #include <unistd.h>
 
 #include "libudev.h"
@@ -14,6 +11,7 @@
 #include "alloc-util.h"
 #include "fd-util.h"
 #include "io-util.h"
+#include "udev-util.h"
 
 /**
  * SECTION:libudev-queue
@@ -52,7 +50,7 @@ _public_ struct udev_queue *udev_queue_new(struct udev *udev) {
         *udev_queue = (struct udev_queue) {
                 .udev = udev,
                 .n_ref = 1,
-                .fd = -1,
+                .fd = -EBADF,
         };
 
         return udev_queue;
@@ -144,7 +142,7 @@ _public_ int udev_queue_get_udev_is_active(struct udev_queue *udev_queue) {
  * Returns: a flag indicating if udev is currently handling events.
  **/
 _public_ int udev_queue_get_queue_is_empty(struct udev_queue *udev_queue) {
-        return access("/run/udev/queue", F_OK) < 0;
+        return udev_queue_is_empty() > 0;
 }
 
 /**
@@ -153,14 +151,13 @@ _public_ int udev_queue_get_queue_is_empty(struct udev_queue *udev_queue) {
  * @start: first event sequence number
  * @end: last event sequence number
  *
- * This function is deprecated, it just returns the result of
- * udev_queue_get_queue_is_empty().
+ * This function is deprecated, and equivalent to udev_queue_get_queue_is_empty().
  *
  * Returns: a flag indicating if udev is currently handling events.
  **/
 _public_ int udev_queue_get_seqnum_sequence_is_finished(struct udev_queue *udev_queue,
                                                         unsigned long long int start, unsigned long long int end) {
-        return udev_queue_get_queue_is_empty(udev_queue);
+        return udev_queue_is_empty() > 0;
 }
 
 /**
@@ -168,13 +165,12 @@ _public_ int udev_queue_get_seqnum_sequence_is_finished(struct udev_queue *udev_
  * @udev_queue: udev queue context
  * @seqnum: sequence number
  *
- * This function is deprecated, it just returns the result of
- * udev_queue_get_queue_is_empty().
+ * This function is deprecated, and equivalent to udev_queue_get_queue_is_empty().
  *
  * Returns: a flag indicating if udev is currently handling events.
  **/
 _public_ int udev_queue_get_seqnum_is_finished(struct udev_queue *udev_queue, unsigned long long int seqnum) {
-        return udev_queue_get_queue_is_empty(udev_queue);
+        return udev_queue_is_empty() > 0;
 }
 
 /**
@@ -196,7 +192,7 @@ _public_ struct udev_list_entry *udev_queue_get_queued_list_entry(struct udev_qu
  * Returns: a file descriptor to watch for a queue to become empty.
  */
 _public_ int udev_queue_get_fd(struct udev_queue *udev_queue) {
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
 
         assert_return(udev_queue, -EINVAL);
 
@@ -210,8 +206,7 @@ _public_ int udev_queue_get_fd(struct udev_queue *udev_queue) {
         if (inotify_add_watch(fd, "/run/udev" , IN_DELETE) < 0)
                 return -errno;
 
-        udev_queue->fd = TAKE_FD(fd);
-        return udev_queue->fd;
+        return udev_queue->fd = TAKE_FD(fd);
 }
 
 /**

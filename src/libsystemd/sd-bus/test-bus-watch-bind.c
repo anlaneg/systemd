@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <pthread.h>
 
@@ -7,6 +7,7 @@
 #include "sd-id128.h"
 
 #include "alloc-util.h"
+#include "bus-internal.h"
 #include "fd-util.h"
 #include "fs-util.h"
 #include "mkdir.h"
@@ -27,8 +28,11 @@ static int method_foobar(sd_bus_message *m, void *userdata, sd_bus_error *ret_er
 
 static int method_exit(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
         log_info("Got Exit() call");
-        assert_se(sd_event_exit(sd_bus_get_event(sd_bus_message_get_bus(m)), 1) >= 0);
-        return sd_bus_reply_method_return(m, NULL);
+
+        assert_se(sd_bus_reply_method_return(m, NULL) >= 0);
+        /* Simulate D-Bus going away to test the bus_exit_now() path with exit_on_disconnect set */
+        bus_enter_closing(sd_bus_message_get_bus(m));
+        return 0;
 }
 
 static const sd_bus_vtable vtable[] = {
@@ -40,46 +44,47 @@ static const sd_bus_vtable vtable[] = {
 
 static void* thread_server(void *p) {
         _cleanup_free_ char *suffixed = NULL, *suffixed2 = NULL, *d = NULL;
-        _cleanup_close_ int fd = -1;
-        union sockaddr_union u = {};
+        _cleanup_close_ int fd = -EBADF;
+        union sockaddr_union u;
         const char *path = p;
-        int salen;
+        int r;
 
         log_debug("Initializing server");
 
         /* Let's play some games, by slowly creating the socket directory, and renaming it in the middle */
-        (void) usleep(100 * USEC_PER_MSEC);
+        usleep_safe(100 * USEC_PER_MSEC);
 
         assert_se(mkdir_parents(path, 0755) >= 0);
-        (void) usleep(100 * USEC_PER_MSEC);
+        usleep_safe(100 * USEC_PER_MSEC);
 
-        d = dirname_malloc(path);
-        assert_se(d);
+        assert_se(path_extract_directory(path, &d) >= 0);
         assert_se(asprintf(&suffixed, "%s.%" PRIx64, d, random_u64()) >= 0);
         assert_se(rename(d, suffixed) >= 0);
-        (void) usleep(100 * USEC_PER_MSEC);
+        usleep_safe(100 * USEC_PER_MSEC);
 
         assert_se(asprintf(&suffixed2, "%s.%" PRIx64, d, random_u64()) >= 0);
         assert_se(symlink(suffixed2, d) >= 0);
-        (void) usleep(100 * USEC_PER_MSEC);
+        usleep_safe(100 * USEC_PER_MSEC);
 
         assert_se(symlink(basename(suffixed), suffixed2) >= 0);
-        (void) usleep(100 * USEC_PER_MSEC);
+        usleep_safe(100 * USEC_PER_MSEC);
 
-        salen = sockaddr_un_set_path(&u.un, path);
-        assert_se(salen >= 0);
+        socklen_t sa_len;
+        r = sockaddr_un_set_path(&u.un, path);
+        assert_se(r >= 0);
+        sa_len = r;
 
         fd = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0);
         assert_se(fd >= 0);
 
-        assert_se(bind(fd, &u.sa, salen) >= 0);
-        usleep(100 * USEC_PER_MSEC);
+        assert_se(bind(fd, &u.sa, sa_len) >= 0);
+        usleep_safe(100 * USEC_PER_MSEC);
 
-        assert_se(listen(fd, SOMAXCONN) >= 0);
-        usleep(100 * USEC_PER_MSEC);
+        assert_se(listen(fd, SOMAXCONN_DELUXE) >= 0);
+        usleep_safe(100 * USEC_PER_MSEC);
 
         assert_se(touch(path) >= 0);
-        usleep(100 * USEC_PER_MSEC);
+        usleep_safe(100 * USEC_PER_MSEC);
 
         log_debug("Initialized server");
 
@@ -99,6 +104,7 @@ static void* thread_server(void *p) {
                 log_debug("Accepted server connection");
 
                 assert_se(sd_bus_new(&bus) >= 0);
+                assert_se(sd_bus_set_exit_on_disconnect(bus, true) >= 0);
                 assert_se(sd_bus_set_description(bus, "server") >= 0);
                 assert_se(sd_bus_set_fd(bus, bus_fd, bus_fd) >= 0);
                 assert_se(sd_bus_set_server(bus, true, id) >= 0);

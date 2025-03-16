@@ -1,4 +1,4 @@
-#  SPDX-License-Identifier: LGPL-2.1+
+#  SPDX-License-Identifier: LGPL-2.1-or-later
 #
 #  This file is part of systemd.
 #
@@ -10,17 +10,25 @@
 [Unit]
 Description=User Manager for UID %i
 Documentation=man:user@.service(5)
-After=systemd-user-sessions.service user-runtime-dir@%i.service dbus.service
-Requires=user-runtime-dir@%i.service
+BindsTo=user-runtime-dir@%i.service
+After=systemd-logind.service user-runtime-dir@%i.service dbus.service systemd-oomd.service
 IgnoreOnIsolate=yes
 
 [Service]
 User=%i
 PAMName=systemd-user
-Type=notify
-ExecStart=-@rootlibexecdir@/systemd --user
+Type=notify-reload
+ExecStart={{LIBEXECDIR}}/systemd --user
 Slice=user-%i.slice
+# Reexecute the manager on service reload, instead of reloading.
+# This provides a synchronous method for restarting all user manager
+# instances after upgrade.
+ReloadSignal=RTMIN+25
 KillMode=mixed
-Delegate=pids memory
+Delegate=pids memory cpu
+DelegateSubgroup=init.scope
 TasksMax=infinity
-TimeoutStopSec=120s
+TimeoutStopSec={{ DEFAULT_USER_TIMEOUT_SEC*4//3 }}s
+KeyringMode=inherit
+OOMScoreAdjust=100
+MemoryPressureWatch=skip

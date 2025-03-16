@@ -1,64 +1,37 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include <stddef.h>
 
-#include "btrfs-util.h"
 #include "label.h"
 #include "macro.h"
-#include "selinux-util.h"
-#include "smack-util.h"
 
-int label_fix(const char *path, LabelFixFlags flags) {
-        int r, q;
+static const LabelOps *label_ops = NULL;
 
-        r = mac_selinux_fix(path, flags);
-        q = mac_smack_fix(path, flags);
+int label_ops_set(const LabelOps *ops) {
+        assert(ops);
 
-        if (r < 0)
-                return r;
-        if (q < 0)
-                return q;
+        if (label_ops)
+                return -EBUSY;
 
+        label_ops = ops;
         return 0;
 }
 
-int symlink_label(const char *old_path, const char *new_path) {
-        int r;
-
-        assert(old_path);
-        assert(new_path);
-
-        r = mac_selinux_create_file_prepare(new_path, S_IFLNK);
-        if (r < 0)
-                return r;
-
-        if (symlink(old_path, new_path) < 0)
-                r = -errno;
-
-        mac_selinux_create_file_clear();
-
-        if (r < 0)
-                return r;
-
-        return mac_smack_fix(new_path, 0);
+void label_ops_reset(void) {
+        label_ops = NULL;
 }
 
-int btrfs_subvol_make_label(const char *path) {
-        int r;
+int label_ops_pre(int dir_fd, const char *path, mode_t mode) {
+        if (!label_ops || !label_ops->pre)
+                return 0;
 
-        assert(path);
+        return label_ops->pre(dir_fd, path, mode);
+}
 
-        r = mac_selinux_create_file_prepare(path, S_IFDIR);
-        if (r < 0)
-                return r;
+int label_ops_post(int dir_fd, const char *path, bool created) {
+        if (!label_ops || !label_ops->post)
+                return 0;
 
-        r = btrfs_subvol_make(path);
-        mac_selinux_create_file_clear();
-
-        if (r < 0)
-                return r;
-
-        return mac_smack_fix(path, 0);
+        return label_ops->post(dir_fd, path, created);
 }

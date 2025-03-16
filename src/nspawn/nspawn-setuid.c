@@ -1,23 +1,21 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <grp.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include "alloc-util.h"
-#include "def.h"
+#include "constants.h"
 #include "errno.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "mkdir.h"
 #include "nspawn-setuid.h"
 #include "process-util.h"
-#include "rlimit-util.h"
 #include "signal-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "user-util.h"
-#include "util.h"
 
 static int spawn_getent(const char *database, const char *key, pid_t *rpid) {
         int pipe_fds[2], r;
@@ -30,25 +28,17 @@ static int spawn_getent(const char *database, const char *key, pid_t *rpid) {
         if (pipe2(pipe_fds, O_CLOEXEC) < 0)
                 return log_error_errno(errno, "Failed to allocate pipe: %m");
 
-        r = safe_fork("(getent)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG, &pid);
+        r = safe_fork_full("(getent)",
+                           (int[]) { -EBADF, pipe_fds[1], -EBADF }, NULL, 0,
+                           FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_REARRANGE_STDIO|FORK_LOG|FORK_RLIMIT_NOFILE_SAFE,
+                           &pid);
         if (r < 0) {
                 safe_close_pair(pipe_fds);
                 return r;
         }
         if (r == 0) {
-                char *empty_env = NULL;
-
-                safe_close(pipe_fds[0]);
-
-                if (rearrange_stdio(-1, pipe_fds[1], -1) < 0)
-                        _exit(EXIT_FAILURE);
-
-                close_all_fds(NULL, 0);
-
-                (void) rlimit_nofile_safe();
-
-                execle("/usr/bin/getent", "getent", database, key, NULL, &empty_env);
-                execle("/bin/getent", "getent", database, key, NULL, &empty_env);
+                execle("/usr/bin/getent", "getent", database, key, NULL, &(char*[1]){});
+                execle("/bin/getent", "getent", database, key, NULL, &(char*[1]){});
                 _exit(EXIT_FAILURE);
         }
 
@@ -59,21 +49,46 @@ static int spawn_getent(const char *database, const char *key, pid_t *rpid) {
         return pipe_fds[0];
 }
 
-int change_uid_gid(const char *user, char **_home) {
+int change_uid_gid_raw(
+                uid_t uid,
+                gid_t gid,
+                const gid_t *supplementary_gids,
+                size_t n_supplementary_gids,
+                bool chown_stdio) {
+
+        int r;
+
+        if (!uid_is_valid(uid))
+                uid = 0;
+        if (!gid_is_valid(gid))
+                gid = 0;
+
+        if (chown_stdio) {
+                (void) fchown(STDIN_FILENO, uid, gid);
+                (void) fchown(STDOUT_FILENO, uid, gid);
+                (void) fchown(STDERR_FILENO, uid, gid);
+        }
+
+        r = fully_set_uid_gid(uid, gid, supplementary_gids, n_supplementary_gids);
+        if (r < 0)
+                return log_error_errno(r, "Changing privileges failed: %m");
+
+        return 0;
+}
+
+int change_uid_gid(const char *user, bool chown_stdio, char **ret_home) {
         char *x, *u, *g, *h;
-        const char *word, *state;
-        _cleanup_free_ uid_t *uids = NULL;
+        _cleanup_free_ gid_t *gids = NULL;
         _cleanup_free_ char *home = NULL, *line = NULL;
         _cleanup_fclose_ FILE *f = NULL;
-        _cleanup_close_ int fd = -1;
-        unsigned n_uids = 0;
-        size_t sz = 0, l;
+        _cleanup_close_ int fd = -EBADF;
+        unsigned n_gids = 0;
         uid_t uid;
         gid_t gid;
         pid_t pid;
         int r;
 
-        assert(_home);
+        assert(ret_home);
 
         if (!user || STR_IN_SET(user, "root", "0")) {
                 /* Reset everything fully to 0, just in case */
@@ -82,7 +97,7 @@ int change_uid_gid(const char *user, char **_home) {
                 if (r < 0)
                         return log_error_errno(r, "Failed to become root: %m");
 
-                *_home = NULL;
+                *ret_home = NULL;
                 return 0;
         }
 
@@ -91,10 +106,9 @@ int change_uid_gid(const char *user, char **_home) {
         if (fd < 0)
                 return fd;
 
-        f = fdopen(fd, "r");
+        f = take_fdopen(&fd, "r");
         if (!f)
                 return log_oom();
-        fd = -1;
 
         r = read_line(f, LONG_LINE_MAX, &line);
         if (r == 0)
@@ -164,10 +178,9 @@ int change_uid_gid(const char *user, char **_home) {
         if (fd < 0)
                 return fd;
 
-        f = fdopen(fd, "r");
+        f = take_fdopen(&fd, "r");
         if (!f)
                 return log_oom();
-        fd = -1;
 
         r = read_line(f, LONG_LINE_MAX, &line);
         if (r == 0)
@@ -183,16 +196,19 @@ int change_uid_gid(const char *user, char **_home) {
         x += strcspn(x, WHITESPACE);
         x += strspn(x, WHITESPACE);
 
-        FOREACH_WORD(word, l, x, state) {
-                char c[l+1];
+        for (const char *p = x;;) {
+               _cleanup_free_ char *word = NULL;
 
-                memcpy(c, word, l);
-                c[l] = 0;
+                r = extract_first_word(&p, &word, NULL, 0);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to parse group data from getent: %m");
+                if (r == 0)
+                        break;
 
-                if (!GREEDY_REALLOC(uids, sz, n_uids+1))
+                if (!GREEDY_REALLOC(gids, n_gids+1))
                         return log_oom();
 
-                r = parse_uid(c, &uids[n_uids++]);
+                r = parse_gid(word, &gids[n_gids++]);
                 if (r < 0)
                         return log_error_errno(r, "Failed to parse group data from getent: %m");
         }
@@ -205,21 +221,12 @@ int change_uid_gid(const char *user, char **_home) {
         if (r < 0 && !IN_SET(r, -EEXIST, -ENOTDIR))
                 return log_error_errno(r, "Failed to make home directory: %m");
 
-        (void) fchown(STDIN_FILENO, uid, gid);
-        (void) fchown(STDOUT_FILENO, uid, gid);
-        (void) fchown(STDERR_FILENO, uid, gid);
+        r = change_uid_gid_raw(uid, gid, gids, n_gids, chown_stdio);
+        if (r < 0)
+                return r;
 
-        if (setgroups(n_uids, uids) < 0)
-                return log_error_errno(errno, "Failed to set auxiliary groups: %m");
-
-        if (setresgid(gid, gid, gid) < 0)
-                return log_error_errno(errno, "setresgid() failed: %m");
-
-        if (setresuid(uid, uid, uid) < 0)
-                return log_error_errno(errno, "setresuid() failed: %m");
-
-        if (_home)
-                *_home = TAKE_PTR(home);
+        if (ret_home)
+                *ret_home = TAKE_PTR(home);
 
         return 0;
 }

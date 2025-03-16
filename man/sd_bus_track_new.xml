@@ -1,10 +1,7 @@
 <?xml version='1.0'?>
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-"http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
-
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
--->
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
 <refentry id="sd_bus_track_new" xmlns:xi="http://www.w3.org/2001/XInclude">
 
@@ -104,11 +101,11 @@
     <function>sd_bus_track_add_sender()</function>. They may be dropped again via
     <function>sd_bus_track_remove_name()</function> and
     <function>sd_bus_track_remove_sender()</function>. Alternatively, references on peers are removed automatically
-    when they disconnect from the bus.  If non-NULL the <parameter>handler</parameter> may specify a function that is
-    invoked whenever the last reference is dropped, regardless whether the reference is dropped explicitly via
-    <function>sd_bus_track_remove_name()</function> or implicitly because the peer disconnected from the bus. The final
-    argument <parameter>userdata</parameter> may be used to attach a generic user data pointer to the object. This
-    pointer is passed to the handler callback when it is invoked.</para>
+    when they disconnect from the bus.  If non-<constant>NULL</constant> the <parameter>handler</parameter> may specify
+    a function that is invoked whenever the last reference is dropped, regardless whether the reference is dropped
+    explicitly via <function>sd_bus_track_remove_name()</function> or implicitly because the peer disconnected from the
+    bus. The final argument <parameter>userdata</parameter> may be used to attach a generic user data pointer to the
+    object. This pointer is passed to the handler callback when it is invoked.</para>
 
     <para><function>sd_bus_track_ref()</function> creates a new reference to a bus peer tracking object. This object
     will not be destroyed until <function>sd_bus_track_unref()</function> has been called as many times plus once
@@ -185,49 +182,63 @@
     reference. When not needed anymore, this reference should be destroyed with
     <function>sd_bus_track_unref()</function>.
     </para>
-  </refsect1>
 
-  <refsect1>
-    <title>Errors</title>
+    <refsect2>
+      <title>Errors</title>
 
-    <para>Returned errors may indicate the following problems:</para>
+      <para>Returned errors may indicate the following problems:</para>
 
-    <variablelist>
+      <variablelist>
 
-      <varlistentry>
-        <term><constant>-EBUSY</constant></term>
+        <varlistentry>
+          <term><constant>-EBUSY</constant></term>
 
-        <listitem><para>Bus peers have already been added to the bus peer tracking object and
-        <function>sd_bus_track_set_recursive()</function> was called to change tracking mode.</para></listitem>
-      </varlistentry>
+          <listitem><para>Bus peers have already been added to the bus peer tracking object and
+          <function>sd_bus_track_set_recursive()</function> was called to change tracking mode.
+          </para></listitem>
+        </varlistentry>
 
-      <varlistentry>
-        <term><constant>-EINVAL</constant></term>
+        <varlistentry>
+          <term><constant>-EINVAL</constant></term>
 
-        <listitem><para>Specified parameter is invalid
-        (<constant>NULL</constant> in case of output
-        parameters).</para></listitem>
-      </varlistentry>
+          <listitem><para>Specified parameter is invalid
+          (<constant>NULL</constant> in case of output
+          parameters).</para></listitem>
+        </varlistentry>
 
-      <varlistentry>
-        <term><constant>-ENOMEM</constant></term>
+        <varlistentry>
+          <term><constant>-ENOMEM</constant></term>
 
-        <listitem><para>Memory allocation failed.</para></listitem>
-      </varlistentry>
+          <listitem><para>Memory allocation failed.</para></listitem>
+        </varlistentry>
 
-    </variablelist>
+      </variablelist>
+    </refsect2>
   </refsect1>
 
   <xi:include href="libsystemd-pkgconfig.xml" />
 
   <refsect1>
+    <title>History</title>
+    <para><function>sd_bus_track_new()</function>,
+    <function>sd_bus_track_ref()</function>,
+    <function>sd_bus_track_unref()</function>,
+    <function>sd_bus_track_unrefp()</function>,
+    <function>sd_bus_track_get_recursive()</function>,
+    <function>sd_bus_track_set_recursive()</function>,
+    <function>sd_bus_track_get_bus()</function>,
+    <function>sd_bus_track_get_userdata()</function>, and
+    <function>sd_bus_track_set_userdata()</function> were added in version 232.</para>
+  </refsect1>
+
+  <refsect1>
     <title>See Also</title>
 
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-      <citerefentry><refentrytitle>sd_bus_track_add_name</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_track_add_name</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

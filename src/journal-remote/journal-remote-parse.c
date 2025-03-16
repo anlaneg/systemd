@@ -1,9 +1,8 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "alloc-util.h"
 #include "fd-util.h"
 #include "journal-remote-parse.h"
-#include "journald-native.h"
 #include "parse-util.h"
 #include "string-util.h"
 
@@ -13,7 +12,7 @@ void source_free(RemoteSource *source) {
 
         journal_importer_cleanup(&source->importer);
 
-        log_debug("Writer ref count %i", source->writer->n_ref);
+        log_debug("Writer ref count %u", source->writer->n_ref);
         writer_unref(source->writer);
 
         sd_event_source_unref(source->event);
@@ -38,7 +37,7 @@ RemoteSource* source_new(int fd, bool passive_fd, char *name, Writer *writer) {
         if (!source)
                 return NULL;
 
-        source->importer.fd = fd;
+        source->importer = JOURNAL_IMPORTER_MAKE(fd);
         source->importer.passive_fd = passive_fd;
         source->importer.name = name;
 
@@ -47,7 +46,7 @@ RemoteSource* source_new(int fd, bool passive_fd, char *name, Writer *writer) {
         return source;
 }
 
-int process_source(RemoteSource *source, bool compress, bool seal) {
+int process_source(RemoteSource *source, JournalFileFlags file_flags) {
         int r;
 
         assert(source);
@@ -68,9 +67,13 @@ int process_source(RemoteSource *source, bool compress, bool seal) {
 
         assert(source->importer.iovw.iovec);
 
-        r = writer_write(source->writer, &source->importer.iovw, &source->importer.ts, compress, seal);
-        if (r == -EBADMSG) {
-                log_error_errno(r, "Entry is invalid, ignoring.");
+        r = writer_write(source->writer,
+                         &source->importer.iovw,
+                         &source->importer.ts,
+                         &source->importer.boot_id,
+                         file_flags);
+        if (IN_SET(r, -EBADMSG, -EADDRNOTAVAIL)) {
+                log_warning_errno(r, "Entry is invalid, ignoring.");
                 r = 0;
         } else if (r < 0)
                 log_error_errno(r, "Failed to write entry of %zu bytes: %m",

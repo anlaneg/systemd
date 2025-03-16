@@ -1,12 +1,13 @@
 <?xml version='1.0'?> <!--*-nxml-*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-  "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd" [
+<!ENTITY % entities SYSTEM "custom-entities.ent" >
+%entities;
+]>
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
--->
-
-<refentry id="vconsole.conf" conditional='ENABLE_VCONSOLE'>
+<refentry id="vconsole.conf" conditional='ENABLE_VCONSOLE'
+          xmlns:xi="http://www.w3.org/2001/XInclude">
   <refentryinfo>
     <title>vconsole.conf</title>
     <productname>systemd</productname>
@@ -35,13 +36,13 @@
     You can safely mask this file if you want to avoid this kind of initialization.
     </para>
 
-    <para>The basic file format of the
-    <filename>vconsole.conf</filename> is a newline-separated list of
-    environment-like shell-compatible variable assignments. It is
-    possible to source the configuration from shell scripts, however,
-    beyond mere variable assignments no shell features are supported,
-    allowing applications to read the file without implementing a
-    shell compatible execution engine.</para>
+    <para>The format of <filename>vconsole.conf</filename> is a newline-separated list of environment-like
+    shell-compatible variable assignments, ignoring comments and empty lines. It is possible to source the
+    configuration from shell scripts, however, beyond mere variable assignments no shell features are
+    supported, allowing applications to read the file without implementing a shell compatible execution
+    engine. See
+    <citerefentry><refentrytitle>os-release</refentrytitle><manvolnum>5</manvolnum></citerefentry> for a
+    detailed description of the format.</para>
 
     <para>Note that the kernel command line options
     <varname>vconsole.keymap=</varname>,
@@ -74,10 +75,11 @@
         <term><varname>KEYMAP=</varname></term>
         <term><varname>KEYMAP_TOGGLE=</varname></term>
 
-        <listitem><para>Configures the key mapping table for the keyboard.
-        <varname>KEYMAP=</varname> defaults to <literal>us</literal> if not set. The
-        <varname>KEYMAP_TOGGLE=</varname> can be used to configure a second toggle keymap and is by
-        default unset.</para></listitem>
+        <listitem><para>Configures the key mapping table for the keyboard.  <varname>KEYMAP=</varname>
+        defaults to <literal>&DEFAULT_KEYMAP;</literal> if not set. Specially, if <literal>@kernel</literal>
+        is specified, no keymap will be loaded, i.e. the kernel's default keymap is used.  The
+        <varname>KEYMAP_TOGGLE=</varname> can be used to configure a second toggle keymap and is by default
+        unset.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -104,7 +106,9 @@
         <term><varname>vconsole.keymap_toggle=</varname></term>
 
         <listitem><para>Overrides <varname>KEYMAP=</varname> and <varname>KEYMAP_TOGGLE=</varname>.
-        </para></listitem>
+        </para>
+
+        <xi:include href="version-info.xml" xpointer="v232"/></listitem>
       </varlistentry>
       <varlistentry>
 
@@ -113,7 +117,9 @@
         <term><varname>vconsole.font_unimap=</varname></term>
 
         <listitem><para>Overrides <varname>FONT=</varname>, <varname>FONT_MAP=</varname>, and
-        <varname>FONT_UNIMAP=</varname>.</para></listitem>
+        <varname>FONT_UNIMAP=</varname>.</para>
+
+        <xi:include href="version-info.xml" xpointer="v232"/></listitem>
       </varlistentry>
     </variablelist>
   </refsect1>
@@ -134,14 +140,14 @@ FONT=eurlatgr</programlisting>
 
   <refsect1>
       <title>See Also</title>
-      <para>
-        <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-        <citerefentry><refentrytitle>systemd-vconsole-setup.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
-        <citerefentry project='mankier'><refentrytitle>loadkeys</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-        <citerefentry project='die-net'><refentrytitle>setfont</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
-        <citerefentry project='man-pages'><refentrytitle>locale.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
-        <citerefentry><refentrytitle>systemd-localed.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
-      </para>
+      <para><simplelist type="inline">
+        <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+        <member><citerefentry><refentrytitle>systemd-vconsole-setup.service</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+        <member><citerefentry project='mankier'><refentrytitle>loadkeys</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+        <member><citerefentry project='die-net'><refentrytitle>setfont</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+        <member><citerefentry project='man-pages'><refentrytitle>locale.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry></member>
+        <member><citerefentry><refentrytitle>systemd-localed.service</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+      </simplelist></para>
   </refsect1>
 
 </refentry>

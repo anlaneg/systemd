@@ -1,8 +1,7 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <getopt.h>
-#include <poll.h>
 #include <stddef.h>
 #include <string.h>
 #include <unistd.h>
@@ -14,39 +13,45 @@
 #include "build.h"
 #include "bus-internal.h"
 #include "bus-util.h"
+#include "errno-util.h"
+#include "io-util.h"
 #include "log.h"
 #include "main-func.h"
-#include "util.h"
 
 #define DEFAULT_BUS_PATH "unix:path=/run/dbus/system_bus_socket"
 
 static const char *arg_bus_path = DEFAULT_BUS_PATH;
 static BusTransport arg_transport = BUS_TRANSPORT_LOCAL;
+static RuntimeScope arg_runtime_scope = RUNTIME_SCOPE_SYSTEM;
 
 static int help(void) {
-
         printf("%s [OPTIONS...]\n\n"
-               "STDIO or socket-activatable proxy to a given DBus endpoint.\n\n"
+               "Forward messages between a pipe or socket and a D-Bus bus.\n\n"
                "  -h --help              Show this help\n"
                "     --version           Show package version\n"
-               "  -p --bus-path=PATH     Path to the kernel bus (default: %s)\n"
-               "  -M --machine=MACHINE   Name of machine to connect to\n",
+               "  -p --bus-path=PATH     Path to the bus address (default: %s)\n"
+               "     --system            Connect to system bus\n"
+               "     --user              Connect to user bus\n"
+               "  -M --machine=CONTAINER Name of local container to connect to\n",
                program_invocation_short_name, DEFAULT_BUS_PATH);
 
         return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
-
         enum {
                 ARG_VERSION = 0x100,
                 ARG_MACHINE,
+                ARG_USER,
+                ARG_SYSTEM,
         };
 
         static const struct option options[] = {
                 { "help",            no_argument,       NULL, 'h'         },
                 { "version",         no_argument,       NULL, ARG_VERSION },
                 { "bus-path",        required_argument, NULL, 'p'         },
+                { "user",            no_argument,       NULL, ARG_USER    },
+                { "system",          no_argument,       NULL, ARG_SYSTEM  },
                 { "machine",         required_argument, NULL, 'M'         },
                 {},
         };
@@ -56,36 +61,40 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "hsup:", options, NULL)) >= 0) {
+        while ((c = getopt_long(argc, argv, "hp:M:", options, NULL)) >= 0)
 
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();
 
-                case '?':
-                        return -EINVAL;
+                case ARG_USER:
+                        arg_runtime_scope = RUNTIME_SCOPE_USER;
+                        break;
+
+                case ARG_SYSTEM:
+                        arg_runtime_scope = RUNTIME_SCOPE_SYSTEM;
+                        break;
 
                 case 'p':
                         arg_bus_path = optarg;
-
                         break;
 
                 case 'M':
                         arg_bus_path = optarg;
-
                         arg_transport = BUS_TRANSPORT_MACHINE;
-
                         break;
+
+                case '?':
+                        return -EINVAL;
+
                 default:
                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                                "Unknown option code %c", c);
                 }
-        }
 
         return 1;
 }
@@ -96,9 +105,7 @@ static int run(int argc, char *argv[]) {
         bool is_unix;
         int r, in_fd, out_fd;
 
-        log_set_target(LOG_TARGET_JOURNAL_OR_KMSG);
-        log_parse_environment();
-        log_open();
+        log_setup();
 
         r = parse_argv(argc, argv);
         if (r <= 0)
@@ -111,10 +118,8 @@ static int run(int argc, char *argv[]) {
         } else if (r == 1) {
                 in_fd = SD_LISTEN_FDS_START;
                 out_fd = SD_LISTEN_FDS_START;
-        } else {
-                log_error("Illegal number of file descriptors passed.");
-                return -EINVAL;
-        }
+        } else
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "More than one file descriptor was passed.");
 
         is_unix =
                 sd_is_socket(in_fd, AF_UNIX, 0, 0) > 0 &&
@@ -125,7 +130,7 @@ static int run(int argc, char *argv[]) {
                 return log_error_errno(r, "Failed to allocate bus: %m");
 
         if (arg_transport == BUS_TRANSPORT_MACHINE)
-                r = bus_set_address_system_machine(a, arg_bus_path);
+                r = bus_set_address_machine(a, arg_runtime_scope, arg_bus_path);
         else
                 r = sd_bus_set_address(a, arg_bus_path);
         if (r < 0)
@@ -137,7 +142,7 @@ static int run(int argc, char *argv[]) {
 
         r = sd_bus_start(a);
         if (r < 0)
-                return log_error_errno(r, "Failed to start bus client: %m");
+                return bus_log_connect_error(r, arg_transport, arg_runtime_scope);
 
         r = sd_bus_get_bus_id(a, &server_id);
         if (r < 0)
@@ -165,19 +170,24 @@ static int run(int argc, char *argv[]) {
 
         r = sd_bus_start(b);
         if (r < 0)
-                return log_error_errno(r, "Failed to start bus client: %m");
+                return log_error_errno(r, "Failed to start bus forwarding server: %m");
 
         for (;;) {
                 _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
                 int events_a, events_b, fd;
-                uint64_t timeout_a, timeout_b, t;
-                struct timespec _ts, *ts;
+                usec_t timeout_a, timeout_b, t;
+
+                assert_cc(sizeof(usec_t) == sizeof(uint64_t));
 
                 r = sd_bus_process(a, &m);
+                if (ERRNO_IS_NEG_DISCONNECT(r)) /* Treat 'connection reset by peer' as clean exit condition */
+                        return 0;
                 if (r < 0)
                         return log_error_errno(r, "Failed to process bus a: %m");
-
                 if (m) {
+                        if (sd_bus_message_is_signal(m, "org.freedesktop.DBus.Local", "Disconnected"))
+                                return 0;
+
                         r = sd_bus_send(b, m, NULL);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to send message: %m");
@@ -187,11 +197,14 @@ static int run(int argc, char *argv[]) {
                         continue;
 
                 r = sd_bus_process(b, &m);
+                if (ERRNO_IS_NEG_DISCONNECT(r)) /* Treat 'connection reset by peer' as clean exit condition */
+                        return 0;
                 if (r < 0)
-                        /* treat 'connection reset by peer' as clean exit condition */
-                        return r == -ECONNRESET ? 0 : r;
-
+                        return log_error_errno(r, "Failed to process bus: %m");
                 if (m) {
+                        if (sd_bus_message_is_signal(m, "org.freedesktop.DBus.Local", "Disconnected"))
+                                return 0;
+
                         r = sd_bus_send(a, m, NULL);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to send message: %m");
@@ -220,37 +233,18 @@ static int run(int argc, char *argv[]) {
                 if (r < 0)
                         return log_error_errno(r, "Failed to get timeout: %m");
 
-                t = timeout_a;
-                if (t == (uint64_t) -1 || (timeout_b != (uint64_t) -1 && timeout_b < timeout_a))
-                        t = timeout_b;
+                t = usec_sub_unsigned(MIN(timeout_a, timeout_b), now(CLOCK_MONOTONIC));
 
-                if (t == (uint64_t) -1)
-                        ts = NULL;
-                else {
-                        usec_t nw;
+                struct pollfd p[3] = {
+                        { .fd = fd,            .events = events_a           },
+                        { .fd = STDIN_FILENO,  .events = events_b & POLLIN  },
+                        { .fd = STDOUT_FILENO, .events = events_b & POLLOUT },
+                };
 
-                        nw = now(CLOCK_MONOTONIC);
-                        if (t > nw)
-                                t -= nw;
-                        else
-                                t = 0;
-
-                        ts = timespec_store(&_ts, t);
-                }
-
-                {
-                        struct pollfd p[3] = {
-                                {.fd = fd,            .events = events_a, },
-                                {.fd = STDIN_FILENO,  .events = events_b & POLLIN, },
-                                {.fd = STDOUT_FILENO, .events = events_b & POLLOUT, }};
-
-                        r = ppoll(p, ELEMENTSOF(p), ts, NULL);
-                }
-                if (r < 0)
-                        return log_error_errno(errno, "ppoll() failed: %m");
+                r = ppoll_usec(p, ELEMENTSOF(p), t);
+                if (r < 0 && !ERRNO_IS_TRANSIENT(r))  /* don't be bothered by signals, i.e. EINTR */
+                        return log_error_errno(r, "ppoll() failed: %m");
         }
-
-        return 0;
 }
 
 DEFINE_MAIN_FUNCTION(run);

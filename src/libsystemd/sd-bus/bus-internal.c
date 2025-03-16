@@ -1,8 +1,9 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "alloc-util.h"
 #include "bus-internal.h"
 #include "bus-message.h"
+#include "escape.h"
 #include "hexdecoct.h"
 #include "string-util.h"
 
@@ -28,10 +29,8 @@ bool object_path_is_valid(const char *p) {
                 } else {
                         bool good;
 
-                        good =
-                                (*q >= 'a' && *q <= 'z') ||
-                                (*q >= 'A' && *q <= 'Z') ||
-                                (*q >= '0' && *q <= '9') ||
+                        good = ascii_isalpha(*q) ||
+                                ascii_isdigit(*q) ||
                                 *q == '_';
 
                         if (!good)
@@ -86,18 +85,22 @@ bool interface_name_is_valid(const char *p) {
                         bool good;
 
                         good =
-                                (*q >= 'a' && *q <= 'z') ||
-                                (*q >= 'A' && *q <= 'Z') ||
-                                (!dot && *q >= '0' && *q <= '9') ||
+                                ascii_isalpha(*q) ||
+                                (!dot && ascii_isdigit(*q)) ||
                                 *q == '_';
 
-                        if (!good)
+                        if (!good) {
+                                if (DEBUG_LOGGING) {
+                                        _cleanup_free_ char *iface = cescape(p);
+                                        log_debug("The interface %s is invalid as it contains special character", strnull(iface));
+                                }
                                 return false;
+                        }
 
                         dot = false;
                 }
 
-        if (q - p > 255)
+        if (q - p > SD_BUS_MAXIMUM_NAME_LENGTH)
                 return false;
 
         if (dot)
@@ -128,9 +131,8 @@ bool service_name_is_valid(const char *p) {
                         bool good;
 
                         good =
-                                (*q >= 'a' && *q <= 'z') ||
-                                (*q >= 'A' && *q <= 'Z') ||
-                                ((!dot || unique) && *q >= '0' && *q <= '9') ||
+                                ascii_isalpha(*q) ||
+                                ((!dot || unique) && ascii_isdigit(*q)) ||
                                 IN_SET(*q, '_', '-');
 
                         if (!good)
@@ -139,7 +141,7 @@ bool service_name_is_valid(const char *p) {
                         dot = false;
                 }
 
-        if (q - p > 255)
+        if (q - p > SD_BUS_MAXIMUM_NAME_LENGTH)
                 return false;
 
         if (dot)
@@ -161,16 +163,15 @@ bool member_name_is_valid(const char *p) {
                 bool good;
 
                 good =
-                        (*q >= 'a' && *q <= 'z') ||
-                        (*q >= 'A' && *q <= 'Z') ||
-                        (*q >= '0' && *q <= '9') ||
+                        ascii_isalpha(*q) ||
+                        ascii_isdigit(*q) ||
                         *q == '_';
 
                 if (!good)
                         return false;
         }
 
-        if (q - p > 255)
+        if (q - p > SD_BUS_MAXIMUM_NAME_LENGTH)
                 return false;
 
         return true;
@@ -180,7 +181,7 @@ bool member_name_is_valid(const char *p) {
  * Complex pattern match
  * This checks whether @a is a 'complex-prefix' of @b, or @b is a
  * 'complex-prefix' of @a, based on strings that consist of labels with @c as
- * spearator. This function returns true if:
+ * separator. This function returns true if:
  *   - both strings are equal
  *   - either is a prefix of the other and ends with @c
  * The second rule makes sure that either string needs to be fully included in
@@ -272,7 +273,7 @@ int bus_message_type_from_string(const char *s, uint8_t *u) {
         return 0;
 }
 
-const char *bus_message_type_to_string(uint8_t u) {
+const char* bus_message_type_to_string(uint8_t u) {
         if (u == SD_BUS_MESSAGE_SIGNAL)
                 return "signal";
         else if (u == SD_BUS_MESSAGE_METHOD_CALL)
@@ -285,7 +286,7 @@ const char *bus_message_type_to_string(uint8_t u) {
                 return NULL;
 }
 
-char *bus_address_escape(const char *v) {
+char* bus_address_escape(const char *v) {
         const char *a;
         char *r, *b;
 
@@ -295,9 +296,8 @@ char *bus_address_escape(const char *v) {
 
         for (a = v, b = r; *a; a++) {
 
-                if ((*a >= '0' && *a <= '9') ||
-                    (*a >= 'a' && *a <= 'z') ||
-                    (*a >= 'A' && *a <= 'Z') ||
+                if (ascii_isdigit(*a) ||
+                    ascii_isalpha(*a) ||
                     strchr("_-/.", *a))
                         *(b++) = *a;
                 else {
@@ -314,13 +314,9 @@ char *bus_address_escape(const char *v) {
 int bus_maybe_reply_error(sd_bus_message *m, int r, sd_bus_error *error) {
         assert(m);
 
-        if (r < 0) {
+        if (sd_bus_error_is_set(error) || r < 0) {
                 if (m->header->type == SD_BUS_MESSAGE_METHOD_CALL)
                         sd_bus_reply_method_errno(m, r, error);
-
-        } else if (sd_bus_error_is_set(error)) {
-                if (m->header->type == SD_BUS_MESSAGE_METHOD_CALL)
-                        sd_bus_reply_method_error(m, error);
         } else
                 return r;
 

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <zlib.h>
 
@@ -6,7 +6,6 @@
 #include "btrfs-util.h"
 #include "qcow2-util.h"
 #include "sparse-endian.h"
-#include "util.h"
 
 #define QCOW2_MAGIC 0x514649fb
 
@@ -70,7 +69,7 @@ static int copy_cluster(
         ssize_t l;
         int r;
 
-        r = btrfs_clone_range(sfd, soffset, dfd, doffset, cluster_size);
+        r = reflink_range(sfd, soffset, dfd, doffset, cluster_size);
         if (r >= 0)
                 return r;
 
@@ -274,7 +273,7 @@ int qcow2_convert(int qcow2_fd, int raw_fd) {
         if ((uint64_t) l != sz)
                 return -EIO;
 
-        for (i = 0; i < HEADER_L1_SIZE(&header); i ++) {
+        for (i = 0; i < HEADER_L1_SIZE(&header); i++) {
                 uint64_t l2_begin, j;
 
                 r = normalize_offset(&header, l1_table[i], &l2_begin, NULL, NULL);

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "sd-bus.h"
 
 #include "main-func.h"
@@ -24,7 +24,7 @@ static int test_ref_unref(void) {
         m = sd_bus_message_unref(m);
         bus = sd_bus_unref(bus);
 
-        /* We should have a memory leak now on <= v240. Let's do this again, but destory in the opposite
+        /* We should have a memory leak now on <= v240. Let's do this again, but destroy in the opposite
          * order. On v240 that too should be a leak. */
 
         r = sd_bus_open_system(&bus);

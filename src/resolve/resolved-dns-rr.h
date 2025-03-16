@@ -1,26 +1,31 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include <netinet/in.h>
 
+#include "sd-json.h"
+
 #include "bitmap.h"
+#include "dns-def.h"
 #include "dns-type.h"
 #include "hashmap.h"
 #include "in-addr-util.h"
 #include "list.h"
 #include "string-util.h"
+#include "time-util.h"
 
 typedef struct DnsResourceKey DnsResourceKey;
 typedef struct DnsResourceRecord DnsResourceRecord;
 typedef struct DnsTxtItem DnsTxtItem;
+typedef struct DnsSvcParam DnsSvcParam;
 
 /* DNSKEY RR flags */
-#define DNSKEY_FLAG_SEP      (UINT16_C(1) << 0)
-#define DNSKEY_FLAG_REVOKE   (UINT16_C(1) << 7)
-#define DNSKEY_FLAG_ZONE_KEY (UINT16_C(1) << 8)
+#define DNSKEY_FLAG_SEP            (UINT16_C(1) << 0)
+#define DNSKEY_FLAG_REVOKE         (UINT16_C(1) << 7)
+#define DNSKEY_FLAG_ZONE_KEY       (UINT16_C(1) << 8)
 
 /* mDNS RR flags */
-#define MDNS_RR_CACHE_FLUSH  (UINT16_C(1) << 15)
+#define MDNS_RR_CACHE_FLUSH_OR_QU  (UINT16_C(1) << 15)
 
 /* DNSSEC algorithm identifiers, see
  * http://tools.ietf.org/html/rfc4034#appendix-A.1 and
@@ -75,7 +80,7 @@ struct DnsResourceKey {
  * resource key object. */
 #define DNS_RESOURCE_KEY_CONST(c, t, n)                 \
         ((DnsResourceKey) {                             \
-                .n_ref = (unsigned) -1,                 \
+                .n_ref = UINT_MAX,                      \
                 .class = c,                             \
                 .type = t,                              \
                 ._name = (char*) n,                     \
@@ -87,23 +92,34 @@ struct DnsTxtItem {
         uint8_t data[];
 };
 
+struct DnsSvcParam {
+        uint16_t key;
+        size_t length;
+        LIST_FIELDS(DnsSvcParam, params);
+        union {
+                DECLARE_FLEX_ARRAY(uint8_t, value);
+                DECLARE_FLEX_ARRAY(struct in_addr, value_in_addr);
+                DECLARE_FLEX_ARRAY(struct in6_addr, value_in6_addr);
+        };
+};
+
 struct DnsResourceRecord {
         unsigned n_ref;
+        uint32_t ttl;
+        usec_t expiry; /* RRSIG signature expiry */
+
         DnsResourceKey *key;
 
         char *to_string;
 
-        uint32_t ttl;
-        usec_t expiry; /* RRSIG signature expiry */
-
         /* How many labels to strip to determine "signer" of the RRSIG (aka, the zone). -1 if not signed. */
-        unsigned n_skip_labels_signer;
+        uint8_t n_skip_labels_signer;
         /* How many labels to strip to determine "synthesizing source" of this RR, i.e. the wildcard's immediate parent. -1 if not signed. */
-        unsigned n_skip_labels_source;
+        uint8_t n_skip_labels_source;
 
-        bool unparseable:1;
+        bool unparsable;
+        bool wire_format_canonical;
 
-        bool wire_format_canonical:1;
         void *wire_format;
         size_t wire_format_size;
         size_t wire_format_rdata_offset;
@@ -115,10 +131,10 @@ struct DnsResourceRecord {
                 } generic, opt;
 
                 struct {
+                        char *name;
                         uint16_t priority;
                         uint16_t weight;
                         uint16_t port;
-                        char *name;
                 } srv;
 
                 struct {
@@ -153,8 +169,8 @@ struct DnsResourceRecord {
                 } soa;
 
                 struct {
-                        uint16_t priority;
                         char *exchange;
+                        uint16_t priority;
                 } mx;
 
                 /* https://tools.ietf.org/html/rfc1876 */
@@ -170,23 +186,29 @@ struct DnsResourceRecord {
 
                 /* https://tools.ietf.org/html/rfc4255#section-3.1 */
                 struct {
-                        uint8_t algorithm;
-                        uint8_t fptype;
                         void *fingerprint;
                         size_t fingerprint_size;
+
+                        uint8_t algorithm;
+                        uint8_t fptype;
                 } sshfp;
 
                 /* http://tools.ietf.org/html/rfc4034#section-2.1 */
                 struct {
+                        void* key;
+                        size_t key_size;
+
                         uint16_t flags;
                         uint8_t protocol;
                         uint8_t algorithm;
-                        void* key;
-                        size_t key_size;
                 } dnskey;
 
                 /* http://tools.ietf.org/html/rfc4034#section-3.1 */
                 struct {
+                        char *signer;
+                        void *signature;
+                        size_t signature_size;
+
                         uint16_t type_covered;
                         uint8_t algorithm;
                         uint8_t labels;
@@ -194,9 +216,6 @@ struct DnsResourceRecord {
                         uint32_t expiration;
                         uint32_t inception;
                         uint16_t key_tag;
-                        char *signer;
-                        void *signature;
-                        size_t signature_size;
                 } rrsig;
 
                 /* https://tools.ietf.org/html/rfc4034#section-4.1 */
@@ -207,42 +226,68 @@ struct DnsResourceRecord {
 
                 /* https://tools.ietf.org/html/rfc4034#section-5.1 */
                 struct {
+                        void *digest;
+                        size_t digest_size;
+
                         uint16_t key_tag;
                         uint8_t algorithm;
                         uint8_t digest_type;
-                        void *digest;
-                        size_t digest_size;
                 } ds;
 
                 struct {
-                        uint8_t algorithm;
-                        uint8_t flags;
-                        uint16_t iterations;
+                        Bitmap *types;
                         void *salt;
                         size_t salt_size;
                         void *next_hashed_name;
                         size_t next_hashed_name_size;
-                        Bitmap *types;
+
+                        uint8_t algorithm;
+                        uint8_t flags;
+                        uint16_t iterations;
                 } nsec3;
 
                 /* https://tools.ietf.org/html/draft-ietf-dane-protocol-23 */
                 struct {
+                        void *data;
+                        size_t data_size;
+
                         uint8_t cert_usage;
                         uint8_t selector;
                         uint8_t matching_type;
-                        void *data;
-                        size_t data_size;
                 } tlsa;
+
+                /* https://tools.ietf.org/html/rfc9460 */
+                struct {
+                        uint16_t priority;
+                        char *target_name;
+                        DnsSvcParam *params;
+                } svcb, https;
 
                 /* https://tools.ietf.org/html/rfc6844 */
                 struct {
-                        uint8_t flags;
                         char *tag;
                         void *value;
                         size_t value_size;
+
+                        uint8_t flags;
                 } caa;
+
+                /* https://datatracker.ietf.org/doc/html/rfc2915 */
+                struct {
+                        uint16_t order;
+                        uint16_t preference;
+                        char *flags;
+                        char *services;
+                        char *regexp;
+                        char *replacement;
+                } naptr;
         };
+
+        /* Note: fields should be ordered to minimize alignment gaps. Use pahole! */
 };
+
+/* We use uint8_t for label counts above, and UINT8_MAX/-1 has special meaning. */
+assert_cc(DNS_N_LABELS_MAX < UINT8_MAX);
 
 static inline const void* DNS_RESOURCE_RECORD_RDATA(const DnsResourceRecord *rr) {
         if (!rr)
@@ -278,9 +323,19 @@ int dns_resource_key_new_append_suffix(DnsResourceKey **ret, DnsResourceKey *key
 DnsResourceKey* dns_resource_key_new_consume(uint16_t class, uint16_t type, char *name);
 DnsResourceKey* dns_resource_key_ref(DnsResourceKey *key);
 DnsResourceKey* dns_resource_key_unref(DnsResourceKey *key);
+
+#define DNS_RESOURCE_KEY_REPLACE(a, b)          \
+        do {                                    \
+                typeof(a)* _a = &(a);           \
+                typeof(b) _b = (b);             \
+                dns_resource_key_unref(*_a);    \
+                *_a = _b;                       \
+        } while(0)
+
 const char* dns_resource_key_name(const DnsResourceKey *key);
 bool dns_resource_key_is_address(const DnsResourceKey *key);
 bool dns_resource_key_is_dnssd_ptr(const DnsResourceKey *key);
+bool dns_resource_key_is_dnssd_two_label_ptr(const DnsResourceKey *key);
 int dns_resource_key_equal(const DnsResourceKey *a, const DnsResourceKey *b);
 int dns_resource_key_match_rr(const DnsResourceKey *key, DnsResourceRecord *rr, const char *search_domain);
 int dns_resource_key_match_cname_or_dname(const DnsResourceKey *key, const DnsResourceKey *cname, const char *search_domain);
@@ -293,10 +348,13 @@ int dns_resource_key_match_soa(const DnsResourceKey *key, const DnsResourceKey *
 char* dns_resource_key_to_string(const DnsResourceKey *key, char *buf, size_t buf_size);
 ssize_t dns_resource_record_payload(DnsResourceRecord *rr, void **out);
 
+#define DNS_RESOURCE_KEY_TO_STRING(key) \
+        dns_resource_key_to_string(key, (char[DNS_RESOURCE_KEY_STRING_MAX]) {}, DNS_RESOURCE_KEY_STRING_MAX)
+
 DEFINE_TRIVIAL_CLEANUP_FUNC(DnsResourceKey*, dns_resource_key_unref);
 
 static inline bool dns_key_is_shared(const DnsResourceKey *key) {
-        return IN_SET(key->type, DNS_TYPE_PTR);
+        return key->type == DNS_TYPE_PTR;
 }
 
 bool dns_resource_key_reduce(DnsResourceKey **a, DnsResourceKey **b);
@@ -305,6 +363,15 @@ DnsResourceRecord* dns_resource_record_new(DnsResourceKey *key);
 DnsResourceRecord* dns_resource_record_new_full(uint16_t class, uint16_t type, const char *name);
 DnsResourceRecord* dns_resource_record_ref(DnsResourceRecord *rr);
 DnsResourceRecord* dns_resource_record_unref(DnsResourceRecord *rr);
+
+#define DNS_RR_REPLACE(a, b)                    \
+        do {                                    \
+                typeof(a)* _a = &(a);           \
+                typeof(b) _b = (b);             \
+                dns_resource_record_unref(*_a); \
+                *_a = _b;                       \
+        } while(0)
+
 int dns_resource_record_new_reverse(DnsResourceRecord **ret, int family, const union in_addr_union *address, const char *name);
 int dns_resource_record_new_address(DnsResourceRecord **ret, int family, const union in_addr_union *address, const char *name);
 int dns_resource_record_equal(const DnsResourceRecord *a, const DnsResourceRecord *b);
@@ -323,12 +390,27 @@ int dns_resource_record_is_synthetic(DnsResourceRecord *rr);
 
 int dns_resource_record_clamp_ttl(DnsResourceRecord **rr, uint32_t max_ttl);
 
+bool dns_resource_record_is_link_local_address(DnsResourceRecord *rr);
+
+int dns_resource_record_get_cname_target(DnsResourceKey *key, DnsResourceRecord *cname, char **ret);
+
 DnsTxtItem *dns_txt_item_free_all(DnsTxtItem *i);
 bool dns_txt_item_equal(DnsTxtItem *a, DnsTxtItem *b);
 DnsTxtItem *dns_txt_item_copy(DnsTxtItem *i);
 int dns_txt_item_new_empty(DnsTxtItem **ret);
 
+DnsSvcParam *dns_svc_param_free_all(DnsSvcParam *i);
+bool dns_svc_params_equal(DnsSvcParam *a, DnsSvcParam *b);
+DnsSvcParam *dns_svc_params_copy(DnsSvcParam *first);
+
+int dns_resource_record_new_from_raw(DnsResourceRecord **ret, const void *data, size_t size);
+
+int dns_resource_key_to_json(DnsResourceKey *key, sd_json_variant **ret);
+int dns_resource_key_from_json(sd_json_variant *v, DnsResourceKey **ret);
+int dns_resource_record_to_json(DnsResourceRecord *rr, sd_json_variant **ret);
+
 void dns_resource_record_hash_func(const DnsResourceRecord *i, struct siphash *state);
+int dns_resource_record_compare_func(const DnsResourceRecord *x, const DnsResourceRecord *y);
 
 extern const struct hash_ops dns_resource_key_hash_ops;
 extern const struct hash_ops dns_resource_record_hash_ops;

@@ -1,10 +1,7 @@
 <?xml version='1.0'?>
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-  "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
-
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
--->
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
 <refentry id="sd_pid_get_owner_uid" conditional='HAVE_PAM'
           xmlns:xi="http://www.w3.org/2001/XInclude">
@@ -28,6 +25,14 @@
     <refname>sd_pid_get_slice</refname>
     <refname>sd_pid_get_user_slice</refname>
     <refname>sd_pid_get_cgroup</refname>
+    <refname>sd_pidfd_get_owner_uid</refname>
+    <refname>sd_pidfd_get_session</refname>
+    <refname>sd_pidfd_get_user_unit</refname>
+    <refname>sd_pidfd_get_unit</refname>
+    <refname>sd_pidfd_get_machine_name</refname>
+    <refname>sd_pidfd_get_slice</refname>
+    <refname>sd_pidfd_get_user_slice</refname>
+    <refname>sd_pidfd_get_cgroup</refname>
     <refname>sd_peer_get_owner_uid</refname>
     <refname>sd_peer_get_session</refname>
     <refname>sd_peer_get_user_unit</refname>
@@ -38,7 +43,7 @@
     <refname>sd_peer_get_cgroup</refname>
     <refpurpose>Determine the owner uid of the user unit or session,
     or the session, user unit, system unit, container/VM or slice that
-    a specific PID or socket peer belongs to.</refpurpose>
+    a specific PID or socket peer belongs to</refpurpose>
   </refnamediv>
 
   <refsynopsisdiv>
@@ -90,6 +95,54 @@
       <funcprototype>
         <funcdef>int <function>sd_pid_get_cgroup</function></funcdef>
         <paramdef>pid_t <parameter>pid</parameter></paramdef>
+        <paramdef>char **<parameter>cgroup</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
+        <funcdef>int <function>sd_pidfd_get_owner_uid</function></funcdef>
+        <paramdef>int <parameter>pidfd</parameter></paramdef>
+        <paramdef>uid_t *<parameter>uid</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
+        <funcdef>int <function>sd_pidfd_get_session</function></funcdef>
+        <paramdef>int <parameter>pidfd</parameter></paramdef>
+        <paramdef>char **<parameter>session</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
+        <funcdef>int <function>sd_pidfd_get_user_unit</function></funcdef>
+        <paramdef>int <parameter>pidfd</parameter></paramdef>
+        <paramdef>char **<parameter>unit</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
+        <funcdef>int <function>sd_pidfd_get_unit</function></funcdef>
+        <paramdef>int <parameter>pidfd</parameter></paramdef>
+        <paramdef>char **<parameter>unit</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
+        <funcdef>int <function>sd_pidfd_get_machine_name</function></funcdef>
+        <paramdef>int <parameter>pidfd</parameter></paramdef>
+        <paramdef>char **<parameter>name</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
+        <funcdef>int <function>sd_pidfd_get_slice</function></funcdef>
+        <paramdef>int <parameter>pidfd</parameter></paramdef>
+        <paramdef>char **<parameter>slice</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
+        <funcdef>int <function>sd_pidfd_get_user_slice</function></funcdef>
+        <paramdef>int <parameter>pidfd</parameter></paramdef>
+        <paramdef>char **<parameter>slice</parameter></paramdef>
+      </funcprototype>
+
+      <funcprototype>
+        <funcdef>int <function>sd_pidfd_get_cgroup</function></funcdef>
+        <paramdef>int <parameter>pidfd</parameter></paramdef>
         <paramdef>char **<parameter>cgroup</parameter></paramdef>
       </funcprototype>
 
@@ -225,6 +278,20 @@
     functions is passed as 0, the operation is executed for the
     calling process.</para>
 
+    <para>The <function>sd_pidfd_get_owner_uid()</function>,
+    <function>sd_pidfd_get_session()</function>,
+    <function>sd_pidfd_get_user_unit()</function>,
+    <function>sd_pidfd_get_unit()</function>,
+    <function>sd_pidfd_get_machine_name()</function>,
+    <function>sd_pidfd_get_slice()</function>,
+    <function>sd_pidfd_get_user_slice()</function> and
+    <function>sd_pidfd_get_cgroup()</function> calls operate similarly to their PID counterparts, but accept a
+    <constant>PIDFD</constant> instead of a <constant>PID</constant>, which means they are not subject to recycle
+    race conditions as the process is pinned by the file descriptor during the whole duration of the invocation.
+    Note that these require a kernel that supports <constant>PIDFD</constant>. A suitable file descriptor may be
+    acquired via
+    <citerefentry project='man-pages'><refentrytitle>pidfd_open</refentrytitle><manvolnum>2</manvolnum></citerefentry>.</para>
+
     <para>The <function>sd_peer_get_owner_uid()</function>,
     <function>sd_peer_get_session()</function>,
     <function>sd_peer_get_user_unit()</function>,
@@ -232,65 +299,59 @@
     <function>sd_peer_get_machine_name()</function>,
     <function>sd_peer_get_slice()</function>,
     <function>sd_peer_get_user_slice()</function> and
-    <function>sd_peer_get_cgroup()</function> calls operate similar to
-    their PID counterparts, but operate on a connected AF_UNIX socket
-    and retrieve information about the connected peer process. Note
-    that these fields are retrieved via <filename>/proc</filename>,
-    and hence are not suitable for authorization purposes, as they are
-    subject to races.</para>
+    <function>sd_peer_get_cgroup()</function> calls operate similarly to their PID counterparts, but accept a
+    connected <constant>AF_UNIX</constant> socket and retrieve information about the connected peer process.
+    Note that these fields are retrieved via <filename>/proc/</filename>, and hence are not suitable for
+    authorization purposes, as they are subject to races.</para>
   </refsect1>
 
   <refsect1>
     <title>Return Value</title>
 
-    <para>On success, these calls return 0 or a positive integer. On
-    failure, these calls return a negative errno-style error
-    code.</para>
-  </refsect1>
+    <para>On success, these calls return 0 or a positive integer. On failure, these calls return a negative
+    errno-style error code.</para>
 
-  <refsect1>
-    <title>Errors</title>
+    <refsect2>
+      <title>Errors</title>
 
-    <para>Returned errors may indicate the following problems:</para>
+      <para>Returned errors may indicate the following problems:</para>
 
-    <variablelist>
+      <variablelist>
 
-      <varlistentry>
-        <term><constant>-ESRCH</constant></term>
+        <varlistentry>
+          <term><constant>-ESRCH</constant></term>
 
-        <listitem><para>The specified PID does not refer to a running
-        process.</para>
-        </listitem>
-      </varlistentry>
+          <listitem><para>The specified PID does not refer to a running process.</para>
+          </listitem>
+        </varlistentry>
 
-      <varlistentry>
-        <term><constant>-EBADF</constant></term>
+        <varlistentry>
+          <term><constant>-EBADF</constant></term>
 
-        <listitem><para>The specified socket file descriptor was
-        invalid.</para></listitem>
-      </varlistentry>
+          <listitem><para>The specified socket file descriptor was invalid.</para></listitem>
+        </varlistentry>
 
-      <varlistentry>
-        <term><constant>-ENODATA</constant></term>
+        <varlistentry>
+          <term><constant>-ENODATA</constant></term>
 
-        <listitem><para>The given field is not specified for the described
-        process or peer.</para>
-        </listitem>
-      </varlistentry>
+          <listitem><para>The given field is not specified for the described process or peer.</para>
+          </listitem>
+        </varlistentry>
 
-      <varlistentry>
-        <term><constant>-EINVAL</constant></term>
+        <varlistentry>
+          <term><constant>-EINVAL</constant></term>
 
-        <listitem><para>An input parameter was invalid (out of range,
-        or NULL, where that is not accepted).</para></listitem>
-      </varlistentry>
+          <listitem><para>An input parameter was invalid (out of range, or <constant>NULL</constant>, where
+          that is not accepted).</para></listitem>
+        </varlistentry>
 
-      <varlistentry>
-        <term><constant>-ENOMEM</constant></term>
+        <varlistentry>
+          <term><constant>-ENOMEM</constant></term>
 
-        <listitem><para>Memory allocation failed.</para></listitem>
-      </varlistentry>
-    </variablelist>
+          <listitem><para>Memory allocation failed.</para></listitem>
+        </varlistentry>
+      </variablelist>
+    </refsect2>
   </refsect1>
 
   <refsect1>
@@ -306,16 +367,44 @@
   </refsect1>
 
   <refsect1>
+    <title>History</title>
+    <para><function>sd_peer_get_cgroup()</function>,
+    <function>sd_peer_get_machine_name()</function>,
+    <function>sd_peer_get_owner_uid()</function>,
+    <function>sd_peer_get_session()</function>,
+    <function>sd_peer_get_slice()</function>,
+    <function>sd_peer_get_unit()</function>,
+    <function>sd_peer_get_user_slice()</function>,
+    <function>sd_peer_get_user_unit()</function>,
+    <function>sd_pid_get_cgroup()</function>,
+    <function>sd_pid_get_machine_name()</function>,
+    <function>sd_pid_get_owner_uid()</function>,
+    <function>sd_pid_get_session()</function>,
+    <function>sd_pid_get_slice()</function>,
+    <function>sd_pid_get_unit()</function>,
+    <function>sd_pid_get_user_slice()</function>, and
+    <function>sd_pid_get_user_unit()</function> were added in version 236.</para>
+    <para><function>sd_pidfd_get_owner_uid()</function>,
+    <function>sd_pidfd_get_session()</function>,
+    <function>sd_pidfd_get_user_unit()</function>,
+    <function>sd_pidfd_get_unit()</function>,
+    <function>sd_pidfd_get_machine_name()</function>,
+    <function>sd_pidfd_get_slice()</function>,
+    <function>sd_pidfd_get_user_slice()</function>, and
+    <function>sd_pidfd_get_cgroup()</function> were added in version 253.</para>
+  </refsect1>
+
+  <refsect1>
     <title>See Also</title>
 
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd-login</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_session_is_active</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>getsid</refentrytitle><manvolnum>2</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd.slice</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd-machined.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd-login</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_session_is_active</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>getsid</refentrytitle><manvolnum>2</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd.slice</refentrytitle><manvolnum>5</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>systemd-machined.service</refentrytitle><manvolnum>8</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

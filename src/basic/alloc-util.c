@@ -1,11 +1,12 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <malloc.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "alloc-util.h"
 #include "macro.h"
-#include "util.h"
+#include "memory-util.h"
 
 void* memdup(const void *p, size_t l) {
         void *ret;
@@ -16,8 +17,7 @@ void* memdup(const void *p, size_t l) {
         if (!ret)
                 return NULL;
 
-        memcpy(ret, p, l);
-        return ret;
+        return memcpy_safe(ret, p, l);
 }
 
 void* memdup_suffix0(const void *p, size_t l) {
@@ -27,57 +27,110 @@ void* memdup_suffix0(const void *p, size_t l) {
 
         /* The same as memdup() but place a safety NUL byte after the allocated memory */
 
+        if (_unlikely_(l == SIZE_MAX)) /* prevent overflow */
+                return NULL;
+
         ret = malloc(l + 1);
         if (!ret)
                 return NULL;
 
-        *((uint8_t*) mempcpy(ret, p, l)) = 0;
-        return ret;
+        ((uint8_t*) ret)[l] = 0;
+        return memcpy_safe(ret, p, l);
 }
 
-void* greedy_realloc(void **p/*待realloc的指针*/, size_t *allocated/*当前内存长度*/, size_t need/*需要的长度*/, size_t size/*每个元素占内存大小*/) {
-        size_t a, newalloc;
+void* greedy_realloc(
+                void **p/*待realloc的指针*/,
+                size_t need/*需要的长度*/,
+                size_t size/*每个元素占内存大小*/) {
+
+        size_t newalloc;
         void *q;
 
         assert(p);
-        assert(allocated);
 
-        if (*allocated >= need)
+        /* We use malloc_usable_size() for determining the current allocated size. On all systems we care
+         * about this should be safe to rely on. Should there ever arise the need to avoid relying on this we
+         * can instead locally fall back to realloc() on every call, rounded up to the next exponent of 2 or
+         * so. */
+
+        if (*p && (size == 0 || (MALLOC_SIZEOF_SAFE(*p) / size >= need)))
         	/*已有的超过需要的，直接返回旧的*/
                 return *p;
 
+        if (_unlikely_(need > SIZE_MAX/2)) /* Overflow check */
+                return NULL;
         /*返回优化后的申请大小*/
-        newalloc = MAX(need * 2, 64u / size);
-        a = newalloc * size;
+        newalloc = need * 2;
 
-        /* check for overflows */
-        if (a < size * need)
+        if (!MUL_ASSIGN_SAFE(&newalloc, size))
                 return NULL;
 
-        q = realloc(*p, a);
+        if (newalloc < 64) /* Allocate at least 64 bytes */
+                newalloc = 64;
+
+        q = realloc(*p, newalloc);
         if (!q)
                 return NULL;
 
-        *p = q;
-        *allocated = newalloc;
-        return q;
+        return *p = q;
 }
 
-void* greedy_realloc0(void **p, size_t *allocated, size_t need, size_t size) {
-        size_t prev;
+void* greedy_realloc0(
+                void **p,
+                size_t need,
+                size_t size) {
+
+        size_t before, after;
         uint8_t *q;
 
         assert(p);
-        assert(allocated);
 
-        prev = *allocated;
+        before = MALLOC_SIZEOF_SAFE(*p); /* malloc_usable_size() will return 0 on NULL input, as per docs */
 
-        q = greedy_realloc(p, allocated, need, size);
+        q = greedy_realloc(p, need, size);
         if (!q)
                 return NULL;
 
-        if (*allocated > prev)
-                memzero(q + prev * size, (*allocated - prev) * size);
+        after = MALLOC_SIZEOF_SAFE(q);
+
+        if (size == 0) /* avoid division by zero */
+                before = 0;
+        else
+                before = (before / size) * size; /* Round down */
+
+        if (after > before)
+                memzero(q + before, after - before);
 
         return q;
+}
+
+void* greedy_realloc_append(
+                void **p,
+                size_t *n_p,
+                const void *from,
+                size_t n_from,
+                size_t size) {
+
+        uint8_t *q;
+
+        assert(p);
+        assert(n_p);
+        assert(from || n_from == 0);
+
+        if (n_from > SIZE_MAX - *n_p)
+                return NULL;
+
+        q = greedy_realloc(p, *n_p + n_from, size);
+        if (!q)
+                return NULL;
+
+        memcpy_safe(q + *n_p * size, from, n_from * size);
+
+        *n_p += n_from;
+
+        return q;
+}
+
+void *expand_to_usable(void *ptr, size_t newsize _unused_) {
+        return ptr;
 }

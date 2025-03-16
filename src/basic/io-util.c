@@ -1,21 +1,17 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <limits.h>
-#include <poll.h>
 #include <stdio.h>
-#include <time.h>
 #include <unistd.h>
 
+#include "errno-util.h"
 #include "io-util.h"
+#include "iovec-util.h"
 #include "string-util.h"
 #include "time-util.h"
 
 int flush_fd(int fd) {
-        struct pollfd pollfd = {
-                .fd = fd,
-                .events = POLLIN,
-        };
         int count = 0;
 
         /* Read from the specified file descriptor, until POLLIN is not set anymore, throwing away everything
@@ -28,19 +24,18 @@ int flush_fd(int fd) {
                 ssize_t l;
                 int r;
 
-                r = poll(&pollfd, 1, 0);
+                r = fd_wait_for_event(fd, POLLIN, 0);
                 if (r < 0) {
-                        if (errno == EINTR)
+                        if (r == -EINTR)
                                 continue;
 
-                        return -errno;
-
-                } else if (r == 0)
+                        return r;
+                }
+                if (r == 0)
                         return count;
 
                 l = read(fd, buf, sizeof(buf));
                 if (l < 0) {
-
                         if (errno == EINTR)
                                 continue;
 
@@ -56,14 +51,12 @@ int flush_fd(int fd) {
 }
 
 ssize_t loop_read(int fd, void *buf, size_t nbytes, bool do_poll) {
-        uint8_t *p = buf;
+        uint8_t *p = ASSERT_PTR(buf);
         ssize_t n = 0;
 
         assert(fd >= 0);
-        assert(buf);
 
-        /* If called with nbytes == 0, let's call read() at least
-         * once, to validate the operation */
+        /* If called with nbytes == 0, let's call read() at least once, to validate the operation */
 
         if (nbytes > (size_t) SSIZE_MAX)
                 return -EINVAL;
@@ -114,14 +107,29 @@ int loop_read_exact(int fd, void *buf, size_t nbytes, bool do_poll) {
         return 0;
 }
 
-int loop_write(int fd, const void *buf, size_t nbytes, bool do_poll) {
-        const uint8_t *p = buf;
+int loop_write_full(int fd, const void *buf, size_t nbytes, usec_t timeout) {
+        const uint8_t *p;
+        usec_t end;
+        int r;
 
         assert(fd >= 0);
-        assert(buf);
+        assert(buf || nbytes == 0);
 
-        if (_unlikely_(nbytes > (size_t) SSIZE_MAX))
-                return -EINVAL;
+        if (nbytes == 0) {
+                static const dummy_t dummy[0];
+                assert_cc(sizeof(dummy) == 0);
+                p = (const void*) dummy; /* Some valid pointer, in case NULL was specified */
+        } else {
+                if (nbytes == SIZE_MAX)
+                        nbytes = strlen(buf);
+                else if (_unlikely_(nbytes > (size_t) SSIZE_MAX))
+                        return -EINVAL;
+
+                p = buf;
+        }
+
+        /* When timeout is 0 or USEC_INFINITY this is not used. But we initialize it to a sensible value. */
+        end = timestamp_is_set(timeout) ? usec_add(now(CLOCK_MONOTONIC), timeout) : USEC_INFINITY;
 
         do {
                 ssize_t k;
@@ -131,16 +139,31 @@ int loop_write(int fd, const void *buf, size_t nbytes, bool do_poll) {
                         if (errno == EINTR)
                                 continue;
 
-                        if (errno == EAGAIN && do_poll) {
-                                /* We knowingly ignore any return value here,
-                                 * and expect that any error/EOF is reported
-                                 * via write() */
+                        if (errno != EAGAIN || timeout == 0)
+                                return -errno;
 
-                                (void) fd_wait_for_event(fd, POLLOUT, USEC_INFINITY);
-                                continue;
+                        usec_t wait_for;
+
+                        if (timeout == USEC_INFINITY)
+                                wait_for = USEC_INFINITY;
+                        else {
+                                usec_t t = now(CLOCK_MONOTONIC);
+                                if (t >= end)
+                                        return -ETIME;
+
+                                wait_for = usec_sub_unsigned(end, t);
                         }
 
-                        return -errno;
+                        r = fd_wait_for_event(fd, POLLOUT, wait_for);
+                        if (timeout == USEC_INFINITY || ERRNO_IS_NEG_TRANSIENT(r))
+                                /* If timeout == USEC_INFINITY we knowingly ignore any return value
+                                 * here, and expect that any error/EOF is reported via write() */
+                                continue;
+                        if (r < 0)
+                                return r;
+                        if (r == 0)
+                                return -ETIME;
+                        continue;
                 }
 
                 if (_unlikely_(nbytes > 0 && k == 0)) /* Can't really happen */
@@ -156,38 +179,68 @@ int loop_write(int fd, const void *buf, size_t nbytes, bool do_poll) {
 }
 
 int pipe_eof(int fd) {
-        struct pollfd pollfd = {
-                .fd = fd,
-                .events = POLLIN|POLLHUP,
-        };
-
         int r;
 
-        r = poll(&pollfd, 1, 0);
+        r = fd_wait_for_event(fd, POLLIN, 0);
+        if (r <= 0)
+                return r;
+
+        return !!(r & POLLHUP);
+}
+
+int ppoll_usec(struct pollfd *fds, size_t nfds, usec_t timeout) {
+        int r;
+
+        assert(fds || nfds == 0);
+
+        /* This is a wrapper around ppoll() that does primarily two things:
+         *
+         *  ✅ Takes a usec_t instead of a struct timespec
+         *
+         *  ✅ Guarantees that if an invalid fd is specified we return EBADF (i.e. converts POLLNVAL to
+         *     EBADF). This is done because EBADF is a programming error usually, and hence should bubble up
+         *     as error, and not be eaten up as non-error POLLNVAL event.
+         *
+         *  ⚠️ ⚠️ ⚠️ Note that this function does not add any special handling for EINTR. Don't forget
+         *  poll()/ppoll() will return with EINTR on any received signal always, there is no automatic
+         *  restarting via SA_RESTART available. Thus, typically you want to handle EINTR not as an error,
+         *  but just as reason to restart things, under the assumption you use a more appropriate mechanism
+         *  to handle signals, such as signalfd() or signal handlers. ⚠️ ⚠️ ⚠️
+         */
+
+        if (nfds == 0)
+                return 0;
+
+        r = ppoll(fds, nfds, timeout == USEC_INFINITY ? NULL : TIMESPEC_STORE(timeout), NULL);
         if (r < 0)
                 return -errno;
-
         if (r == 0)
                 return 0;
 
-        return pollfd.revents & POLLHUP;
+        for (size_t i = 0, n = r; i < nfds && n > 0; i++) {
+                if (fds[i].revents == 0)
+                        continue;
+                if (fds[i].revents & POLLNVAL)
+                        return -EBADF;
+                n--;
+        }
+
+        return r;
 }
 
-int fd_wait_for_event(int fd, int event, usec_t t) {
-
+int fd_wait_for_event(int fd, int event, usec_t timeout) {
         struct pollfd pollfd = {
                 .fd = fd,
                 .events = event,
         };
-
-        struct timespec ts;
         int r;
 
-        r = ppoll(&pollfd, 1, t == USEC_INFINITY ? NULL : timespec_store(&ts, t), NULL);
-        if (r < 0)
-                return -errno;
-        if (r == 0)
-                return 0;
+        /* ⚠️ ⚠️ ⚠️ Keep in mind you almost certainly want to handle -EINTR gracefully in the caller, see
+         * ppoll_usec() above! ⚠️ ⚠️ ⚠️ */
+
+        r = ppoll_usec(&pollfd, 1, timeout);
+        if (r <= 0)
+                return r;
 
         return pollfd.revents;
 }
@@ -232,7 +285,7 @@ ssize_t sparse_write(int fd, const void *p, size_t sz, size_t run_length) {
                                         return -EIO;
                         }
 
-                        if (lseek(fd, n, SEEK_CUR) == (off_t) -1)
+                        if (lseek(fd, n, SEEK_CUR) < 0)
                                 return -errno;
 
                         q += n;
@@ -252,13 +305,4 @@ ssize_t sparse_write(int fd, const void *p, size_t sz, size_t run_length) {
         }
 
         return q - (const uint8_t*) p;
-}
-
-char* set_iovec_string_field(struct iovec *iovec, size_t *n_iovec, const char *field, const char *value) {
-        char *x;
-
-        x = strappend(field, value);
-        if (x)
-                iovec[(*n_iovec)++] = IOVEC_MAKE_STRING(x);
-        return x;
 }

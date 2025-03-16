@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 typedef struct Device Device;
@@ -16,7 +16,7 @@ struct Device {
 
         dual_timestamp timestamp;
 
-        LIST_FIELDS(struct Device, devices);
+        LIST_FIELDS(Device, devices);
         LIST_HEAD(SessionDevice, session_devices);
 };
 

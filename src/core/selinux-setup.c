@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <stdio.h>
@@ -8,12 +8,15 @@
 #include <selinux/selinux.h>
 #endif
 
+#include "sd-messages.h"
+
+#include "initrd-util.h"
 #include "log.h"
 #include "macro.h"
 #include "selinux-setup.h"
 #include "selinux-util.h"
 #include "string-util.h"
-#include "util.h"
+#include "time-util.h"
 
 #if HAVE_SELINUX
 _printf_(2,3)
@@ -29,30 +32,28 @@ int mac_selinux_setup(bool *loaded_policy) {
         usec_t before_load, after_load;
         char *con;
         int r;
-        static const union selinux_callback cb = {
-                .func_log = null_log,
-        };
-
-        bool initialized = false;
+        bool initialized;
 
         assert(loaded_policy);
 
         /* Turn off all of SELinux' own logging, we want to do that */
-        selinux_set_callback(SELINUX_CB_LOG, cb);
+        selinux_set_callback(SELINUX_CB_LOG, (const union selinux_callback) { .func_log = null_log });
 
-        /* Don't load policy in the initrd if we don't appear to have
-         * it.  For the real root, we check below if we've already
-         * loaded policy, and return gracefully.
-         */
+        /* Don't load policy in the initrd if we don't appear to have it.  For the real root, we check below
+         * if we've already loaded policy, and return gracefully. */
         if (in_initrd() && access(selinux_path(), F_OK) < 0)
                 return 0;
 
         /* Already initialized by somebody else? */
         r = getcon_raw(&con);
-        if (r == 0) {
+        /* getcon_raw can return 0, and still give us a NULL pointer if /proc/self/attr/current is
+         * empty. SELinux guarantees this won't happen, but that file isn't specific to SELinux, and may be
+         * provided by some other arbitrary LSM with different semantics. */
+        if (r == 0 && con) {
                 initialized = !streq(con, "kernel");
                 freecon(con);
-        }
+        } else
+                initialized = false;
 
         /* Make sure we have no fds open while loading the policy and
          * transitioning */
@@ -62,8 +63,7 @@ int mac_selinux_setup(bool *loaded_policy) {
         before_load = now(CLOCK_MONOTONIC);
         r = selinux_init_load_policy(&enforce);
         if (r == 0) {
-                _cleanup_(mac_selinux_freep) char *label = NULL;
-                char timespan[FORMAT_TIMESPAN_MAX];
+                _cleanup_freecon_ char *label = NULL;
 
                 mac_selinux_retest();
 
@@ -83,7 +83,7 @@ int mac_selinux_setup(bool *loaded_policy) {
                 after_load = now(CLOCK_MONOTONIC);
 
                 log_info("Successfully loaded SELinux policy in %s.",
-                         format_timespan(timespan, sizeof(timespan), after_load - before_load, 0));
+                         FORMAT_TIMESPAN(after_load - before_load, 0));
 
                 *loaded_policy = true;
 
@@ -91,10 +91,10 @@ int mac_selinux_setup(bool *loaded_policy) {
                 log_open();
 
                 if (enforce > 0) {
-                        if (!initialized) {
-                                log_emergency("Failed to load SELinux policy.");
-                                return -EIO;
-                        }
+                        if (!initialized)
+                                return log_struct_errno(LOG_EMERG, SYNTHETIC_ERRNO(EIO),
+                                                        LOG_MESSAGE("Failed to load SELinux policy :%m"),
+                                                        "MESSAGE_ID=" SD_MESSAGE_SELINUX_FAILED_STR);
 
                         log_warning("Failed to load new SELinux policy. Continuing with old policy.");
                 } else

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include <stdbool.h>
@@ -9,13 +9,23 @@
 
 typedef enum ConditionType {
         CONDITION_ARCHITECTURE,
+        CONDITION_FIRMWARE,
         CONDITION_VIRTUALIZATION,
         CONDITION_HOST,
         CONDITION_KERNEL_COMMAND_LINE,
         CONDITION_KERNEL_VERSION,
+        CONDITION_CREDENTIAL,
         CONDITION_SECURITY,
         CONDITION_CAPABILITY,
         CONDITION_AC_POWER,
+        CONDITION_MEMORY,
+        CONDITION_CPUS,
+        CONDITION_ENVIRONMENT,
+        CONDITION_CPU_FEATURE,
+        CONDITION_OS_RELEASE,
+        CONDITION_MEMORY_PRESSURE,
+        CONDITION_CPU_PRESSURE,
+        CONDITION_IO_PRESSURE,
 
         CONDITION_NEEDS_UPDATE,
         CONDITION_FIRST_BOOT,
@@ -26,11 +36,10 @@ typedef enum ConditionType {
         CONDITION_PATH_IS_SYMBOLIC_LINK,
         CONDITION_PATH_IS_MOUNT_POINT,
         CONDITION_PATH_IS_READ_WRITE,
+        CONDITION_PATH_IS_ENCRYPTED,
         CONDITION_DIRECTORY_NOT_EMPTY,
         CONDITION_FILE_NOT_EMPTY,
         CONDITION_FILE_IS_EXECUTABLE,
-
-        CONDITION_NULL,
 
         CONDITION_USER,
         CONDITION_GROUP,
@@ -38,7 +47,7 @@ typedef enum ConditionType {
         CONDITION_CONTROL_GROUP_CONTROLLER,
 
         _CONDITION_TYPE_MAX,
-        _CONDITION_TYPE_INVALID = -1
+        _CONDITION_TYPE_INVALID = -EINVAL,
 } ConditionType;
 
 typedef enum ConditionResult {
@@ -47,7 +56,7 @@ typedef enum ConditionResult {
         CONDITION_FAILED,/*判定为假*/
         CONDITION_ERROR,/*判定时出错*/
         _CONDITION_RESULT_MAX,
-        _CONDITION_RESULT_INVALID = -1
+        _CONDITION_RESULT_INVALID = -EINVAL,
 } ConditionResult;
 
 typedef struct Condition {
@@ -64,13 +73,20 @@ typedef struct Condition {
 } Condition;
 
 Condition* condition_new(ConditionType type, const char *parameter, bool trigger, bool negate);
-void condition_free(Condition *c);
-Condition* condition_free_list(Condition *c);
+Condition* condition_free(Condition *c);
+Condition* condition_free_list_type(Condition *first, ConditionType type);
+static inline Condition* condition_free_list(Condition *first) {
+        return condition_free_list_type(first, _CONDITION_TYPE_INVALID);
+}
 
-int condition_test(Condition *c);
+int condition_test(Condition *c, char **env);
 
-void condition_dump(Condition *c, FILE *f, const char *prefix, const char *(*to_string)(ConditionType t));
-void condition_dump_list(Condition *c, FILE *f, const char *prefix, const char *(*to_string)(ConditionType t));
+typedef int (*condition_test_logger_t)(void *userdata, int level, int error, const char *file, int line, const char *func, const char *format, ...) _printf_(7, 8);
+typedef const char* (*condition_to_string_t)(ConditionType t) _const_;
+bool condition_test_list(Condition *first, char **env, condition_to_string_t to_string, condition_test_logger_t logger, void *userdata);
+
+void condition_dump(Condition *c, FILE *f, const char *prefix, condition_to_string_t to_string);
+void condition_dump_list(Condition *c, FILE *f, const char *prefix, condition_to_string_t to_string);
 
 const char* condition_type_to_string(ConditionType t) _const_;
 ConditionType condition_type_from_string(const char *s) _pure_;
@@ -89,6 +105,7 @@ static inline bool condition_takes_path(ConditionType t) {
                       CONDITION_PATH_IS_SYMBOLIC_LINK,
                       CONDITION_PATH_IS_MOUNT_POINT,
                       CONDITION_PATH_IS_READ_WRITE,
+                      CONDITION_PATH_IS_ENCRYPTED,
                       CONDITION_DIRECTORY_NOT_EMPTY,
                       CONDITION_FILE_NOT_EMPTY,
                       CONDITION_FILE_IS_EXECUTABLE,

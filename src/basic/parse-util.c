@@ -1,12 +1,11 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <inttypes.h>
-#include <linux/oom.h>
-#include <locale.h>
+#include <linux/ipv6.h>
+#include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/socket.h>
 
 #include "alloc-util.h"
@@ -14,22 +13,54 @@
 #include "extract-word.h"
 #include "locale-util.h"
 #include "macro.h"
-#include "missing.h"
+#include "missing_network.h"
 #include "parse-util.h"
 #include "process-util.h"
 #include "stat-util.h"
 #include "string-util.h"
+#include "strv.h"
 
 int parse_boolean(const char *v) {
         if (!v)
                 return -EINVAL;
 
-        if (streq(v, "1") || strcaseeq(v, "yes") || strcaseeq(v, "y") || strcaseeq(v, "true") || strcaseeq(v, "t") || strcaseeq(v, "on"))
+        if (STRCASE_IN_SET(v,
+                           "1",
+                           "yes",
+                           "y",
+                           "true",
+                           "t",
+                           "on"))
                 return 1;
-        else if (streq(v, "0") || strcaseeq(v, "no") || strcaseeq(v, "n") || strcaseeq(v, "false") || strcaseeq(v, "f") || strcaseeq(v, "off"))
+
+        if (STRCASE_IN_SET(v,
+                           "0",
+                           "no",
+                           "n",
+                           "false",
+                           "f",
+                           "off"))
                 return 0;
 
         return -EINVAL;
+}
+
+int parse_tristate_full(const char *v, const char *third, int *ret) {
+        int r;
+
+        if (isempty(v) || streq_ptr(v, third)) { /* Empty string is always taken as the third/invalid/auto state */
+                if (ret)
+                        *ret = -1;
+        } else {
+                r = parse_boolean(v);
+                if (r < 0)
+                        return r;
+
+                if (ret)
+                        *ret = r;
+        }
+
+        return 0;
 }
 
 //将e解析为pid
@@ -39,7 +70,6 @@ int parse_pid(const char *s, pid_t* ret_pid) {
         int r;
 
         assert(s);
-        assert(ret_pid);
 
         r = safe_atolu(s, &ul);
         if (r < 0)
@@ -53,36 +83,37 @@ int parse_pid(const char *s, pid_t* ret_pid) {
         if (!pid_is_valid(pid))
                 return -ERANGE;
 
-        *ret_pid = pid;
+        if (ret_pid)
+                *ret_pid = pid;
         return 0;
 }
 
 int parse_mode(const char *s, mode_t *ret) {
-        char *x;
-        long l;
+        unsigned m;
+        int r;
 
         assert(s);
-        assert(ret);
 
-        s += strspn(s, WHITESPACE);
-        if (s[0] == '-')
+        r = safe_atou_full(s, 8 |
+                           SAFE_ATO_REFUSE_PLUS_MINUS, /* Leading '+' or even '-' char? that's just weird,
+                                                        * refuse. User might have wanted to add mode flags or
+                                                        * so, but this parser doesn't allow that, so let's
+                                                        * better be safe. */
+                           &m);
+        if (r < 0)
+                return r;
+        if (m > 07777)
                 return -ERANGE;
 
-        errno = 0;
-        l = strtol(s, &x, 8);
-        if (errno > 0)
-                return -errno;
-        if (!x || x == s || *x != 0)
-                return -EINVAL;
-        if (l < 0 || l  > 07777)
-                return -ERANGE;
-
-        *ret = (mode_t) l;
+        if (ret)
+                *ret = m;
         return 0;
 }
 
-int parse_ifindex(const char *s, int *ret) {
+int parse_ifindex(const char *s) {
         int ifi, r;
+
+        assert(s);
 
         r = safe_atoi(s, &ifi);
         if (r < 0)
@@ -90,13 +121,11 @@ int parse_ifindex(const char *s, int *ret) {
         if (ifi <= 0)
                 return -EINVAL;
 
-        *ret = ifi;
-        return 0;
+        return ifi;
 }
 
 int parse_mtu(int family, const char *s, uint32_t *ret) {
-        uint64_t u;
-        size_t m;
+        uint64_t u, m;
         int r;
 
         r = parse_size(s, 1024, &u);
@@ -106,10 +135,16 @@ int parse_mtu(int family, const char *s, uint32_t *ret) {
         if (u > UINT32_MAX)
                 return -ERANGE;
 
-        if (family == AF_INET6)
+        switch (family) {
+        case AF_INET:
+                m = IPV4_MIN_MTU; /* This is 68 */
+                break;
+        case AF_INET6:
                 m = IPV6_MIN_MTU; /* This is 1280 */
-        else
-                m = IPV4_MIN_MTU; /* For all other protocols, including 'unspecified' we assume the IPv4 minimal MTU */
+                break;
+        default:
+                m = 0;
+        }
 
         if (u < m)
                 return -ERANGE;
@@ -200,7 +235,7 @@ int parse_size(const char *t, uint64_t base, uint64_t *size) {
                         e++;
 
                         /* strtoull() itself would accept space/+/- */
-                        if (*e >= '0' && *e <= '9') {
+                        if (ascii_isdigit(*e)) {
                                 unsigned long long l2;
                                 char *e2;
 
@@ -243,6 +278,26 @@ int parse_size(const char *t, uint64_t base, uint64_t *size) {
 
         *size = r;
 
+        return 0;
+}
+
+int parse_sector_size(const char *t, uint64_t *ret) {
+        int r;
+
+        assert(t);
+        assert(ret);
+
+        uint64_t ss;
+
+        r = safe_atou64(t, &ss);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse sector size parameter %s", t);
+        if (ss < 512 || ss > 4096) /* Allow up to 4K due to dm-crypt support and 4K alignment by the homed LUKS backend */
+                return log_error_errno(SYNTHETIC_ERRNO(ERANGE), "Sector size not between 512 and 4096: %s", t);
+        if (!ISPOWEROF2(ss))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Sector size not power of 2: %s", t);
+
+        *ret = ss;
         return 0;
 }
 
@@ -303,83 +358,45 @@ int parse_errno(const char *t) {
         return e;
 }
 
-int parse_syscall_and_errno(const char *in, char **name, int *error) {
-        _cleanup_free_ char *n = NULL;
-        char *p;
-        int e = -1;
+int parse_fd(const char *t) {
+        int r, fd;
 
-        assert(in);
-        assert(name);
-        assert(error);
+        assert(t);
 
-        /*
-         * This parse "syscall:errno" like "uname:EILSEQ", "@sync:255".
-         * If errno is omitted, then error is set to -1.
-         * Empty syscall name is not allowed.
-         * Here, we do not check that the syscall name is valid or not.
-         */
+        r = safe_atoi(t, &fd);
+        if (r < 0)
+                return r;
 
-        p = strchr(in, ':');
-        if (p) {
-                e = parse_errno(p + 1);
-                if (e < 0)
-                        return e;
+        if (fd < 0)
+                return -EBADF;
 
-                n = strndup(in, p - in);
-        } else
-                n = strdup(in);
-
-        if (!n)
-                return -ENOMEM;
-
-        if (isempty(n))
-                return -EINVAL;
-
-        *error = e;
-        *name = TAKE_PTR(n);
-
-        return 0;
+        return fd;
 }
 
-char *format_bytes(char *buf, size_t l, uint64_t t) {
-        unsigned i;
+static const char *mangle_base(const char *s, unsigned *base) {
+        const char *k;
 
-        /* This only does IEC units so far */
+        assert(s);
+        assert(base);
 
-        static const struct {
-                const char *suffix;
-                uint64_t factor;
-        } table[] = {
-                { "E", UINT64_C(1024)*UINT64_C(1024)*UINT64_C(1024)*UINT64_C(1024)*UINT64_C(1024)*UINT64_C(1024) },
-                { "P", UINT64_C(1024)*UINT64_C(1024)*UINT64_C(1024)*UINT64_C(1024)*UINT64_C(1024) },
-                { "T", UINT64_C(1024)*UINT64_C(1024)*UINT64_C(1024)*UINT64_C(1024) },
-                { "G", UINT64_C(1024)*UINT64_C(1024)*UINT64_C(1024) },
-                { "M", UINT64_C(1024)*UINT64_C(1024) },
-                { "K", UINT64_C(1024) },
-        };
+        /* Base already explicitly specified, then don't do anything. */
+        if (SAFE_ATO_MASK_FLAGS(*base) != 0)
+                return s;
 
-        if (t == (uint64_t) -1)
-                return NULL;
-
-        for (i = 0; i < ELEMENTSOF(table); i++) {
-
-                if (t >= table[i].factor) {
-                        snprintf(buf, l,
-                                 "%" PRIu64 ".%" PRIu64 "%s",
-                                 t / table[i].factor,
-                                 ((t*UINT64_C(10)) / table[i].factor) % UINT64_C(10),
-                                 table[i].suffix);
-
-                        goto finish;
-                }
+        /* Support Python 3 style "0b" and 0x" prefixes, because they truly make sense, much more than C's "0" prefix for octal. */
+        k = STARTSWITH_SET(s, "0b", "0B");
+        if (k) {
+                *base = 2 | (*base & SAFE_ATO_ALL_FLAGS);
+                return k;
         }
 
-        snprintf(buf, l, "%" PRIu64 "B", t);
+        k = STARTSWITH_SET(s, "0o", "0O");
+        if (k) {
+                *base = 8 | (*base & SAFE_ATO_ALL_FLAGS);
+                return k;
+        }
 
-finish:
-        buf[l-1] = 0;
-        return buf;
-
+        return s;
 }
 
 int safe_atou_full(const char *s, unsigned base, unsigned *ret_u) {
@@ -387,43 +404,79 @@ int safe_atou_full(const char *s, unsigned base, unsigned *ret_u) {
         unsigned long l;
 
         assert(s);
-        assert(ret_u);
-        assert(base <= 16);
+        assert(SAFE_ATO_MASK_FLAGS(base) <= 16);
 
-        /* strtoul() is happy to parse negative values, and silently
-         * converts them to unsigned values without generating an
-         * error. We want a clean error, hence let's look for the "-"
-         * prefix on our own, and generate an error. But let's do so
-         * only after strtoul() validated that the string is clean
-         * otherwise, so that we return EINVAL preferably over
-         * ERANGE. */
+        /* strtoul() is happy to parse negative values, and silently converts them to unsigned values without
+         * generating an error. We want a clean error, hence let's look for the "-" prefix on our own, and
+         * generate an error. But let's do so only after strtoul() validated that the string is clean
+         * otherwise, so that we return EINVAL preferably over ERANGE. */
+
+        if (FLAGS_SET(base, SAFE_ATO_REFUSE_LEADING_WHITESPACE) &&
+            strchr(WHITESPACE, s[0]))
+                return -EINVAL;
 
         s += strspn(s, WHITESPACE);
 
+        if (FLAGS_SET(base, SAFE_ATO_REFUSE_PLUS_MINUS) &&
+            IN_SET(s[0], '+', '-'))
+                return -EINVAL; /* Note that we check the "-" prefix again a second time below, but return a
+                                 * different error. I.e. if the SAFE_ATO_REFUSE_PLUS_MINUS flag is set we
+                                 * blanket refuse +/- prefixed integers, while if it is missing we'll just
+                                 * return ERANGE, because the string actually parses correctly, but doesn't
+                                 * fit in the return type. */
+
+        if (FLAGS_SET(base, SAFE_ATO_REFUSE_LEADING_ZERO) &&
+            s[0] == '0' && !streq(s, "0"))
+                return -EINVAL; /* This is particularly useful to avoid ambiguities between C's octal
+                                 * notation and assumed-to-be-decimal integers with a leading zero. */
+
+        s = mangle_base(s, &base);
+
         errno = 0;
-        l = strtoul(s, &x, base);
+        l = strtoul(s, &x, SAFE_ATO_MASK_FLAGS(base) /* Let's mask off the flags bits so that only the actual
+                                                      * base is left */);
         if (errno > 0)
                 return -errno;
         if (!x || x == s || *x != 0)
                 return -EINVAL;
-        if (s[0] == '-')
+        if (l != 0 && s[0] == '-')
                 return -ERANGE;
         if ((unsigned long) (unsigned) l != l)
                 return -ERANGE;
 
-        *ret_u = (unsigned) l;
+        if (ret_u)
+                *ret_u = (unsigned) l;
+
+        return 0;
+}
+
+int safe_atou_bounded(const char *s, unsigned min, unsigned max, unsigned *ret) {
+        unsigned v;
+        int r;
+
+        r = safe_atou(s, &v);
+        if (r < 0)
+                return r;
+
+        if (v < min || v > max)
+                return -ERANGE;
+
+        *ret = v;
         return 0;
 }
 
 int safe_atoi(const char *s, int *ret_i) {
+        unsigned base = 0;
         char *x = NULL;
         long l;
 
         assert(s);
-        assert(ret_i);
+
+        s += strspn(s, WHITESPACE);
+        s = mangle_base(s, &base);
 
         errno = 0;
-        l = strtol(s, &x, 0);
+        l = strtol(s, &x, base);
         if (errno > 0)
                 return -errno;
         if (!x || x == s || *x != 0)
@@ -431,108 +484,113 @@ int safe_atoi(const char *s, int *ret_i) {
         if ((long) (int) l != l)
                 return -ERANGE;
 
-        *ret_i = (int) l;
+        if (ret_i)
+                *ret_i = (int) l;
+
         return 0;
 }
 
-int safe_atollu(const char *s, long long unsigned *ret_llu) {
+int safe_atollu_full(const char *s, unsigned base, unsigned long long *ret_llu) {
         char *x = NULL;
         unsigned long long l;
 
         assert(s);
-        assert(ret_llu);
+        assert(SAFE_ATO_MASK_FLAGS(base) <= 16);
+
+        if (FLAGS_SET(base, SAFE_ATO_REFUSE_LEADING_WHITESPACE) &&
+            strchr(WHITESPACE, s[0]))
+                return -EINVAL;
 
         s += strspn(s, WHITESPACE);
 
+        if (FLAGS_SET(base, SAFE_ATO_REFUSE_PLUS_MINUS) &&
+            IN_SET(s[0], '+', '-'))
+                return -EINVAL;
+
+        if (FLAGS_SET(base, SAFE_ATO_REFUSE_LEADING_ZERO) &&
+            s[0] == '0' && s[1] != 0)
+                return -EINVAL;
+
+        s = mangle_base(s, &base);
+
         errno = 0;
-        l = strtoull(s, &x, 0);
+        l = strtoull(s, &x, SAFE_ATO_MASK_FLAGS(base));
         if (errno > 0)
                 return -errno;
         if (!x || x == s || *x != 0)
                 return -EINVAL;
-        if (*s == '-')
+        if (l != 0 && s[0] == '-')
                 return -ERANGE;
 
-        *ret_llu = l;
+        if (ret_llu)
+                *ret_llu = l;
+
         return 0;
 }
 
 int safe_atolli(const char *s, long long int *ret_lli) {
+        unsigned base = 0;
         char *x = NULL;
         long long l;
 
         assert(s);
-        assert(ret_lli);
+
+        s += strspn(s, WHITESPACE);
+        s = mangle_base(s, &base);
 
         errno = 0;
-        l = strtoll(s, &x, 0);
+        l = strtoll(s, &x, base);
         if (errno > 0)
                 return -errno;
         if (!x || x == s || *x != 0)
                 return -EINVAL;
 
-        *ret_lli = l;
+        if (ret_lli)
+                *ret_lli = l;
+
         return 0;
 }
 
-int safe_atou8(const char *s, uint8_t *ret) {
-        char *x = NULL;
-        unsigned long l;
+int safe_atou8_full(const char *s, unsigned base, uint8_t *ret) {
+        unsigned u;
+        int r;
 
-        assert(s);
-        assert(ret);
-
-        s += strspn(s, WHITESPACE);
-
-        errno = 0;
-        l = strtoul(s, &x, 0);
-        if (errno > 0)
-                return -errno;
-        if (!x || x == s || *x != 0)
-                return -EINVAL;
-        if (s[0] == '-')
-                return -ERANGE;
-        if ((unsigned long) (uint8_t) l != l)
+        r = safe_atou_full(s, base, &u);
+        if (r < 0)
+                return r;
+        if (u > UINT8_MAX)
                 return -ERANGE;
 
-        *ret = (uint8_t) l;
+        *ret = (uint8_t) u;
         return 0;
 }
 
 int safe_atou16_full(const char *s, unsigned base, uint16_t *ret) {
-        char *x = NULL;
-        unsigned long l;
+        unsigned u;
+        int r;
 
-        assert(s);
-        assert(ret);
-        assert(base <= 16);
-
-        s += strspn(s, WHITESPACE);
-
-        errno = 0;
-        l = strtoul(s, &x, base);
-        if (errno > 0)
-                return -errno;
-        if (!x || x == s || *x != 0)
-                return -EINVAL;
-        if (s[0] == '-')
-                return -ERANGE;
-        if ((unsigned long) (uint16_t) l != l)
+        r = safe_atou_full(s, base, &u);
+        if (r < 0)
+                return r;
+        if (u > UINT16_MAX)
                 return -ERANGE;
 
-        *ret = (uint16_t) l;
+        *ret = (uint16_t) u;
         return 0;
 }
 
 int safe_atoi16(const char *s, int16_t *ret) {
+        unsigned base = 0;
         char *x = NULL;
         long l;
 
         assert(s);
-        assert(ret);
+
+        s += strspn(s, WHITESPACE);
+        s = mangle_base(s, &base);
 
         errno = 0;
-        l = strtol(s, &x, 0);
+        l = strtol(s, &x, base);
         if (errno > 0)
                 return -errno;
         if (!x || x == s || *x != 0)
@@ -540,7 +598,9 @@ int safe_atoi16(const char *s, int16_t *ret) {
         if ((long) (int16_t) l != l)
                 return -ERANGE;
 
-        *ret = (int16_t) l;
+        if (ret)
+                *ret = (int16_t) l;
+
         return 0;
 }
 
@@ -550,7 +610,6 @@ int safe_atod(const char *s, double *ret_d) {
         double d = 0;
 
         assert(s);
-        assert(ret_d);
 
         loc = newlocale(LC_NUMERIC_MASK, "C", (locale_t) 0);
         if (loc == (locale_t) 0)
@@ -563,20 +622,21 @@ int safe_atod(const char *s, double *ret_d) {
         if (!x || x == s || *x != 0)
                 return -EINVAL;
 
-        *ret_d = (double) d;
+        if (ret_d)
+                *ret_d = (double) d;
+
         return 0;
 }
 
 int parse_fractional_part_u(const char **p, size_t digits, unsigned *res) {
-        size_t i;
         unsigned val = 0;
         const char *s;
 
         s = *p;
 
         /* accept any number of digits, strtoull is limited to 19 */
-        for (i=0; i < digits; i++,s++) {
-                if (*s < '0' || *s > '9') {
+        for (size_t i = 0; i < digits; i++, s++) {
+                if (!ascii_isdigit(*s)) {
                         if (i == 0)
                                 return -EINVAL;
 
@@ -603,87 +663,6 @@ int parse_fractional_part_u(const char **p, size_t digits, unsigned *res) {
         return 0;
 }
 
-int parse_percent_unbounded(const char *p) {
-        const char *pc, *n;
-        int r, v;
-
-        pc = endswith(p, "%");
-        if (!pc)
-                return -EINVAL;
-
-        n = strndupa(p, pc - p);
-        r = safe_atoi(n, &v);
-        if (r < 0)
-                return r;
-        if (v < 0)
-                return -ERANGE;
-
-        return v;
-}
-
-int parse_percent(const char *p) {
-        int v;
-
-        v = parse_percent_unbounded(p);
-        if (v > 100)
-                return -ERANGE;
-
-        return v;
-}
-
-int parse_permille_unbounded(const char *p) {
-        const char *pc, *pm, *dot, *n;
-        int r, q, v;
-
-        pm = endswith(p, "‰");
-        if (pm) {
-                n = strndupa(p, pm - p);
-                r = safe_atoi(n, &v);
-                if (r < 0)
-                        return r;
-                if (v < 0)
-                        return -ERANGE;
-        } else {
-                pc = endswith(p, "%");
-                if (!pc)
-                        return -EINVAL;
-
-                dot = memchr(p, '.', pc - p);
-                if (dot) {
-                        if (dot + 2 != pc)
-                                return -EINVAL;
-                        if (dot[1] < '0' || dot[1] > '9')
-                                return -EINVAL;
-                        q = dot[1] - '0';
-                        n = strndupa(p, dot - p);
-                } else {
-                        q = 0;
-                        n = strndupa(p, pc - p);
-                }
-                r = safe_atoi(n, &v);
-                if (r < 0)
-                        return r;
-                if (v < 0)
-                        return -ERANGE;
-                if (v > (INT_MAX - q) / 10)
-                        return -ERANGE;
-
-                v = v * 10 + q;
-        }
-
-        return v;
-}
-
-int parse_permille(const char *p) {
-        int v;
-
-        v = parse_permille_unbounded(p);
-        if (v > 1000)
-                return -ERANGE;
-
-        return v;
-}
-
 int parse_nice(const char *p, int *ret) {
         int n, r;
 
@@ -702,7 +681,7 @@ int parse_ip_port(const char *s, uint16_t *ret) {
         uint16_t l;
         int r;
 
-        r = safe_atou16(s, &l);
+        r = safe_atou16_full(s, SAFE_ATO_REFUSE_LEADING_WHITESPACE, &l);
         if (r < 0)
                 return r;
 
@@ -714,7 +693,7 @@ int parse_ip_port(const char *s, uint16_t *ret) {
         return 0;
 }
 
-int parse_ip_port_range(const char *s, uint16_t *low, uint16_t *high) {
+int parse_ip_port_range(const char *s, uint16_t *low, uint16_t *high, bool allow_zero) {
         unsigned l, h;
         int r;
 
@@ -722,7 +701,10 @@ int parse_ip_port_range(const char *s, uint16_t *low, uint16_t *high) {
         if (r < 0)
                 return r;
 
-        if (l <= 0 || l > 65535 || h <= 0 || h > 65535)
+        if (l > 65535 || h > 65535)
+                return -EINVAL;
+
+        if (!allow_zero && (l == 0 || h == 0))
                 return -EINVAL;
 
         if (h < l)
@@ -731,34 +713,6 @@ int parse_ip_port_range(const char *s, uint16_t *low, uint16_t *high) {
         *low = l;
         *high = h;
 
-        return 0;
-}
-
-int parse_dev(const char *s, dev_t *ret) {
-        const char *major;
-        unsigned x, y;
-        size_t n;
-        int r;
-
-        n = strspn(s, DIGITS);
-        if (n == 0)
-                return -EINVAL;
-        if (s[n] != ':')
-                return -EINVAL;
-
-        major = strndupa(s, n);
-        r = safe_atou(major, &x);
-        if (r < 0)
-                return r;
-
-        r = safe_atou(s + n + 1, &y);
-        if (r < 0)
-                return r;
-
-        if (!DEVICE_MAJOR_VALID(x) || !DEVICE_MINOR_VALID(y))
-                return -ERANGE;
-
-        *ret = makedev(x, y);
         return 0;
 }
 
@@ -772,9 +726,70 @@ int parse_oom_score_adjust(const char *s, int *ret) {
         if (r < 0)
                 return r;
 
-        if (v < OOM_SCORE_ADJ_MIN || v > OOM_SCORE_ADJ_MAX)
+        if (!oom_score_adjust_is_valid(v))
                 return -ERANGE;
 
         *ret = v;
         return 0;
+}
+
+int store_loadavg_fixed_point(unsigned long i, unsigned long f, loadavg_t *ret) {
+        assert(ret);
+
+        if (i >= (~0UL << LOADAVG_PRECISION_BITS))
+                return -ERANGE;
+
+        i = i << LOADAVG_PRECISION_BITS;
+        f = DIV_ROUND_UP((f << LOADAVG_PRECISION_BITS), 100);
+
+        if (f >= LOADAVG_FIXED_POINT_1_0)
+                return -ERANGE;
+
+        *ret = i | f;
+        return 0;
+}
+
+int parse_loadavg_fixed_point(const char *s, loadavg_t *ret) {
+        const char *d, *f_str, *i_str;
+        unsigned long i, f;
+        int r;
+
+        assert(s);
+        assert(ret);
+
+        d = strchr(s, '.');
+        if (!d)
+                return -EINVAL;
+
+        i_str = strndupa_safe(s, d - s);
+        f_str = d + 1;
+
+        r = safe_atolu_full(i_str, 10, &i);
+        if (r < 0)
+                return r;
+
+        r = safe_atolu_full(f_str, 10, &f);
+        if (r < 0)
+                return r;
+
+        return store_loadavg_fixed_point(i, f, ret);
+}
+
+/* Limitations are described in https://www.netfilter.org/projects/nftables/manpage.html and
+ * https://bugzilla.netfilter.org/show_bug.cgi?id=1175 */
+bool nft_identifier_valid(const char *id) {
+        if (!id)
+                return false;
+
+        size_t len = strlen(id);
+        if (len == 0 || len > 31)
+                return false;
+
+        if (!ascii_isalpha(id[0]))
+                return false;
+
+        for (size_t i = 1; i < len; i++)
+                if (!ascii_isalpha(id[i]) && !ascii_isdigit(id[i]) && !IN_SET(id[i], '/', '\\', '_', '.'))
+                        return false;
+        return true;
 }

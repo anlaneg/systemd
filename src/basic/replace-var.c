@@ -1,9 +1,8 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <stddef.h>
 #include <stdlib.h>
-#include <string.h>
 
 #include "alloc-util.h"
 #include "macro.h"
@@ -37,7 +36,7 @@ static int get_variable(const char *b, char **r) {
         return 1;
 }
 
-char *replace_var(const char *text, char *(*lookup)(const char *variable, void *userdata), void *userdata) {
+char* replace_var(const char *text, char *(*lookup)(const char *variable, void *userdata), void *userdata) {
         char *r, *t;
         const char *f;
         size_t l;

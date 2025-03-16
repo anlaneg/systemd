@@ -1,10 +1,7 @@
 <?xml version='1.0'?>
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-"http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
-
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
--->
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
 <refentry id="sd_event_new" xmlns:xi="http://www.w3.org/2001/XInclude">
 
@@ -64,7 +61,7 @@
       <funcprototype>
         <funcdef>int <function>sd_event_get_tid</function></funcdef>
         <paramdef>sd_event *<parameter>event</parameter></paramdef>
-        <paramdef>pid_t *<parameter>tid</parameter></paramdef>
+        <paramdef>pid_t *<parameter>ret</parameter></paramdef>
       </funcprototype>
 
     </funcsynopsis>
@@ -134,12 +131,14 @@
     automatically as the code block is left:</para>
 
     <programlisting>{
-        __attribute__((cleanup(sd_event_unrefp)) sd_event *event = NULL;
+        __attribute__((cleanup(sd_event_unrefp))) sd_event *event = NULL;
         int r;
         …
         r = sd_event_default(&amp;event);
-        if (r &lt; 0)
-                fprintf(stderr, "Failed to allocate event loop: %s\n", strerror(-r));
+        if (r &lt; 0) {
+          errno = -r;
+          fprintf(stderr, "Failed to allocate event loop: %m\n");
+        }
         …
 }</programlisting>
 
@@ -161,63 +160,69 @@
   <refsect1>
     <title>Return Value</title>
 
-    <para>On success, <function>sd_event_new()</function>,
-    <function>sd_event_default()</function> and
-    <function>sd_event_get_tid()</function> return 0 or a positive
-    integer. On failure, they return a negative errno-style error
-    code. <function>sd_event_ref()</function> always returns a pointer
-    to the event loop object passed
-    in. <function>sd_event_unref()</function> always returns
+    <para>On success, <function>sd_event_new()</function>, <function>sd_event_default()</function> and
+    <function>sd_event_get_tid()</function> return 0 or a positive integer. On failure, they return a
+    negative errno-style error code. <function>sd_event_ref()</function> always returns a pointer to the
+    event loop object passed in. <function>sd_event_unref()</function> always returns
     <constant>NULL</constant>.</para>
-  </refsect1>
 
-  <refsect1>
-    <title>Errors</title>
+    <refsect2>
+      <title>Errors</title>
 
-    <para>Returned errors may indicate the following problems:</para>
+      <para>Returned errors may indicate the following problems:</para>
 
-    <variablelist>
-      <varlistentry>
-        <term><constant>-ENOMEM</constant></term>
+      <variablelist>
+        <varlistentry>
+          <term><constant>-ENOMEM</constant></term>
 
-        <listitem><para>Not enough memory to allocate the object.</para></listitem>
-      </varlistentry>
+          <listitem><para>Not enough memory to allocate the object.</para></listitem>
+        </varlistentry>
 
-      <varlistentry>
-        <term><constant>-EMFILE</constant></term>
+        <varlistentry>
+          <term><constant>-EMFILE</constant></term>
 
-        <listitem><para>The maximum number of event loops has been allocated.</para></listitem>
+          <listitem><para>The maximum number of event loops has been allocated.</para></listitem>
 
-      </varlistentry>
+        </varlistentry>
 
-      <varlistentry>
-        <term><constant>-ENXIO</constant></term>
+        <varlistentry>
+          <term><constant>-ENXIO</constant></term>
 
-        <listitem><para><function>sd_event_get_tid()</function> was
-        invoked on an event loop object that was not allocated with
-        <function>sd_event_default()</function>.</para></listitem>
-      </varlistentry>
+          <listitem><para><function>sd_event_get_tid()</function> was invoked on an event loop object that
+          was not allocated with <function>sd_event_default()</function>.</para></listitem>
+        </varlistentry>
 
-    </variablelist>
+      </variablelist>
+    </refsect2>
   </refsect1>
 
   <xi:include href="libsystemd-pkgconfig.xml" />
 
   <refsect1>
+    <title>History</title>
+    <para><function>sd_event_new()</function>,
+    <function>sd_event_default()</function>,
+    <function>sd_event_ref()</function>, and
+    <function>sd_event_unref()</function> were added in version 213.</para>
+    <para><function>sd_event_unrefp()</function> and
+    <function>sd_event_get_tid()</function> were added in version 229.</para>
+  </refsect1>
+
+  <refsect1>
     <title>See Also</title>
 
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd-event</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_event_add_io</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_event_add_time</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_event_add_signal</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_event_add_child</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_event_add_inotify</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_event_add_defer</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_event_run</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry project='man-pages'><refentrytitle>gettid</refentrytitle><manvolnum>2</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd-event</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_event_add_io</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_event_add_time</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_event_add_signal</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_event_add_child</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_event_add_inotify</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_event_add_defer</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_event_run</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry project='man-pages'><refentrytitle>gettid</refentrytitle><manvolnum>2</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

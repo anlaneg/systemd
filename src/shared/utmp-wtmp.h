@@ -1,13 +1,14 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include <stdbool.h>
 #include <sys/types.h>
 
 #include "time-util.h"
-#include "util.h"
 
 #if ENABLE_UTMP
+#include <utmpx.h>
+
 int utmp_get_runlevel(int *runlevel, int *previous);
 
 int utmp_put_shutdown(void);
@@ -17,12 +18,15 @@ int utmp_put_runlevel(int runlevel, int previous);
 int utmp_put_dead_process(const char *id, pid_t pid, int code, int status);
 int utmp_put_init_process(const char *id, pid_t pid, pid_t sid, const char *line, int ut_type, const char *user);
 
-int utmp_wall(
-        const char *message,
-        const char *username,
-        const char *origin_tty,
-        bool (*match_tty)(const char *tty, void *userdata),
-        void *userdata);
+static inline bool utxent_start(void) {
+        setutxent();
+        return true;
+}
+static inline void utxent_cleanup(bool *initialized) {
+        assert(initialized);
+        if (*initialized)
+                endutxent();
+}
 
 #else /* ENABLE_UTMP */
 
@@ -42,14 +46,6 @@ static inline int utmp_put_dead_process(const char *id, pid_t pid, int code, int
         return 0;
 }
 static inline int utmp_put_init_process(const char *id, pid_t pid, pid_t sid, const char *line, int ut_type, const char *user) {
-        return 0;
-}
-static inline int utmp_wall(
-                const char *message,
-                const char *username,
-                const char *origin_tty,
-                bool (*match_tty)(const char *tty, void *userdata),
-                void *userdata) {
         return 0;
 }
 

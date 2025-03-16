@@ -1,27 +1,24 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "sd-messages.h"
 
 #include "alloc-util.h"
 #include "conf-files.h"
-#include "def.h"
+#include "constants.h"
 #include "dns-domain.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "hexdecoct.h"
+#include "nulstr-util.h"
 #include "parse-util.h"
-#include "resolved-dns-trust-anchor.h"
 #include "resolved-dns-dnssec.h"
+#include "resolved-dns-trust-anchor.h"
 #include "set.h"
+#include "sort-util.h"
 #include "string-util.h"
 #include "strv.h"
 
 static const char trust_anchor_dirs[] = CONF_PATHS_NULSTR("dnssec-trust-anchors.d");
-
-/* The first DS RR from https://data.iana.org/root-anchors/root-anchors.xml, retrieved December 2015 */
-static const uint8_t root_digest1[] =
-        { 0x49, 0xAA, 0xC1, 0x1D, 0x7B, 0x6F, 0x64, 0x46, 0x70, 0x2E, 0x54, 0xA1, 0x60, 0x73, 0x71, 0x60,
-          0x7A, 0x1A, 0x41, 0x85, 0x52, 0x00, 0xFD, 0x2C, 0xE1, 0xCD, 0xDE, 0x32, 0xF2, 0x4E, 0x8F, 0xB5 };
 
 /* The second DS RR from https://data.iana.org/root-anchors/root-anchors.xml, retrieved February 2017 */
 static const uint8_t root_digest2[] =
@@ -63,7 +60,7 @@ static int add_root_ksk(
         if (!rr->ds.digest)
                 return  -ENOMEM;
 
-        r = dns_answer_add(answer, rr, 0, DNS_ANSWER_AUTHENTICATED);
+        r = dns_answer_add(answer, rr, 0, DNS_ANSWER_AUTHENTICATED, NULL);
         if (r < 0)
                 return r;
 
@@ -94,11 +91,7 @@ static int dns_trust_anchor_add_builtin_positive(DnsTrustAnchor *d) {
         if (!answer)
                 return -ENOMEM;
 
-        /* Add the two RRs from https://data.iana.org/root-anchors/root-anchors.xml */
-        r = add_root_ksk(answer, key, 19036, DNSSEC_ALGORITHM_RSASHA256, DNSSEC_DIGEST_SHA256, root_digest1, sizeof(root_digest1));
-        if (r < 0)
-                return r;
-
+        /* Add the currently valid RRs from https://data.iana.org/root-anchors/root-anchors.xml */
         r = add_root_ksk(answer, key, 20326, DNSSEC_ALGORITHM_RSASHA256, DNSSEC_DIGEST_SHA256, root_digest2, sizeof(root_digest2));
         if (r < 0)
                 return r;
@@ -167,9 +160,24 @@ static int dns_trust_anchor_add_builtin_negative(DnsTrustAnchor *d) {
                 "lan\0"
                 "intranet\0"
                 "internal\0"
-                "private\0";
+                "private\0"
 
-        const char *name;
+                /* Defined by RFC 8375. The most official choice. */
+                "home.arpa\0"
+
+                /* RFC 9462 doesn't mention DNSSEC, but this domain
+                 * can't really be signed and clients need to validate
+                 * the answer before using it anyway. */
+                "resolver.arpa\0"
+
+                /* RFC 8880 says because the 'ipv4only.arpa' zone has to
+                 * be an insecure delegation, DNSSEC cannot be used to
+                 * protect these answers from tampering by malicious
+                 * devices on the path */
+                "ipv4only.arpa\0"
+                "170.0.0.192.in-addr.arpa\0"
+                "171.0.0.192.in-addr.arpa\0";
+
         int r;
 
         assert(d);
@@ -178,7 +186,7 @@ static int dns_trust_anchor_add_builtin_negative(DnsTrustAnchor *d) {
          * trust anchor defined at all. This enables easy overriding
          * of negative trust anchors. */
 
-        if (set_size(d->negative_by_name) > 0)
+        if (!set_isempty(d->negative_by_name))
                 return 0;
 
         r = set_ensure_allocated(&d->negative_by_name, &dns_name_hash_ops);
@@ -191,11 +199,10 @@ static int dns_trust_anchor_add_builtin_negative(DnsTrustAnchor *d) {
          * unsigned. */
 
         NULSTR_FOREACH(name, private_domains) {
-
                 if (dns_trust_anchor_knows_domain_positive(d, name))
                         continue;
 
-                r = set_put_strdup(d->negative_by_name, name);
+                r = set_put_strdup(&d->negative_by_name, name);
                 if (r < 0)
                         return r;
         }
@@ -214,19 +221,19 @@ static int dns_trust_anchor_load_positive(DnsTrustAnchor *d, const char *path, u
         assert(d);
         assert(line);
 
-        r = extract_first_word(&p, &domain, NULL, EXTRACT_QUOTES);
+        r = extract_first_word(&p, &domain, NULL, EXTRACT_UNQUOTE);
         if (r < 0)
                 return log_warning_errno(r, "Unable to parse domain in line %s:%u: %m", path, line);
 
         r = dns_name_is_valid(domain);
         if (r < 0)
-                return log_warning_errno(r, "Failed to chack validity of domain name '%s', at line %s:%u, ignoring line: %m", domain, path, line);
+                return log_warning_errno(r, "Failed to check validity of domain name '%s', at line %s:%u, ignoring line: %m", domain, path, line);
         if (r == 0) {
                 log_warning("Domain name %s is invalid, at line %s:%u, ignoring line.", domain, path, line);
                 return -EINVAL;
         }
 
-        r = extract_many_words(&p, NULL, 0, &class, &type, NULL);
+        r = extract_many_words(&p, NULL, 0, &class, &type);
         if (r < 0)
                 return log_warning_errno(r, "Unable to parse class and type in line %s:%u: %m", path, line);
         if (r != 2) {
@@ -246,7 +253,7 @@ static int dns_trust_anchor_load_positive(DnsTrustAnchor *d, const char *path, u
                 int a, dt;
                 size_t l;
 
-                r = extract_many_words(&p, NULL, 0, &key_tag, &algorithm, &digest_type, NULL);
+                r = extract_many_words(&p, NULL, 0, &key_tag, &algorithm, &digest_type);
                 if (r < 0) {
                         log_warning_errno(r, "Failed to parse DS parameters on line %s:%u: %m", path, line);
                         return -EINVAL;
@@ -277,7 +284,7 @@ static int dns_trust_anchor_load_positive(DnsTrustAnchor *d, const char *path, u
                         return -EINVAL;
                 }
 
-                r = unhexmem(p, strlen(p), &dd, &l);
+                r = unhexmem(p, &dd, &l);
                 if (r < 0) {
                         log_warning("Failed to parse DS digest %s on line %s:%u", p, path, line);
                         return -EINVAL;
@@ -300,7 +307,7 @@ static int dns_trust_anchor_load_positive(DnsTrustAnchor *d, const char *path, u
                 size_t l;
                 int a;
 
-                r = extract_many_words(&p, NULL, 0, &flags, &protocol, &algorithm, NULL);
+                r = extract_many_words(&p, NULL, 0, &flags, &protocol, &algorithm);
                 if (r < 0)
                         return log_warning_errno(r, "Failed to parse DNSKEY parameters on line %s:%u: %m", path, line);
                 if (r != 3) {
@@ -336,7 +343,7 @@ static int dns_trust_anchor_load_positive(DnsTrustAnchor *d, const char *path, u
                         return -EINVAL;
                 }
 
-                r = unbase64mem(p, strlen(p), &k, &l);
+                r = unbase64mem(p, &k, &l);
                 if (r < 0)
                         return log_warning_errno(r, "Failed to parse DNSKEY key data %s on line %s:%u", p, path, line);
 
@@ -362,7 +369,7 @@ static int dns_trust_anchor_load_positive(DnsTrustAnchor *d, const char *path, u
         old_answer = hashmap_get(d->positive_by_key, rr->key);
         answer = dns_answer_ref(old_answer);
 
-        r = dns_answer_add_extend(&answer, rr, 0, DNS_ANSWER_AUTHENTICATED);
+        r = dns_answer_add_extend(&answer, rr, 0, DNS_ANSWER_AUTHENTICATED, NULL);
         if (r < 0)
                 return log_error_errno(r, "Failed to add trust anchor RR: %m");
 
@@ -384,13 +391,13 @@ static int dns_trust_anchor_load_negative(DnsTrustAnchor *d, const char *path, u
         assert(d);
         assert(line);
 
-        r = extract_first_word(&p, &domain, NULL, EXTRACT_QUOTES);
+        r = extract_first_word(&p, &domain, NULL, EXTRACT_UNQUOTE);
         if (r < 0)
                 return log_warning_errno(r, "Unable to parse line %s:%u: %m", path, line);
 
         r = dns_name_is_valid(domain);
         if (r < 0)
-                return log_warning_errno(r, "Failed to chack validity of domain name '%s', at line %s:%u, ignoring line: %m", domain, path, line);
+                return log_warning_errno(r, "Failed to check validity of domain name '%s', at line %s:%u, ignoring line: %m", domain, path, line);
         if (r == 0) {
                 log_warning("Domain name %s is invalid, at line %s:%u, ignoring line.", domain, path, line);
                 return -EINVAL;
@@ -401,15 +408,9 @@ static int dns_trust_anchor_load_negative(DnsTrustAnchor *d, const char *path, u
                 return -EINVAL;
         }
 
-        r = set_ensure_allocated(&d->negative_by_name, &dns_name_hash_ops);
+        r = set_ensure_consume(&d->negative_by_name, &dns_name_hash_ops, TAKE_PTR(domain));
         if (r < 0)
                 return log_oom();
-
-        r = set_put(d->negative_by_name, domain);
-        if (r < 0)
-                return log_oom();
-        if (r > 0)
-                domain = NULL;
 
         return 0;
 }
@@ -420,7 +421,6 @@ static int dns_trust_anchor_load_files(
                 int (*loader)(DnsTrustAnchor *d, const char *path, unsigned n, const char *line)) {
 
         _cleanup_strv_free_ char **files = NULL;
-        char **f;
         int r;
 
         assert(d);
@@ -435,7 +435,7 @@ static int dns_trust_anchor_load_files(
                 _cleanup_fclose_ FILE *g = NULL;
                 unsigned n = 0;
 
-                g = fopen(*f, "r");
+                g = fopen(*f, "re");
                 if (!g) {
                         if (errno == ENOENT)
                                 continue;
@@ -446,9 +446,8 @@ static int dns_trust_anchor_load_files(
 
                 for (;;) {
                         _cleanup_free_ char *line = NULL;
-                        char *l;
 
-                        r = read_line(g, LONG_LINE_MAX, &line);
+                        r = read_stripped_line(g, LONG_LINE_MAX, &line);
                         if (r < 0) {
                                 log_warning_errno(r, "Failed to read '%s', ignoring: %m", *f);
                                 break;
@@ -458,14 +457,13 @@ static int dns_trust_anchor_load_files(
 
                         n++;
 
-                        l = strstrip(line);
-                        if (isempty(l))
+                        if (isempty(line))
                                 continue;
 
-                        if (*l == ';')
+                        if (*line == ';')
                                 continue;
 
-                        (void) loader(d, *f, n, l);
+                        (void) loader(d, *f, n, line);
                 }
         }
 
@@ -478,7 +476,6 @@ static int domain_name_cmp(char * const *a, char * const *b) {
 
 static int dns_trust_anchor_dump(DnsTrustAnchor *d) {
         DnsAnswer *a;
-        Iterator i;
 
         assert(d);
 
@@ -486,7 +483,7 @@ static int dns_trust_anchor_dump(DnsTrustAnchor *d) {
                 log_info("No positive trust anchors defined.");
         else {
                 log_info("Positive Trust Anchors:");
-                HASHMAP_FOREACH(a, d->positive_by_key, i) {
+                HASHMAP_FOREACH(a, d->positive_by_key) {
                         DnsResourceRecord *rr;
 
                         DNS_ANSWER_FOREACH(rr, a)
@@ -600,11 +597,7 @@ static int dns_trust_anchor_revoked_put(DnsTrustAnchor *d, DnsResourceRecord *rr
 
         assert(d);
 
-        r = set_ensure_allocated(&d->revoked_by_rr, &dns_resource_record_hash_ops);
-        if (r < 0)
-                return r;
-
-        r = set_put(d->revoked_by_rr, rr);
+        r = set_ensure_put(&d->revoked_by_rr, &dns_resource_record_hash_ops, rr);
         if (r < 0)
                 return r;
         if (r > 0)
@@ -616,6 +609,7 @@ static int dns_trust_anchor_revoked_put(DnsTrustAnchor *d, DnsResourceRecord *rr
 static int dns_trust_anchor_remove_revoked(DnsTrustAnchor *d, DnsResourceRecord *rr) {
         _cleanup_(dns_answer_unrefp) DnsAnswer *new_answer = NULL;
         DnsAnswer *old_answer;
+        DnsAnswerItem *item;
         int r;
 
         /* Remember that this is a revoked trust anchor RR */
@@ -648,11 +642,12 @@ static int dns_trust_anchor_remove_revoked(DnsTrustAnchor *d, DnsResourceRecord 
                 return 1;
         }
 
-        r = hashmap_replace(d->positive_by_key, new_answer->items[0].rr->key, new_answer);
+        item = ordered_set_first(new_answer->items);
+        r = hashmap_replace(d->positive_by_key, item->rr->key, new_answer);
         if (r < 0)
                 return r;
 
-        new_answer = NULL;
+        TAKE_PTR(new_answer);
         dns_answer_unref(old_answer);
         return 1;
 }

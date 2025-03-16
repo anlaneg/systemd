@@ -1,12 +1,12 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <stdlib.h>
 
 #include "log.h"
 #include "nspawn-patch-uid.h"
 #include "user-util.h"
+#include "string-util.h"
 #include "tests.h"
-#include "util.h"
 
 int main(int argc, char *argv[]) {
         uid_t shift, range;

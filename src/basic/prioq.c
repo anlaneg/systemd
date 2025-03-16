@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 /*
  * Priority Queue
@@ -24,8 +24,7 @@ struct prioq_item {
 
 struct Prioq {
         compare_func_t compare_func;
-        unsigned n_items, n_allocated;
-
+        unsigned n_items;
         struct prioq_item *items;
 };
 
@@ -142,28 +141,18 @@ static unsigned shuffle_down(Prioq *q, unsigned idx) {
 }
 
 int prioq_put(Prioq *q, void *data, unsigned *idx) {
-        struct prioq_item *i;
         unsigned k;
 
         assert(q);
 
-        if (q->n_items >= q->n_allocated) {
-                unsigned n;
-                struct prioq_item *j;
-
-                n = MAX((q->n_items+1) * 2, 16u);
-                j = reallocarray(q->items, n, sizeof(struct prioq_item));
-                if (!j)
-                        return -ENOMEM;
-
-                q->items = j;
-                q->n_allocated = n;
-        }
+        if (!GREEDY_REALLOC(q->items, MAX(q->n_items + 1, 16u)))
+                return -ENOMEM;
 
         k = q->n_items++;
-        i = q->items + k;
-        i->data = data;
-        i->idx = idx;
+        q->items[k] = (struct prioq_item) {
+                .data = data,
+                .idx = idx,
+        };
 
         if (idx)
                 *idx = k;
@@ -171,6 +160,16 @@ int prioq_put(Prioq *q, void *data, unsigned *idx) {
         shuffle_up(q, k);
 
         return 0;
+}
+
+int prioq_ensure_put(Prioq **q, compare_func_t compare_func, void *data, unsigned *idx) {
+        int r;
+
+        r = prioq_ensure_allocated(q, compare_func);
+        if (r < 0)
+                return r;
+
+        return prioq_put(*q, data, idx);
 }
 
 static void remove_item(Prioq *q, struct prioq_item *i) {
@@ -203,7 +202,7 @@ static void remove_item(Prioq *q, struct prioq_item *i) {
         }
 }
 
-_pure_ static struct prioq_item* find_item(Prioq *q, void *data, unsigned *idx) {
+static struct prioq_item* find_item(Prioq *q, void *data, unsigned *idx) {
         struct prioq_item *i;
 
         assert(q);
@@ -243,7 +242,7 @@ int prioq_remove(Prioq *q, void *data, unsigned *idx) {
         return 1;
 }
 
-int prioq_reshuffle(Prioq *q, void *data, unsigned *idx) {
+void prioq_reshuffle(Prioq *q, void *data, unsigned *idx) {
         struct prioq_item *i;
         unsigned k;
 
@@ -251,12 +250,11 @@ int prioq_reshuffle(Prioq *q, void *data, unsigned *idx) {
 
         i = find_item(q, data, idx);
         if (!i)
-                return 0;
+                return;
 
         k = i - q->items;
         k = shuffle_down(q, k);
         shuffle_up(q, k);
-        return 1;
 }
 
 void *prioq_peek_by_index(Prioq *q, unsigned idx) {

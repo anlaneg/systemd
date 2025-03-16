@@ -1,39 +1,45 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <dirent.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 #include "alloc-util.h"
+#include "ansi-color.h"
 #include "bus-error.h"
 #include "bus-util.h"
 #include "cgroup-show.h"
 #include "cgroup-util.h"
 #include "env-file.h"
+#include "escape.h"
 #include "fd-util.h"
 #include "format-util.h"
+#include "hostname-util.h"
 #include "locale-util.h"
 #include "macro.h"
+#include "nulstr-util.h"
 #include "output-mode.h"
+#include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
+#include "sort-util.h"
 #include "string-util.h"
 #include "terminal-util.h"
 #include "unit-name.h"
+#include "xattr-util.h"
 
 static void show_pid_array(
                 pid_t pids[],
-                unsigned n_pids,
+                size_t n_pids,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 bool extra,
                 bool more,
                 OutputFlags flags) {
 
-        unsigned i, j, pid_width;
+        size_t i, j, pid_width;
 
         if (n_pids == 0)
                 return;
@@ -50,40 +56,41 @@ static void show_pid_array(
         pid_width = DECIMAL_STR_WIDTH(pids[j]);
 
         if (flags & OUTPUT_FULL_WIDTH)
-                n_columns = 0;
+                n_columns = SIZE_MAX;
         else {
-                if (n_columns > pid_width+2)
-                        n_columns -= pid_width+2;
+                if (n_columns > pid_width + 3) /* something like "├─1114784 " */
+                        n_columns -= pid_width + 3;
                 else
                         n_columns = 20;
         }
         for (i = 0; i < n_pids; i++) {
                 _cleanup_free_ char *t = NULL;
 
-                (void) get_process_cmdline(pids[i], n_columns, true, &t);
+                (void) pid_get_cmdline(pids[i], n_columns,
+                                       PROCESS_CMDLINE_COMM_FALLBACK | PROCESS_CMDLINE_USE_LOCALE,
+                                       &t);
 
                 if (extra)
                         printf("%s%s ", prefix, special_glyph(SPECIAL_GLYPH_TRIANGULAR_BULLET));
                 else
                         printf("%s%s", prefix, special_glyph(((more || i < n_pids-1) ? SPECIAL_GLYPH_TREE_BRANCH : SPECIAL_GLYPH_TREE_RIGHT)));
 
-                printf("%*"PID_PRI" %s\n", pid_width, pids[i], strna(t));
+                printf("%s%*"PID_PRI" %s%s\n", ansi_grey(), (int) pid_width, pids[i], strna(t), ansi_normal());
         }
 }
 
 static int show_cgroup_one_by_path(
                 const char *path,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 bool more,
                 OutputFlags flags) {
 
-        char *fn;
-        _cleanup_fclose_ FILE *f = NULL;
-        size_t n = 0, n_allocated = 0;
         _cleanup_free_ pid_t *pids = NULL;
+        _cleanup_fclose_ FILE *f = NULL;
         _cleanup_free_ char *p = NULL;
-        pid_t pid;
+        size_t n = 0;
+        char *fn;
         int r;
 
         r = cg_mangle_path(path, &p);
@@ -95,22 +102,117 @@ static int show_cgroup_one_by_path(
         if (!f)
                 return -errno;
 
-        while ((r = cg_read_pid(f, &pid)) > 0) {
+        for (;;) {
+                pid_t pid;
 
-                if (!(flags & OUTPUT_KERNEL_THREADS) && is_kernel_thread(pid) > 0)
+                /* libvirt / qemu uses threaded mode and cgroup.procs cannot be read at the lower levels.
+                 * From https://docs.kernel.org/admin-guide/cgroup-v2.html#threads,
+                 * “cgroup.procs” in a threaded domain cgroup contains the PIDs of all processes in
+                 * the subtree and is not readable in the subtree proper. */
+                r = cg_read_pid(f, &pid, /* flags = */ 0);
+                if (IN_SET(r, 0, -EOPNOTSUPP))
+                        break;
+                if (r < 0)
+                        return r;
+
+                if (!(flags & OUTPUT_KERNEL_THREADS) && pid_is_kernel_thread(pid) > 0)
                         continue;
 
-                if (!GREEDY_REALLOC(pids, n_allocated, n + 1))
+                if (!GREEDY_REALLOC(pids, n + 1))
                         return -ENOMEM;
 
-                assert(n < n_allocated);
                 pids[n++] = pid;
         }
 
-        if (r < 0)
-                return r;
-
         show_pid_array(pids, n, prefix, n_columns, false, more, flags);
+
+        return 0;
+}
+
+static int show_cgroup_name(
+                const char *path,
+                const char *prefix,
+                SpecialGlyph glyph,
+                OutputFlags flags) {
+
+        uint64_t cgroupid = UINT64_MAX;
+        _cleanup_free_ char *b = NULL;
+        _cleanup_close_ int fd = -EBADF;
+        bool delegate;
+        int r;
+
+        fd = open(path, O_PATH|O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY, 0);
+        if (fd < 0)
+                return log_debug_errno(errno, "Failed to open cgroup '%s', ignoring: %m", path);
+
+        r = cg_is_delegated_fd(fd);
+        if (r < 0)
+                log_debug_errno(r, "Failed to check if cgroup is delegated, ignoring: %m");
+        delegate = r > 0;
+
+        if (FLAGS_SET(flags, OUTPUT_CGROUP_ID)) {
+                r = cg_fd_get_cgroupid(fd, &cgroupid);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to determine cgroup ID of %s, ignoring: %m", path);
+        }
+
+        r = path_extract_filename(path, &b);
+        if (r < 0)
+                return log_error_errno(r, "Failed to extract filename from cgroup path: %m");
+
+        printf("%s%s%s%s%s",
+               prefix, special_glyph(glyph),
+               delegate ? ansi_underline() : "",
+               cg_unescape(b),
+               delegate ? ansi_normal() : "");
+
+        if (delegate)
+                printf(" %s%s%s",
+                       ansi_highlight(),
+                       special_glyph(SPECIAL_GLYPH_ELLIPSIS),
+                       ansi_normal());
+
+        if (cgroupid != UINT64_MAX)
+                printf(" %s(#%" PRIu64 ")%s", ansi_grey(), cgroupid, ansi_normal());
+
+        printf("\n");
+
+        if (FLAGS_SET(flags, OUTPUT_CGROUP_XATTRS)) {
+                _cleanup_free_ char *nl = NULL;
+
+                r = flistxattr_malloc(fd, &nl);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to enumerate xattrs on '%s', ignoring: %m", path);
+
+                NULSTR_FOREACH(xa, nl) {
+                        _cleanup_free_ char *x = NULL, *y = NULL, *buf = NULL;
+                        int n;
+
+                        if (!STARTSWITH_SET(xa, "user.", "trusted."))
+                                continue;
+
+                        n = fgetxattr_malloc(fd, xa, &buf);
+                        if (n < 0) {
+                                log_debug_errno(r, "Failed to read xattr '%s' off '%s', ignoring: %m", xa, path);
+                                continue;
+                        }
+
+                        x = cescape(xa);
+                        if (!x)
+                                return -ENOMEM;
+
+                        y = cescape_length(buf, n);
+                        if (!y)
+                                return -ENOMEM;
+
+                        printf("%s%s%s %s%s%s: %s\n",
+                               prefix,
+                               glyph == SPECIAL_GLYPH_TREE_BRANCH ? special_glyph(SPECIAL_GLYPH_TREE_VERTICAL) : "  ",
+                               special_glyph(SPECIAL_GLYPH_ARROW_RIGHT),
+                               ansi_blue(), x, ansi_normal(),
+                               y);
+                }
+        }
 
         return 0;
 }
@@ -118,13 +220,13 @@ static int show_cgroup_one_by_path(
 int show_cgroup_by_path(
                 const char *path,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 OutputFlags flags) {
 
         _cleanup_free_ char *fn = NULL, *p1 = NULL, *last = NULL, *p2 = NULL;
         _cleanup_closedir_ DIR *d = NULL;
-        char *gn = NULL;
         bool shown_pids = false;
+        char *gn = NULL;
         int r;
 
         assert(path);
@@ -145,7 +247,7 @@ int show_cgroup_by_path(
         while ((r = cg_read_subgroup(d, &gn)) > 0) {
                 _cleanup_free_ char *k = NULL;
 
-                k = strjoin(fn, "/", gn);
+                k = path_join(fn, gn);
                 free(gn);
                 if (!k)
                         return -ENOMEM;
@@ -154,15 +256,17 @@ int show_cgroup_by_path(
                         continue;
 
                 if (!shown_pids) {
-                        show_cgroup_one_by_path(path, prefix, n_columns, true, flags);
+                        (void) show_cgroup_one_by_path(path, prefix, n_columns, true, flags);
                         shown_pids = true;
                 }
 
                 if (last) {
-                        printf("%s%s%s\n", prefix, special_glyph(SPECIAL_GLYPH_TREE_BRANCH), cg_unescape(basename(last)));
+                        r = show_cgroup_name(last, prefix, SPECIAL_GLYPH_TREE_BRANCH, flags);
+                        if (r < 0)
+                                return r;
 
                         if (!p1) {
-                                p1 = strappend(prefix, special_glyph(SPECIAL_GLYPH_TREE_VERTICAL));
+                                p1 = strjoin(prefix, special_glyph(SPECIAL_GLYPH_TREE_VERTICAL));
                                 if (!p1)
                                         return -ENOMEM;
                         }
@@ -178,13 +282,15 @@ int show_cgroup_by_path(
                 return r;
 
         if (!shown_pids)
-                show_cgroup_one_by_path(path, prefix, n_columns, !!last, flags);
+                (void) show_cgroup_one_by_path(path, prefix, n_columns, !!last, flags);
 
         if (last) {
-                printf("%s%s%s\n", prefix, special_glyph(SPECIAL_GLYPH_TREE_RIGHT), cg_unescape(basename(last)));
+                r = show_cgroup_name(last, prefix, SPECIAL_GLYPH_TREE_RIGHT, flags);
+                if (r < 0)
+                        return r;
 
                 if (!p2) {
-                        p2 = strappend(prefix, "  ");
+                        p2 = strjoin(prefix, "  ");
                         if (!p2)
                                 return -ENOMEM;
                 }
@@ -198,7 +304,7 @@ int show_cgroup_by_path(
 int show_cgroup(const char *controller,
                 const char *path,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 OutputFlags flags) {
         _cleanup_free_ char *p = NULL;
         int r;
@@ -216,13 +322,13 @@ static int show_extra_pids(
                 const char *controller,
                 const char *path,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 const pid_t pids[],
-                unsigned n_pids,
+                size_t n_pids,
                 OutputFlags flags) {
 
         _cleanup_free_ pid_t *copy = NULL;
-        unsigned i, j;
+        size_t i, j;
         int r;
 
         assert(path);
@@ -261,9 +367,9 @@ int show_cgroup_and_extra(
                 const char *controller,
                 const char *path,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 const pid_t extra_pids[],
-                unsigned n_extra_pids,
+                size_t n_extra_pids,
                 OutputFlags flags) {
 
         int r;
@@ -310,22 +416,25 @@ int show_cgroup_get_path_and_warn(
                 const char *prefix,
                 char **ret) {
 
-        int r;
         _cleanup_free_ char *root = NULL;
+        int r;
 
         if (machine) {
                 _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
                 _cleanup_free_ char *unit = NULL;
                 const char *m;
 
+                if (!hostname_is_valid(machine, 0))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Machine name is not valid: %s", machine);
+
                 m = strjoina("/run/systemd/machines/", machine);
                 r = parse_env_file(NULL, m, "SCOPE", &unit);
                 if (r < 0)
                         return log_error_errno(r, "Failed to load machine data: %m");
 
-                r = bus_connect_transport_systemd(BUS_TRANSPORT_LOCAL, NULL, false, &bus);
+                r = bus_connect_transport_systemd(BUS_TRANSPORT_LOCAL, NULL, RUNTIME_SCOPE_SYSTEM, &bus);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to create bus connection: %m");
+                        return bus_log_connect_error(r, BUS_TRANSPORT_LOCAL, RUNTIME_SCOPE_SYSTEM);
 
                 r = show_cgroup_get_unit_path_and_warn(bus, unit, &root);
                 if (r < 0)
@@ -335,14 +444,14 @@ int show_cgroup_get_path_and_warn(
                 if (r == -ENOMEDIUM)
                         return log_error_errno(r, "Failed to get root control group path.\n"
                                                   "No cgroup filesystem mounted on /sys/fs/cgroup");
-                else if (r < 0)
+                if (r < 0)
                         return log_error_errno(r, "Failed to get root control group path: %m");
         }
 
         if (prefix) {
                 char *t;
 
-                t = strjoin(root, prefix);
+                t = path_join(root, prefix);
                 if (!t)
                         return log_oom();
 

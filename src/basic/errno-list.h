@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include <stdbool.h>
@@ -8,7 +8,7 @@
  */
 #define ERRNO_MAX 4095
 
-const char *errno_to_name(int id);
+const char* errno_to_name(int id);
 int errno_from_name(const char *name);
 static inline bool errno_is_valid(int n) {
         return n > 0 && n <= ERRNO_MAX;

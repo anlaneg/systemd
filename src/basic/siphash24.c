@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: CC0-1.0 */
+
 /*
    SipHash reference C implementation
 
@@ -10,7 +12,7 @@
    worldwide. This software is distributed without any warranty.
 
    You should have received a copy of the CC0 Public Domain Dedication along with
-   this software. If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
+   this software. If not, see <https://creativecommons.org/publicdomain/zero/1.0/>.
 
    (Minimal changes made by Lennart Poettering, to make clean for inclusion in systemd)
    (Refactored by Tom Gundersen to split up in several functions and follow systemd
@@ -70,12 +72,11 @@ void siphash24_init(struct siphash *state, const uint8_t k[static 16]) {
 
 void siphash24_compress(const void *_in, size_t inlen, struct siphash *state) {
 
-        const uint8_t *in = _in;
+        const uint8_t *in = ASSERT_PTR(_in);
         const uint8_t *end = in + inlen;
         size_t left = state->inlen & 7;
         uint64_t m;
 
-        assert(in);
         assert(state);
 
         /* Update total length */

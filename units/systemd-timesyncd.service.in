@@ -1,4 +1,4 @@
-#  SPDX-License-Identifier: LGPL-2.1+
+#  SPDX-License-Identifier: LGPL-2.1-or-later
 #
 #  This file is part of systemd.
 #
@@ -13,23 +13,30 @@ Documentation=man:systemd-timesyncd.service(8)
 ConditionCapability=CAP_SYS_TIME
 ConditionVirtualization=!container
 DefaultDependencies=no
-After=systemd-remount-fs.service systemd-sysusers.service
-Before=time-sync.target sysinit.target shutdown.target
+After=systemd-sysusers.service
+Before=time-set.target sysinit.target shutdown.target
 Conflicts=shutdown.target
-Wants=time-sync.target
+Wants=time-set.target
 
 [Service]
 AmbientCapabilities=CAP_SYS_TIME
+BusName=org.freedesktop.timesync1
 CapabilityBoundingSet=CAP_SYS_TIME
-ExecStart=!!@rootlibexecdir@/systemd-timesyncd
+# Turn off DNSSEC validation for hostname look-ups, since those need the
+# correct time to work, but we likely won't acquire that without NTP. Let's
+# break this chicken-and-egg cycle here.
+Environment=SYSTEMD_NSS_RESOLVE_VALIDATE=0
+ExecStart=!!{{LIBEXECDIR}}/systemd-timesyncd
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 NoNewPrivileges=yes
 PrivateDevices=yes
 PrivateTmp=yes
+ProtectProc=invisible
 ProtectControlGroups=yes
 ProtectHome=yes
 ProtectHostname=yes
+ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectSystem=strict
@@ -38,6 +45,7 @@ RestartSec=0
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes
+RestrictSUIDSGID=yes
 RuntimeDirectory=systemd/timesync
 StateDirectory=systemd/timesync
 SystemCallArchitectures=native
@@ -45,7 +53,7 @@ SystemCallErrorNumber=EPERM
 SystemCallFilter=@system-service @clock
 Type=notify
 User=systemd-timesync
-WatchdogSec=3min
+{{SERVICE_WATCHDOG}}
 
 [Install]
 WantedBy=sysinit.target

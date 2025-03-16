@@ -1,8 +1,10 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "alloc-util.h"
 #include "dns-domain.h"
 #include "resolved-dns-search-domain.h"
+#include "resolved-link.h"
+#include "resolved-manager.h"
 
 int dns_search_domain_new(
                 Manager *m,
@@ -31,14 +33,16 @@ int dns_search_domain_new(
                         return -E2BIG;
         }
 
-        d = new0(DnsSearchDomain, 1);
+        d = new(DnsSearchDomain, 1);
         if (!d)
                 return -ENOMEM;
 
-        d->n_ref = 1;
-        d->manager = m;
-        d->type = type;
-        d->name = TAKE_PTR(normalized);
+        *d = (DnsSearchDomain) {
+                .n_ref = 1,
+                .manager = m,
+                .type = type,
+                .name = TAKE_PTR(normalized),
+        };
 
         switch (type) {
 
@@ -48,13 +52,13 @@ int dns_search_domain_new(
                 l->n_search_domains++;
                 break;
 
-        case DNS_SERVER_SYSTEM:
+        case DNS_SEARCH_DOMAIN_SYSTEM:
                 LIST_APPEND(domains, m->search_domains, d);
                 m->n_search_domains++;
                 break;
 
         default:
-                assert_not_reached("Unknown search domain type");
+                assert_not_reached();
         }
 
         d->linked = true;
@@ -119,19 +123,19 @@ void dns_search_domain_move_back_and_unmark(DnsSearchDomain *d) {
 
         case DNS_SEARCH_DOMAIN_LINK:
                 assert(d->link);
-                LIST_FIND_TAIL(domains, d, tail);
+                tail = LIST_FIND_TAIL(domains, d);
                 LIST_REMOVE(domains, d->link->search_domains, d);
                 LIST_INSERT_AFTER(domains, d->link->search_domains, tail, d);
                 break;
 
         case DNS_SEARCH_DOMAIN_SYSTEM:
-                LIST_FIND_TAIL(domains, d, tail);
+                tail = LIST_FIND_TAIL(domains, d);
                 LIST_REMOVE(domains, d->manager->search_domains, d);
                 LIST_INSERT_AFTER(domains, d->manager->search_domains, tail, d);
                 break;
 
         default:
-                assert_not_reached("Unknown search domain type");
+                assert_not_reached();
         }
 }
 
@@ -147,18 +151,22 @@ void dns_search_domain_unlink_all(DnsSearchDomain *first) {
         dns_search_domain_unlink_all(next);
 }
 
-void dns_search_domain_unlink_marked(DnsSearchDomain *first) {
+bool dns_search_domain_unlink_marked(DnsSearchDomain *first) {
         DnsSearchDomain *next;
+        bool changed;
 
         if (!first)
-                return;
+                return false;
 
         next = first->domains_next;
 
-        if (first->marked)
+        if (first->marked) {
                 dns_search_domain_unlink(first);
+                changed = true;
+        } else
+                changed = false;
 
-        dns_search_domain_unlink_marked(next);
+        return dns_search_domain_unlink_marked(next) || changed;
 }
 
 void dns_search_domain_mark_all(DnsSearchDomain *first) {
@@ -170,7 +178,6 @@ void dns_search_domain_mark_all(DnsSearchDomain *first) {
 }
 
 int dns_search_domain_find(DnsSearchDomain *first, const char *name, DnsSearchDomain **ret) {
-        DnsSearchDomain *d;
         int r;
 
         assert(name);

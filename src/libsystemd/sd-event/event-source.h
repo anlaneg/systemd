@@ -1,5 +1,5 @@
 #pragma once
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <sys/epoll.h>
 #include <sys/timerfd.h>
@@ -7,10 +7,11 @@
 
 #include "sd-event.h"
 
-#include "fs-util.h"
 #include "hashmap.h"
+#include "inotify-util.h"
 #include "list.h"
 #include "prioq.h"
+#include "ratelimit.h"
 
 typedef enum EventSourceType {
         SOURCE_IO,
@@ -26,20 +27,21 @@ typedef enum EventSourceType {
         SOURCE_EXIT,
         SOURCE_WATCHDOG,
         SOURCE_INOTIFY,
+        SOURCE_MEMORY_PRESSURE,
         _SOURCE_EVENT_SOURCE_TYPE_MAX,
-        _SOURCE_EVENT_SOURCE_TYPE_INVALID = -1
+        _SOURCE_EVENT_SOURCE_TYPE_INVALID = -EINVAL,
 } EventSourceType;
 
 /* All objects we use in epoll events start with this value, so that
  * we know how to dispatch it */
 typedef enum WakeupType {
         WAKEUP_NONE,
-        WAKEUP_EVENT_SOURCE,
+        WAKEUP_EVENT_SOURCE, /* either I/O or pidfd wakeup */
         WAKEUP_CLOCK_DATA,
         WAKEUP_SIGNAL_DATA,
         WAKEUP_INOTIFY_DATA,
         _WAKEUP_TYPE_MAX,
-        _WAKEUP_TYPE_INVALID = -1,
+        _WAKEUP_TYPE_INVALID = -EINVAL,
 } WakeupType;
 
 struct inode_data;
@@ -55,11 +57,13 @@ struct sd_event_source {
 
         char *description;
 
-        EventSourceType type:5;
+        EventSourceType type;
         signed int enabled:3;
         bool pending:1;
         bool dispatching:1;
         bool floating:1;
+        bool exit_on_failure:1;
+        bool ratelimited:1;
 
         int64_t priority;
         unsigned pending_index;
@@ -68,8 +72,16 @@ struct sd_event_source {
         uint64_t prepare_iteration;
 
         sd_event_destroy_t destroy_callback;
+        sd_event_handler_t ratelimit_expire_callback;
 
         LIST_FIELDS(sd_event_source, sources);
+
+        RateLimit rate_limit;
+
+        /* These are primarily fields relevant for time event sources, but since any event source can
+         * effectively become one when rate-limited, this is part of the common fields. */
+        unsigned earliest_index;
+        unsigned latest_index;
 
         union {
                 struct {
@@ -83,19 +95,24 @@ struct sd_event_source {
                 struct {
                         sd_event_time_handler_t callback;
                         usec_t next, accuracy;
-                        unsigned earliest_index;
-                        unsigned latest_index;
                 } time;
                 struct {
                         sd_event_signal_handler_t callback;
                         struct signalfd_siginfo siginfo;
                         int sig;
+                        bool unblock;
                 } signal;
                 struct {
                         sd_event_child_handler_t callback;
                         siginfo_t siginfo;
                         pid_t pid;
                         int options;
+                        int pidfd;
+                        bool registered:1; /* whether the pidfd is registered in the epoll */
+                        bool pidfd_owned:1; /* close pidfd when event source is freed */
+                        bool process_owned:1; /* kill+reap process when event source is freed */
+                        bool exited:1; /* true if process exited (i.e. if there's value in SIGKILLing it if we want to get rid of it) */
+                        bool waited:1; /* true if process was waited for (i.e. if there's value in waitid(P_PID)'ing it if we want to get rid of it) */
                 } child;
                 struct {
                         sd_event_handler_t callback;
@@ -113,6 +130,17 @@ struct sd_event_source {
                         struct inode_data *inode_data;
                         LIST_FIELDS(sd_event_source, by_inode_data);
                 } inotify;
+                struct {
+                        int fd;
+                        sd_event_handler_t callback;
+                        void *write_buffer;
+                        size_t write_buffer_size;
+                        uint32_t events, revents;
+                        LIST_FIELDS(sd_event_source, write_list);
+                        bool registered:1;
+                        bool locked:1;
+                        bool in_write_list:1;
+                } memory_pressure;
         };
 };
 
@@ -161,6 +189,9 @@ struct inode_data {
          * iteration. */
         int fd;
 
+        /* The path that the fd points to. The field is optional. */
+        char *path;
+
         /* The inotify "watch descriptor" */
         int wd;
 
@@ -199,6 +230,11 @@ struct inotify_data {
          * inotify fd as long as there are still pending events on the inotify (because we have no strategy of queuing
          * the events locally if they can't be coalesced). */
         unsigned n_pending;
+
+        /* If this counter is non-zero, don't GC the inotify data object even if not used to watch any inode
+         * anymore. This is useful to pin the object for a bit longer, after the last event source needing it
+         * is gone. */
+        unsigned n_busy;
 
         /* A linked list of all inotify objects with data already read, that still need processing. We keep this list
          * to make it efficient to figure out what inotify objects to process data on next. */

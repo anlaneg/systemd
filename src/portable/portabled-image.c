@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "portable.h"
 #include "portabled-image.h"
@@ -11,10 +11,9 @@ Image *manager_image_cache_get(Manager *m, const char *name_or_path) {
 }
 
 static int image_cache_flush(sd_event_source *s, void *userdata) {
-        Manager *m = userdata;
+        Manager *m = ASSERT_PTR(userdata);
 
         assert(s);
-        assert(m);
 
         hashmap_clear(m->image_cache);
         return 0;
@@ -85,7 +84,6 @@ int manager_image_cache_add(Manager *m, Image *image) {
 
 int manager_image_cache_discover(Manager *m, Hashmap *images, sd_bus_error *error) {
         Image *image;
-        Iterator i;
         int r;
 
         assert(m);
@@ -93,11 +91,11 @@ int manager_image_cache_discover(Manager *m, Hashmap *images, sd_bus_error *erro
         /* A wrapper around image_discover() (for finding images in search path) and portable_discover_attached() (for
          * finding attached images). */
 
-        r = image_discover(IMAGE_PORTABLE, images);
+        r = image_discover(IMAGE_PORTABLE, NULL, images);
         if (r < 0)
                 return r;
 
-        HASHMAP_FOREACH(image, images, i)
+        HASHMAP_FOREACH(image, images)
                 (void) manager_image_cache_add(m, image);
 
         return 0;

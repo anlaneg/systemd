@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include <stdbool.h>
@@ -34,10 +34,10 @@ struct Barrier {
         int64_t barriers;
 };
 
-#define BARRIER_NULL {-1, -1, {-1, -1}, 0}
+#define BARRIER_NULL {-EBADF, -EBADF, {-EBADF, -EBADF}, 0}
 
 int barrier_create(Barrier *obj);
-void barrier_destroy(Barrier *b);
+Barrier* barrier_destroy(Barrier *b);
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(Barrier*, barrier_destroy);
 

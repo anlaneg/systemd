@@ -1,24 +1,25 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "architecture.h"
 #include "automount.h"
 #include "cgroup.h"
+#include "cgroup-util.h"
 #include "compress.h"
 #include "condition.h"
-#include "device-internal.h"
+#include "confidential-virt.h"
+#include "device-private.h"
 #include "device.h"
+#include "discover-image.h"
 #include "execute.h"
 #include "import-util.h"
 #include "install.h"
 #include "job.h"
-#include "journald-server.h"
 #include "kill.h"
-#include "link-config.h"
 #include "locale-util.h"
 #include "log.h"
 #include "logs-show.h"
-#include "machine-image.h"
 #include "mount.h"
+#include "netif-naming-scheme.h"
 #include "path.h"
 #include "process-util.h"
 #include "resolve-util.h"
@@ -32,13 +33,15 @@
 #include "swap.h"
 #include "target.h"
 #include "test-tables.h"
+#include "tests.h"
 #include "timer.h"
 #include "unit-name.h"
 #include "unit.h"
-#include "util.h"
 #include "virt.h"
 
 int main(int argc, char **argv) {
+        test_setup_logging(LOG_DEBUG);
+
         test_table(architecture, ARCHITECTURE);
         test_table(assert_type, CONDITION_TYPE);
         test_table(automount_result, AUTOMOUNT_RESULT);
@@ -49,7 +52,8 @@ int main(int argc, char **argv) {
         test_table(collect_mode, COLLECT_MODE);
         test_table(condition_result, CONDITION_RESULT);
         test_table(condition_type, CONDITION_TYPE);
-        test_table(device_action, DEVICE_ACTION);
+        test_table(confidential_virtualization, CONFIDENTIAL_VIRTUALIZATION);
+        test_table(device_action, SD_DEVICE_ACTION);
         test_table(device_state, DEVICE_STATE);
         test_table(dns_over_tls_mode, DNS_OVER_TLS_MODE);
         test_table(dnssec_mode, DNSSEC_MODE);
@@ -67,10 +71,11 @@ int main(int argc, char **argv) {
         test_table(job_state, JOB_STATE);
         test_table(job_type, JOB_TYPE);
         test_table(kill_mode, KILL_MODE);
-        test_table(kill_who, KILL_WHO);
+        test_table(kill_whom, KILL_WHOM);
         test_table(locale_variable, VARIABLE_LC);
         test_table(log_target, LOG_TARGET);
-        test_table(mac_policy, MACPOLICY);
+        test_table(managed_oom_mode, MANAGED_OOM_MODE);
+        test_table(managed_oom_preference, MANAGED_OOM_PREFERENCE);
         test_table(manager_state, MANAGER_STATE);
         test_table(manager_timestamp, MANAGER_TIMESTAMP);
         test_table(mount_exec_command, MOUNT_EXEC_COMMAND);
@@ -93,6 +98,7 @@ int main(int argc, char **argv) {
         test_table(scope_state, SCOPE_STATE);
         test_table(service_exec_command, SERVICE_EXEC_COMMAND);
         test_table(service_restart, SERVICE_RESTART);
+        test_table(service_restart_mode, SERVICE_RESTART_MODE);
         test_table(service_result, SERVICE_RESULT);
         test_table(service_state, SERVICE_STATE);
         test_table(service_type, SERVICE_TYPE);
@@ -102,8 +108,6 @@ int main(int argc, char **argv) {
         test_table(socket_exec_command, SOCKET_EXEC_COMMAND);
         test_table(socket_result, SOCKET_RESULT);
         test_table(socket_state, SOCKET_STATE);
-        test_table(split_mode, SPLIT);
-        test_table(storage, STORAGE);
         test_table(swap_exec_command, SWAP_EXEC_COMMAND);
         test_table(swap_result, SWAP_RESULT);
         test_table(swap_state, SWAP_STATE);
@@ -113,14 +117,15 @@ int main(int argc, char **argv) {
         test_table(timer_state, TIMER_STATE);
         test_table(unit_active_state, UNIT_ACTIVE_STATE);
         test_table(unit_dependency, UNIT_DEPENDENCY);
-        test_table(unit_file_change_type, UNIT_FILE_CHANGE_TYPE);
-        test_table(unit_file_preset_mode, UNIT_FILE_PRESET);
+        test_table(install_change_type, INSTALL_CHANGE_TYPE);
+        test_table(unit_file_preset_mode, UNIT_FILE_PRESET_MODE);
         test_table(unit_file_state, UNIT_FILE_STATE);
         test_table(unit_load_state, UNIT_LOAD_STATE);
         test_table(unit_type, UNIT_TYPE);
         test_table(virtualization, VIRTUALIZATION);
+        test_table(compression, COMPRESSION);
 
-        test_table_sparse(object_compressed, OBJECT_COMPRESSED);
+        assert_cc(sizeof(sd_device_action_t) == sizeof(int64_t));
 
         return EXIT_SUCCESS;
 }

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 typedef enum DeviceType DeviceType;
@@ -11,6 +11,7 @@ enum DeviceType {
         DEVICE_TYPE_UNKNOWN,
         DEVICE_TYPE_DRM,
         DEVICE_TYPE_EVDEV,
+        DEVICE_TYPE_HIDRAW,
 };
 
 struct SessionDevice {
@@ -27,8 +28,10 @@ struct SessionDevice {
         LIST_FIELDS(struct SessionDevice, sd_by_device);
 };
 
-int session_device_new(Session *s, dev_t dev, bool open_device, SessionDevice **out);
-void session_device_free(SessionDevice *sd);
+int session_device_new(Session *s, dev_t dev, bool open_device, SessionDevice **ret);
+SessionDevice *session_device_free(SessionDevice *sd);
+DEFINE_TRIVIAL_CLEANUP_FUNC(SessionDevice*, session_device_free);
+
 void session_device_complete_pause(SessionDevice *sd);
 
 void session_device_resume_all(Session *s);

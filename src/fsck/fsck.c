@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /***
   Copyright © 2014 Holger Hans Peter Freyther
 ***/
@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <sys/file.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -18,33 +17,21 @@
 #include "alloc-util.h"
 #include "bus-common-errors.h"
 #include "bus-error.h"
+#include "bus-locator.h"
 #include "bus-util.h"
 #include "device-util.h"
 #include "fd-util.h"
 #include "fs-util.h"
+#include "fsck-util.h"
 #include "main-func.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "proc-cmdline.h"
 #include "process-util.h"
-#include "rlimit-util.h"
 #include "signal-util.h"
 #include "socket-util.h"
 #include "special.h"
 #include "stdio-util.h"
-#include "util.h"
-
-/* exit codes as defined in fsck(8) */
-enum {
-        FSCK_SUCCESS                 = 0,
-        FSCK_ERROR_CORRECTED         = 1 << 0,
-        FSCK_SYSTEM_SHOULD_REBOOT    = 1 << 1,
-        FSCK_ERRORS_LEFT_UNCORRECTED = 1 << 2,
-        FSCK_OPERATIONAL_ERROR       = 1 << 3,
-        FSCK_USAGE_OR_SYNTAX_ERROR   = 1 << 4,
-        FSCK_USER_CANCELLED          = 1 << 5,
-        FSCK_SHARED_LIB_ERROR        = 1 << 7,
-};
 
 static bool arg_skip = false;
 static bool arg_force = false;
@@ -64,17 +51,10 @@ static void start_target(const char *target, const char *mode) {
                 return;
         }
 
-        log_info("Running request %s/start/replace", target);
+        log_info("Requesting %s/start/%s", target, mode);
 
-        /* Start these units only if we can replace base.target with it */
-        r = sd_bus_call_method(bus,
-                               "org.freedesktop.systemd1",
-                               "/org/freedesktop/systemd1",
-                               "org.freedesktop.systemd1.Manager",
-                               "StartUnitReplace",
-                               &error,
-                               NULL,
-                               "sss", "basic.target", target, mode);
+        /* Start this unit only if we can replace basic.target with it */
+        r = bus_call_method(bus, bus_systemd_mgr, "StartUnitReplace", &error, NULL, "sss", SPECIAL_BASIC_TARGET, target, mode);
 
         /* Don't print a warning if we aren't called during startup */
         if (r < 0 && !sd_bus_error_has_name(&error, BUS_ERROR_NO_SUCH_JOB))
@@ -118,16 +98,11 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
                 }
         }
 
-#if HAVE_SYSV_COMPAT
-        else if (streq(key, "fastboot") && !value) {
-                log_warning("Please pass 'fsck.mode=skip' rather than 'fastboot' on the kernel command line.");
+        else if (streq(key, "fastboot") && !value)
                 arg_skip = true;
 
-        } else if (streq(key, "forcefsck") && !value) {
-                log_warning("Please pass 'fsck.mode=force' rather than 'forcefsck' on the kernel command line.");
+        else if (streq(key, "forcefsck") && !value)
                 arg_force = true;
-        }
-#endif
 
         return 0;
 }
@@ -167,8 +142,8 @@ static double percent(int pass, unsigned long cur, unsigned long max) {
                 (double) cur / (double) max;
 }
 
-static int process_progress(int fd) {
-        _cleanup_fclose_ FILE *console = NULL, *f = NULL;
+static int process_progress(int fd, FILE* console) {
+        _cleanup_fclose_ FILE *f = NULL;
         usec_t last = 0;
         bool locked = false;
         int clear = 0, r;
@@ -180,15 +155,11 @@ static int process_progress(int fd) {
         f = fdopen(fd, "r");
         if (!f) {
                 safe_close(fd);
-                return -errno;
+                return log_debug_errno(errno, "Failed to use pipe: %m");
         }
 
-        console = fopen("/dev/console", "we");
-        if (!console)
-                return -ENOMEM;
-
         for (;;) {
-                int pass, m;
+                int pass;
                 unsigned long cur, max;
                 _cleanup_free_ char *device = NULL;
                 double p;
@@ -200,10 +171,9 @@ static int process_progress(int fd) {
                                 r = log_warning_errno(errno, "Failed to read from progress pipe: %m");
                         else if (feof(f))
                                 r = 0;
-                        else {
-                                log_warning("Failed to parse progress pipe data");
-                                r = -EBADMSG;
-                        }
+                        else
+                                r = log_warning_errno(SYNTHETIC_ERRNO(EINVAL), "Failed to parse progress pipe data.");
+
                         break;
                 }
 
@@ -223,18 +193,17 @@ static int process_progress(int fd) {
                 last = t;
 
                 p = percent(pass, cur, max);
-                fprintf(console, "\r%s: fsck %3.1f%% complete...\r%n", device, p, &m);
-                fflush(console);
+                r = fprintf(console, "\r%s: fsck %3.1f%% complete...\r", device, p);
+                if (r < 0)
+                        return -EIO; /* No point in continuing if something happened to our output stream */
 
-                if (m > clear)
-                        clear = m;
+                fflush(console);
+                clear = MAX(clear, r);
         }
 
         if (clear > 0) {
-                unsigned j;
-
                 fputc('\r', console);
-                for (j = 0; j < (unsigned) clear; j++)
+                for (int j = 0; j < clear; j++)
                         fputc(' ', console);
                 fputc('\r', console);
                 fflush(console);
@@ -244,39 +213,37 @@ static int process_progress(int fd) {
 }
 
 static int fsck_progress_socket(void) {
-        static const union sockaddr_union sa = {
-                .un.sun_family = AF_UNIX,
-                .un.sun_path = "/run/systemd/fsck.progress",
-        };
-
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
+        int r;
 
         fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0)
                 return log_warning_errno(errno, "socket(): %m");
 
-        if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0)
-                return log_full_errno(IN_SET(errno, ECONNREFUSED, ENOENT) ? LOG_DEBUG : LOG_WARNING,
-                                      errno, "Failed to connect to progress socket %s, ignoring: %m", sa.un.sun_path);
+        r = connect_unix_path(fd, AT_FDCWD, "/run/systemd/fsck.progress");
+        if (r < 0)
+                return log_full_errno(IN_SET(r, -ECONNREFUSED, -ENOENT) ? LOG_DEBUG : LOG_WARNING,
+                                      r, "Failed to connect to progress socket, ignoring: %m");
 
         return TAKE_FD(fd);
 }
 
 static int run(int argc, char *argv[]) {
-        _cleanup_close_pair_ int progress_pipe[2] = { -1, -1 };
+        _cleanup_close_pair_ int progress_pipe[2] = EBADF_PAIR;
         _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
+        _cleanup_free_ char *dpath = NULL;
+        _cleanup_fclose_ FILE *console = NULL;
         const char *device, *type;
         bool root_directory;
         struct stat st;
         int r, exit_status;
         pid_t pid;
 
-        log_setup_service();
+        log_setup();
 
-        if (argc > 2) {
-                log_error("This program expects one or no arguments.");
-                return -EINVAL;
-        }
+        if (argc > 2)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "This program expects one or no arguments.");
 
         umask(0022);
 
@@ -290,17 +257,21 @@ static int run(int argc, char *argv[]) {
                 return 0;
 
         if (argc > 1) {
-                device = argv[1];
+                dpath = strdup(argv[1]);
+                if (!dpath)
+                        return log_oom();
+
+                device = dpath;
 
                 if (stat(device, &st) < 0)
                         return log_error_errno(errno, "Failed to stat %s: %m", device);
 
-                if (!S_ISBLK(st.st_mode)) {
-                        log_error("%s is not a block device.", device);
-                        return -EINVAL;
-                }
+                if (!S_ISBLK(st.st_mode))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "%s is not a block device.",
+                                               device);
 
-                r = sd_device_new_from_devnum(&dev, 'b', st.st_rdev);
+                r = sd_device_new_from_stat_rdev(&dev, &st);
                 if (r < 0)
                         return log_error_errno(r, "Failed to detect device %s: %m", device);
 
@@ -340,20 +311,30 @@ static int run(int argc, char *argv[]) {
         }
 
         if (sd_device_get_property_value(dev, "ID_FS_TYPE", &type) >= 0) {
-                r = fsck_exists(type);
+                r = fsck_exists_for_fstype(type);
                 if (r < 0)
                         log_device_warning_errno(dev, r, "Couldn't detect if fsck.%s may be used, proceeding: %m", type);
                 else if (r == 0) {
                         log_device_info(dev, "fsck.%s doesn't exist, not checking file system.", type);
                         return 0;
                 }
+        } else {
+                r = fsck_exists();
+                if (r < 0)
+                        log_device_warning_errno(dev, r, "Couldn't detect if the fsck command may be used, proceeding: %m");
+                else if (r == 0) {
+                        log_device_info(dev, "The fsck command does not exist, not checking file system.");
+                        return 0;
+                }
         }
 
-        if (arg_show_progress &&
+        console = fopen("/dev/console", "we");
+        if (console &&
+            arg_show_progress &&
             pipe(progress_pipe) < 0)
                 return log_error_errno(errno, "pipe(): %m");
 
-        r = safe_fork("(fsck)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG, &pid);
+        r = safe_fork("(fsck)", FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGTERM|FORK_LOG|FORK_RLIMIT_NOFILE_SAFE, &pid);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -379,7 +360,7 @@ static int run(int argc, char *argv[]) {
                 } else
                         dash_c[0] = 0;
 
-                cmdline[i++] = "/sbin/fsck";
+                cmdline[i++] = "fsck";
                 cmdline[i++] =  arg_repair;
                 cmdline[i++] = "-T";
 
@@ -402,14 +383,14 @@ static int run(int argc, char *argv[]) {
                 cmdline[i++] = device;
                 cmdline[i++] = NULL;
 
-                (void) rlimit_nofile_safe();
-
-                execv(cmdline[0], (char**) cmdline);
+                execvp(cmdline[0], (char**) cmdline);
                 _exit(FSCK_OPERATIONAL_ERROR);
         }
 
-        progress_pipe[1] = safe_close(progress_pipe[1]);
-        (void) process_progress(TAKE_FD(progress_pipe[0]));
+        if (console) {
+                progress_pipe[1] = safe_close(progress_pipe[1]);
+                (void) process_progress(TAKE_FD(progress_pipe[0]), console);
+        }
 
         exit_status = wait_for_terminate_and_check("fsck", pid, WAIT_LOG_ABNORMAL);
         if (exit_status < 0)
@@ -421,10 +402,7 @@ static int run(int argc, char *argv[]) {
                         /* System should be rebooted. */
                         start_target(SPECIAL_REBOOT_TARGET, "replace-irreversibly");
                         return -EINVAL;
-                } else if (exit_status & (FSCK_SYSTEM_SHOULD_REBOOT | FSCK_ERRORS_LEFT_UNCORRECTED))
-                        /* Some other problem */
-                        start_target(SPECIAL_EMERGENCY_TARGET, "replace");
-                else
+                } else if (!(exit_status & (FSCK_SYSTEM_SHOULD_REBOOT | FSCK_ERRORS_LEFT_UNCORRECTED)))
                         log_warning("Ignoring error.");
         }
 

@@ -1,14 +1,14 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <stdio.h>
 #include <unistd.h>
 
 #include "generator.h"
+#include "initrd-util.h"
 #include "log.h"
-#include "mkdir.h"
+#include "mkdir-label.h"
 #include "string-util.h"
-#include "util.h"
 
 static const char *arg_dest = NULL;
 
@@ -24,7 +24,7 @@ static int add_symlink(const char *service, const char *where) {
         assert(service);
         assert(where);
 
-        from = strjoina(SYSTEM_DATA_UNIT_PATH "/", service);
+        from = strjoina(SYSTEM_DATA_UNIT_DIR "/", service);
         to = strjoina(arg_dest, "/", where, ".wants/", service);
 
         (void) mkdir_parents_label(to, 0755);
@@ -59,16 +59,15 @@ static int run(const char *dest, const char *dest_early, const char *dest_late) 
 
         assert_se(arg_dest = dest);
 
-        if (check_executable(RC_LOCAL_SCRIPT_PATH_START) >= 0) {
+        if (in_initrd()) {
+                log_debug("Skipping generator, running in the initrd.");
+                return EXIT_SUCCESS;
+        }
+
+        if (check_executable(RC_LOCAL_PATH) >= 0) {
                 log_debug("Automatically adding rc-local.service.");
 
                 r = add_symlink("rc-local.service", "multi-user.target");
-        }
-
-        if (check_executable(RC_LOCAL_SCRIPT_PATH_STOP) >= 0) {
-                log_debug("Automatically adding halt-local.service.");
-
-                k = add_symlink("halt-local.service", "final.target");
         }
 
         return r < 0 ? r : k;

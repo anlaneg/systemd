@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: LGPL-2.1+
+# SPDX-License-Identifier: LGPL-2.1-or-later
 #
 # systemd-sysv-generator integration test
 #
@@ -48,11 +48,13 @@ class SysvGeneratorTest(unittest.TestCase):
         '''Run sysv-generator.
 
         Fail if stderr contains any "Fail", unless expect_error is True.
-        Return (stderr, filename -> ConfigParser) pair with ouput to stderr and
+        Return (stderr, filename -> ConfigParser) pair with output to stderr and
         parsed generated units.
         '''
         env = os.environ.copy()
-        env['SYSTEMD_LOG_LEVEL'] = 'debug'
+        # We might debug log about errors that aren't actually fatal so let's bump the log level to info to
+        # prevent those logs from interfering with the test.
+        env['SYSTEMD_LOG_LEVEL'] = 'info'
         env['SYSTEMD_LOG_TARGET'] = 'console'
         env['SYSTEMD_SYSVINIT_PATH'] = self.init_d_dir
         env['SYSTEMD_SYSVRCND_PATH'] = self.rcnd_dir
@@ -80,7 +82,7 @@ class SysvGeneratorTest(unittest.TestCase):
                 cp = RawConfigParser(dict_type=MultiDict)
             cp.optionxform = lambda o: o  # don't lower-case option names
             with open(service) as f:
-                cp.readfp(f)
+                cp.read_file(f)
             results[os.path.basename(service)] = cp
 
         return (err, results)

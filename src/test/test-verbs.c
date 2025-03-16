@@ -1,7 +1,10 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+
+#include <getopt.h>
 
 #include "macro.h"
 #include "strv.h"
+#include "tests.h"
 #include "verbs.h"
 
 static int noop_dispatcher(int argc, char *argv[], void *userdata) {
@@ -12,7 +15,7 @@ static int noop_dispatcher(int argc, char *argv[], void *userdata) {
         optind = 0; \
         assert_se(dispatch_verb(strv_length(argv), argv, verbs, NULL) == expected);
 
-static void test_verbs(void) {
+TEST(verbs) {
         static const Verb verbs[] = {
                 { "help",        VERB_ANY, VERB_ANY, 0,            noop_dispatcher },
                 { "list-images", VERB_ANY, 1,        0,            noop_dispatcher },
@@ -44,18 +47,35 @@ static void test_verbs(void) {
         test_dispatch_one(STRV_MAKE_EMPTY, verbs, 0);
 }
 
-static void test_verbs_no_default(void) {
+TEST(verbs_no_default) {
         static const Verb verbs[] = {
                 { "help", VERB_ANY, VERB_ANY, 0, noop_dispatcher },
                 {},
         };
 
         test_dispatch_one(STRV_MAKE(NULL), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("hel"), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("helpp"), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("hgrejgoraoiosafso"), verbs, -EINVAL);
 }
 
-int main(int argc, char *argv[]) {
-        test_verbs();
-        test_verbs_no_default();
+TEST(verbs_no_default_many) {
+        static const Verb verbs[] = {
+                { "help",        VERB_ANY, VERB_ANY, 0,            noop_dispatcher },
+                { "list-images", VERB_ANY, 1,        0,            noop_dispatcher },
+                { "list",        VERB_ANY, 2,        0,            noop_dispatcher },
+                { "status",      2,        VERB_ANY, 0,            noop_dispatcher },
+                { "show",        VERB_ANY, VERB_ANY, 0,            noop_dispatcher },
+                { "terminate",   2,        VERB_ANY, 0,            noop_dispatcher },
+                { "login",       2,        2,        0,            noop_dispatcher },
+                { "copy-to",     3,        4,        0,            noop_dispatcher },
+                {}
+        };
 
-        return 0;
+        test_dispatch_one(STRV_MAKE(NULL), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("hel"), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("helpp"), verbs, -EINVAL);
+        test_dispatch_one(STRV_MAKE("hgrejgoraoiosafso"), verbs, -EINVAL);
 }
+
+DEFINE_TEST_MAIN(LOG_INFO);

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #if !ENABLE_DNS_OVER_TLS || !DNS_OVER_TLS_USE_GNUTLS
@@ -8,13 +8,17 @@
 #include <gnutls/gnutls.h>
 #include <stdbool.h>
 
-struct DnsTlsServerData {
+struct DnsTlsManagerData {
         gnutls_certificate_credentials_t cert_cred;
+};
+
+struct DnsTlsServerData {
         gnutls_datum_t session_data;
 };
 
 struct DnsTlsStreamData {
         gnutls_session_t session;
+        gnutls_typed_vdata_st validation;
         int handshake;
         bool shutdown;
 };

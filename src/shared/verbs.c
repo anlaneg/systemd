@@ -1,35 +1,34 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <getopt.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <string.h>
 
 #include "env-util.h"
 #include "log.h"
 #include "macro.h"
 #include "process-util.h"
 #include "string-util.h"
+#include "strv.h"
 #include "verbs.h"
 #include "virt.h"
 
-/* Wraps running_in_chroot() which is used in various places, but also adds an environment variable check so external
- * processes can reliably force this on.
- */
+/* Wraps running_in_chroot() which is used in various places, but also adds an environment variable check
+ * so external processes can reliably force this on. */
 bool running_in_chroot_or_offline(void) {
         int r;
 
-        /* Added to support use cases like rpm-ostree, where from %post scripts we only want to execute "preset", but
-         * not "start"/"restart" for example.
+        /* Added to support use cases like rpm-ostree, where from %post scripts we only want to execute "preset",
+         * but not "start"/"restart" for example.
          *
          * See docs/ENVIRONMENT.md for docs.
          */
         r = getenv_bool("SYSTEMD_OFFLINE");
-        if (r < 0 && r != -ENXIO)
-                log_debug_errno(r, "Failed to parse $SYSTEMD_OFFLINE: %m");
-        else if (r >= 0)
+        if (r >= 0)
                 return r > 0;
+        if (r != -ENXIO)
+                log_debug_errno(r, "Failed to parse $SYSTEMD_OFFLINE, ignoring: %m");
 
         /* We've had this condition check for a long time which basically checks for legacy chroot case like Fedora's
          * "mock", which is used for package builds.  We don't want to try to start systemd services there, since
@@ -41,20 +40,30 @@ bool running_in_chroot_or_offline(void) {
          */
         r = running_in_chroot();
         if (r < 0)
-                log_debug_errno(r, "running_in_chroot(): %m");
-
+                log_debug_errno(r, "Failed to check if we're running in chroot, assuming not: %m");
         return r > 0;
 }
 
 /*按argv[0]确定子命令，映射对应的verbs,执行参数检查，并调用verbs->dispatch*/
-int dispatch_verb(int argc, char *argv[], const Verb verbs[]/*各命令对应的执行函数*/, void *userdata) {
+const Verb* verbs_find_verb(const char *name, const Verb verbs[]/*各命令对应的执行函数*/) {
+        assert(verbs);
+
+        for (size_t i = 0; verbs[i].dispatch; i++)
+                if (name ? streq(name, verbs[i].verb) : FLAGS_SET(verbs[i].flags, VERB_DEFAULT))
+                        return verbs + i;
+
+        /* At the end of the list? */
+        return NULL;
+}
+
+int dispatch_verb(int argc, char *argv[], const Verb verbs[], void *userdata) {
         const Verb *verb;
         const char *name;
-        unsigned i;
-        int left, r;
+        int r, left;
 
         assert(verbs);
         assert(verbs[0].dispatch);
+        assert(verbs[0].verb);
         assert(argc >= 0);
         assert(argv);
         assert(argc >= optind);
@@ -64,34 +73,37 @@ int dispatch_verb(int argc, char *argv[], const Verb verbs[]/*各命令对应的
         optind = 0;
         name = argv[0];/*取第一个参数作用命令名称*/
 
-        for (i = 0;; i++) {
-                bool found;
+        verb = verbs_find_verb(name, verbs);
+        if (!verb) {
+                _cleanup_strv_free_ char **verb_strv = NULL;
 
-                /* At the end of the list? */
-                if (!verbs[i].dispatch) {
-                	/*未找到对应的处理函数，报错*/
-                        if (name)
-                                log_error("Unknown operation %s.", name);
-                        else
-                                log_error("Requires operation parameter.");
-                        return -EINVAL;
+                for (size_t i = 0; verbs[i].dispatch; i++) {
+                        r = strv_extend(&verb_strv, verbs[i].verb);
+                        if (r < 0)
+                                return log_oom();
                 }
 
-                if (name)
-                    /*检查verbs[i]的命令与name是否匹配*/
-                        found = streq(name, verbs[i].verb);
-                else
-                    /*未提供name，当前命令有default标记，则使用默认命令*/
-                        found = verbs[i].flags & VERB_DEFAULT;
+                if (name) {
+                        /* Be more helpful to the user, and give a hint what the user might have wanted to type. */
+                        const char *found = strv_find_closest(verb_strv, name);
+                        if (found)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Unknown command verb '%s', did you mean '%s'?", name, found);
 
-                if (found) {
-                    /*命中，确定要执行的动作，跳出*/
-                        verb = &verbs[i];
-                        break;
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Unknown command verb '%s'.", name);
                 }
+
+                if (strv_length(verb_strv) >= 2) {
+                        _cleanup_free_ char *joined = strv_join(verb_strv, ", ");
+                        if (!joined)
+                                return log_oom();
+
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Command verb required (one of %s).", joined);
+                }
+
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Command verb '%s' required.", verbs[0].verb);
         }
-
-        assert(verb);
 
         if (!name)
                 left = 1;
@@ -99,39 +111,21 @@ int dispatch_verb(int argc, char *argv[], const Verb verbs[]/*各命令对应的
         /*子命令参数数目校验*/
         if (verb->min_args != VERB_ANY &&
             (unsigned) left < verb->min_args)
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "Too few arguments.");
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Too few arguments.");
 
         if (verb->max_args != VERB_ANY &&
             (unsigned) left > verb->max_args)
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "Too many arguments.");
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Too many arguments.");
 
         if ((verb->flags & VERB_ONLINE_ONLY) && running_in_chroot_or_offline()) {
         	/*此命令仅容许在chroot中运行，退出*/
-                if (name)
-                        log_info("Running in chroot, ignoring request: %s", name);
-                else
-                        log_info("Running in chroot, ignoring request.");
+                log_info("Running in chroot, ignoring command '%s'", name ?: verb->verb);
                 return 0;
         }
 
-        if (verb->flags & VERB_MUST_BE_ROOT) {
-        	/*必须以root权限运行*/
-                r = must_be_root();
-                if (r < 0)
-                        return r;
-        }
-
+        if (!name)
         /*执行选中的子命令*/
-        if (name)
-                return verb->dispatch(left, argv, userdata);
-        else {
-                char* fake[2] = {
-                        (char*) verb->verb,
-                        NULL
-                };
+                return verb->dispatch(1, STRV_MAKE(verb->verb), userdata);
 
-                return verb->dispatch(1, fake, userdata);
-        }
+        return verb->dispatch(left, argv, userdata);
 }

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <poll.h>
@@ -9,6 +9,7 @@
 #include "device-monitor-private.h"
 #include "device-private.h"
 #include "device-util.h"
+#include "io-util.h"
 #include "libudev-device-internal.h"
 #include "string-util.h"
 
@@ -49,7 +50,7 @@ static MonitorNetlinkGroup monitor_netlink_group_from_string(const char *name) {
  * source. Valid sources identifiers are "udev" and "kernel".
  *
  * Applications should usually not connect directly to the
- * "kernel" events, because the devices might not be useable
+ * "kernel" events, because the devices might not be usable
  * at that time, before udev has configured them, and created
  * device nodes. Accessing devices at the same time as udev,
  * might result in unpredictable behavior. The "udev" events
@@ -108,14 +109,12 @@ _public_ int udev_monitor_filter_update(struct udev_monitor *udev_monitor) {
  * udev_monitor_enable_receiving:
  * @udev_monitor: the monitor which should receive events
  *
- * Binds the @udev_monitor socket to the event source.
+ * Deprecated, and alias of udev_monitor_filter_update().
  *
  * Returns: 0 on success, otherwise a negative error value.
  */
 _public_ int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
-        assert_return(udev_monitor, -EINVAL);
-
-        return device_monitor_enable_receiving(udev_monitor->monitor);
+        return udev_monitor_filter_update(udev_monitor);
 }
 
 /**
@@ -187,39 +186,32 @@ _public_ struct udev *udev_monitor_get_udev(struct udev_monitor *udev_monitor) {
 _public_ int udev_monitor_get_fd(struct udev_monitor *udev_monitor) {
         assert_return(udev_monitor, -EINVAL);
 
-        return device_monitor_get_fd(udev_monitor->monitor);
+        return sd_device_monitor_get_fd(udev_monitor->monitor);
 }
 
 static int udev_monitor_receive_sd_device(struct udev_monitor *udev_monitor, sd_device **ret) {
-        struct pollfd pfd;
         int r;
 
         assert(udev_monitor);
         assert(ret);
 
-        pfd = (struct pollfd) {
-                .fd = device_monitor_get_fd(udev_monitor->monitor),
-                .events = POLLIN,
-        };
-
         for (;;) {
                 /* r == 0 means a device is received but it does not pass the current filter. */
-                r = device_monitor_receive_device(udev_monitor->monitor, ret);
+                r = sd_device_monitor_receive(udev_monitor->monitor, ret);
                 if (r != 0)
                         return r;
 
                 for (;;) {
-                        /* wait next message */
-                        r = poll(&pfd, 1, 0);
-                        if (r < 0) {
-                                if (IN_SET(errno, EINTR, EAGAIN))
-                                        continue;
-
-                                return -errno;
-                        } else if (r == 0)
+                        /* Wait for next message */
+                        r = fd_wait_for_event(sd_device_monitor_get_fd(udev_monitor->monitor), POLLIN, 0);
+                        if (r == -EINTR)
+                                continue;
+                        if (r < 0)
+                                return r;
+                        if (r == 0)
                                 return -EAGAIN;
 
-                        /* receive next message */
+                        /* Receive next message */
                         break;
                 }
         }
@@ -271,9 +263,12 @@ _public_ struct udev_device *udev_monitor_receive_device(struct udev_monitor *ud
  * Returns: 0 on success, otherwise a negative error value.
  */
 _public_ int udev_monitor_filter_add_match_subsystem_devtype(struct udev_monitor *udev_monitor, const char *subsystem, const char *devtype) {
+        int r;
+
         assert_return(udev_monitor, -EINVAL);
 
-        return sd_device_monitor_filter_add_match_subsystem_devtype(udev_monitor->monitor, subsystem, devtype);
+        r = sd_device_monitor_filter_add_match_subsystem_devtype(udev_monitor->monitor, subsystem, devtype);
+        return r < 0 ? r : 0;
 }
 
 /**
@@ -289,9 +284,12 @@ _public_ int udev_monitor_filter_add_match_subsystem_devtype(struct udev_monitor
  * Returns: 0 on success, otherwise a negative error value.
  */
 _public_ int udev_monitor_filter_add_match_tag(struct udev_monitor *udev_monitor, const char *tag) {
+        int r;
+
         assert_return(udev_monitor, -EINVAL);
 
-        return sd_device_monitor_filter_add_match_tag(udev_monitor->monitor, tag);
+        r = sd_device_monitor_filter_add_match_tag(udev_monitor->monitor, tag);
+        return r < 0 ? r : 0;
 }
 
 /**

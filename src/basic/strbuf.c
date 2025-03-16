@@ -1,12 +1,12 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "alloc-util.h"
+#include "sort-util.h"
 #include "strbuf.h"
-#include "util.h"
 
 /*
  * Strbuf stores given strings in a single continuous allocated memory
@@ -26,12 +26,13 @@
  *   ...
  */
 
-struct strbuf *strbuf_new(void) {
-        struct strbuf *str;
+struct strbuf* strbuf_new(void) {
+        _cleanup_(strbuf_freep) struct strbuf *str = NULL;
 
         str = new(struct strbuf, 1);
         if (!str)
                 return NULL;
+
         /*初始化strbuf*/
         *str = (struct strbuf) {
                 .buf = new0(char, 1),
@@ -39,45 +40,45 @@ struct strbuf *strbuf_new(void) {
                 .len = 1,
                 .nodes_count = 1,
         };
-        if (!str->buf || !str->root) {
-                free(str->buf);
-                free(str->root);
-                return mfree(str);
-        }
+        if (!str->buf || !str->root)
+                return NULL;
 
-        return str;
+        return TAKE_PTR(str);
 }
 
 static struct strbuf_node* strbuf_node_cleanup(struct strbuf_node *node) {
-        size_t i;
+        assert(node);
 
-        for (i = 0; i < node->children_count; i++)
-                strbuf_node_cleanup(node->children[i].child);
+        FOREACH_ARRAY(child, node->children, node->children_count)
+                strbuf_node_cleanup(child->child);
+
         free(node->children);
         return mfree(node);
 }
 
 /* clean up trie data, leave only the string buffer */
 void strbuf_complete(struct strbuf *str) {
-        if (!str)
+        if (!str || !str->root)
                 return;
-        if (str->root)
-                str->root = strbuf_node_cleanup(str->root);
+
+        str->root = strbuf_node_cleanup(str->root);
 }
 
 /* clean up everything */
-void strbuf_cleanup(struct strbuf *str) {
+struct strbuf* strbuf_free(struct strbuf *str) {
         if (!str)
-                return;
+                return NULL;
 
         strbuf_complete(str);
         free(str->buf);
-        free(str);
+        return mfree(str);
 }
 
-static int strbuf_children_cmp(const struct strbuf_child_entry *n1,
-                               const struct strbuf_child_entry *n2) {
-        return n1->c - n2->c;
+static int strbuf_children_cmp(const struct strbuf_child_entry *n1, const struct strbuf_child_entry *n2) {
+        assert(n1);
+        assert(n2);
+
+        return CMP(n1->c, n2->c);
 }
 
 /*通过c进行查询，构造strbuf_child_entry，并将其加入到node->children内*/
@@ -109,14 +110,15 @@ static void bubbleinsert(struct strbuf_node *node,
 }
 
 /* add string, return the index/offset into the buffer */
-ssize_t strbuf_add_string(struct strbuf *str, const char *s/*字符串*/, size_t len/*字符串长度*/) {
+ssize_t strbuf_add_string_full(struct strbuf *str, const char *s/*字符串*/, size_t len/*字符串长度*/) {
         uint8_t c;
-        struct strbuf_node *node;
-        size_t depth;
-        char *buf_new;
-        struct strbuf_child_entry *child;
-        struct strbuf_node *node_child;
         ssize_t off;
+
+        assert(str);
+        assert(s || len == 0);
+
+        if (len == SIZE_MAX)
+                len = strlen(s);
 
         if (!str->root)
             /*root不得为空*/
@@ -131,10 +133,8 @@ ssize_t strbuf_add_string(struct strbuf *str, const char *s/*字符串*/, size_t
         }
         str->in_len += len;
 
-        node = str->root;
-        for (depth = 0; depth <= len; depth++) {
-                struct strbuf_child_entry search;
-
+        struct strbuf_node *node = str->root;
+        for (size_t depth = 0; depth <= len; depth++) {
                 /* match against current node */
                 off = node->value_off + node->value_len - len;
                 if (depth == len /*最后一个字符*/|| (node->value_len >= len/*此node字符串大于要加入的*/ && memcmp(str->buf + off, s, len) == 0)) {
@@ -146,7 +146,7 @@ ssize_t strbuf_add_string(struct strbuf *str, const char *s/*字符串*/, size_t
                 c = s[len - 1 - depth];/*逆序取s的元素*/
 
                 /* lookup child node */
-                search.c = c;
+                struct strbuf_child_entry *child, search = { .c = c };
                 child = typesafe_bsearch(&search, node->children, node->children_count, strbuf_children_cmp);
                 if (!child)
                     /*c不在node->children中存在，跳出*/
@@ -156,16 +156,16 @@ ssize_t strbuf_add_string(struct strbuf *str, const char *s/*字符串*/, size_t
         }
 
         /* add new string */
-        buf_new = realloc(str->buf, str->len + len+1);/*增加要添加的字符串*/
-        if (!buf_new)
+        if (!GREEDY_REALLOC(str->buf, str->len + len + 1))/*增加要添加的字符串*/
                 return -ENOMEM;
-        str->buf = buf_new;
         off = str->len;
         memcpy(str->buf + off, s, len);/*在off位置，写入要填加的字符串*/
         str->len += len;
         str->buf[str->len++] = '\0';/*填字符串终止符*/
 
         /* new node */
+        _cleanup_free_ struct strbuf_node *node_child = NULL;
+
         node_child = new(struct strbuf_node, 1);/*增加一个node*/
         if (!node_child)
                 return -ENOMEM;
@@ -176,16 +176,12 @@ ssize_t strbuf_add_string(struct strbuf *str, const char *s/*字符串*/, size_t
 
         /*扩充node->children数组*/
         /* extend array, add new entry, sort for bisection */
-        child = reallocarray(node->children, node->children_count + 1, sizeof(struct strbuf_child_entry));
-        if (!child) {
-                free(node_child);
+        if (!GREEDY_REALLOC(node->children, node->children_count + 1))
                 return -ENOMEM;
-        }
 
         str->nodes_count++;
 
-        node->children = child;
-        bubbleinsert(node, c, node_child);
+        bubbleinsert(node, c, TAKE_PTR(node_child));
 
         return off;
 }

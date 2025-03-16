@@ -1,17 +1,14 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <linux/oom.h>
-#include <sched.h>
-#include <signal.h>
+#include <pthread.h>
+#include <spawn.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <stdio_ext.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/personality.h>
 #include <sys/prctl.h>
@@ -23,34 +20,63 @@
 #include <valgrind/valgrind.h>
 #endif
 
+#include "sd-messages.h"
+
 #include "alloc-util.h"
 #include "architecture.h"
+#include "argv-util.h"
+#include "cgroup-util.h"
+#include "dirent-util.h"
+#include "env-file.h"
+#include "env-util.h"
+#include "errno-util.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
-#include "ioprio.h"
+#include "hostname-util.h"
+#include "io-util.h"
+#include "locale-util.h"
 #include "log.h"
 #include "macro.h"
-#include "missing.h"
+#include "memory-util.h"
+#include "missing_sched.h"
+#include "missing_syscall.h"
+#include "missing_threads.h"
+#include "mountpoint-util.h"
+#include "namespace-util.h"
+#include "nulstr-util.h"
+#include "parse-util.h"
+#include "path-util.h"
 #include "process-util.h"
 #include "raw-clone.h"
 #include "rlimit-util.h"
 #include "signal-util.h"
 #include "stat-util.h"
+#include "stdio-util.h"
 #include "string-table.h"
 #include "string-util.h"
 #include "terminal-util.h"
+#include "time-util.h"
 #include "user-util.h"
-#include "util.h"
+#include "utf8.h"
 
-int get_process_state(pid_t pid) {
+/* The kernel limits userspace processes to TASK_COMM_LEN (16 bytes), but allows higher values for its own
+ * workers, e.g. "kworker/u9:3-kcryptd/253:0". Let's pick a fixed smallish limit that will work for the kernel.
+ */
+#define COMM_MAX_LEN 128
+
+static int get_process_state(pid_t pid) {
+        _cleanup_free_ char *line = NULL;
         const char *p;
         char state;
         int r;
-        _cleanup_free_ char *line = NULL;
 
         assert(pid >= 0);
+
+        /* Shortcut: if we are enquired about our own state, we are obviously running */
+        if (pid == 0 || pid == getpid_cached())
+                return (unsigned char) 'R';
 
         p = procfs_file_alloca(pid, "stat");
 
@@ -72,327 +98,331 @@ int get_process_state(pid_t pid) {
         return (unsigned char) state;
 }
 
-int get_process_comm(pid_t pid, char **ret) {
+int pid_get_comm(pid_t pid, char **ret) {
         _cleanup_free_ char *escaped = NULL, *comm = NULL;
-        const char *p;
         int r;
 
-        assert(ret);
         assert(pid >= 0);
+        assert(ret);
 
-        escaped = new(char, TASK_COMM_LEN);
+        if (pid == 0 || pid == getpid_cached()) {
+                comm = new0(char, TASK_COMM_LEN + 1); /* Must fit in 16 byte according to prctl(2) */
+                if (!comm)
+                        return -ENOMEM;
+
+                if (prctl(PR_GET_NAME, comm) < 0)
+                        return -errno;
+        } else {
+                const char *p;
+
+                p = procfs_file_alloca(pid, "comm");
+
+                /* Note that process names of kernel threads can be much longer than TASK_COMM_LEN */
+                r = read_one_line_file(p, &comm);
+                if (r == -ENOENT)
+                        return -ESRCH;
+                if (r < 0)
+                        return r;
+        }
+
+        escaped = new(char, COMM_MAX_LEN);
         if (!escaped)
                 return -ENOMEM;
 
-        p = procfs_file_alloca(pid, "comm");
-
-        r = read_one_line_file(p, &comm);
-        if (r == -ENOENT)
-                return -ESRCH;
-        if (r < 0)
-                return r;
-
         /* Escape unprintable characters, just in case, but don't grow the string beyond the underlying size */
-        cellescape(escaped, TASK_COMM_LEN, comm);
+        cellescape(escaped, COMM_MAX_LEN, comm);
 
         *ret = TAKE_PTR(escaped);
         return 0;
 }
 
-int get_process_cmdline(pid_t pid, size_t max_length, bool comm_fallback, char **line) {
-        _cleanup_fclose_ FILE *f = NULL;
-        bool space = false;
-        char *k;
-        _cleanup_free_ char *ans = NULL;
+int pidref_get_comm(const PidRef *pid, char **ret) {
+        _cleanup_free_ char *comm = NULL;
+        int r;
+
+        if (!pidref_is_set(pid))
+                return -ESRCH;
+
+        if (pidref_is_remote(pid))
+                return -EREMOTE;
+
+        r = pid_get_comm(pid->pid, &comm);
+        if (r < 0)
+                return r;
+
+        r = pidref_verify(pid);
+        if (r < 0)
+                return r;
+
+        if (ret)
+                *ret = TAKE_PTR(comm);
+        return 0;
+}
+
+static int pid_get_cmdline_nulstr(
+                pid_t pid,
+                size_t max_size,
+                ProcessCmdlineFlags flags,
+                char **ret,
+                size_t *ret_size) {
+
+        _cleanup_free_ char *t = NULL;
         const char *p;
-        int c;
+        size_t k;
+        int r;
 
-        assert(line);
-        assert(pid >= 0);
-
-        /* Retrieves a process' command line. Replaces unprintable characters while doing so by whitespace (coalescing
-         * multiple sequential ones into one). If max_length is != 0 will return a string of the specified size at most
-         * (the trailing NUL byte does count towards the length here!), abbreviated with a "..." ellipsis. If
-         * comm_fallback is true and the process has no command line set (the case for kernel threads), or has a
-         * command line that resolves to the empty string will return the "comm" name of the process instead.
+        /* Retrieves a process' command line as a "sized nulstr", i.e. possibly without the last NUL, but
+         * with a specified size.
          *
-         * Returns -ESRCH if the process doesn't exist, and -ENOENT if the process has no command line (and
-         * comm_fallback is false). Returns 0 and sets *line otherwise. */
+         * If PROCESS_CMDLINE_COMM_FALLBACK is specified in flags and the process has no command line set
+         * (the case for kernel threads), or has a command line that resolves to the empty string, will
+         * return the "comm" name of the process instead. This will use at most _SC_ARG_MAX bytes of input
+         * data.
+         *
+         * Returns an error, 0 if output was read but is truncated, 1 otherwise.
+         */
 
         p = procfs_file_alloca(pid, "cmdline");
+        r = read_virtual_file(p, max_size, &t, &k); /* Let's assume that each input byte results in >= 1
+                                                     * columns of output. We ignore zero-width codepoints. */
+        if (r == -ENOENT)
+                return -ESRCH;
+        if (r < 0)
+                return r;
 
-        f = fopen(p, "re");
-        if (!f) {
-                if (errno == ENOENT)
-                        return -ESRCH;
-                return -errno;
-        }
-
-        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
-
-        if (max_length == 0) {
-                /* This is supposed to be a safety guard against runaway command lines. */
-                long l = sysconf(_SC_ARG_MAX);
-                assert(l > 0);
-                max_length = l;
-        }
-
-        if (max_length == 1) {
-
-                /* If there's only room for one byte, return the empty string */
-                ans = new0(char, 1);
-                if (!ans)
-                        return -ENOMEM;
-
-                *line = TAKE_PTR(ans);
-                return 0;
-
-        } else {
-                bool dotdotdot = false;
-                size_t left;
-
-                ans = new(char, max_length);
-                if (!ans)
-                        return -ENOMEM;
-
-                k = ans;
-                left = max_length;
-                while ((c = getc(f)) != EOF) {
-
-                        if (isprint(c)) {
-
-                                if (space) {
-                                        if (left <= 2) {
-                                                dotdotdot = true;
-                                                break;
-                                        }
-
-                                        *(k++) = ' ';
-                                        left--;
-                                        space = false;
-                                }
-
-                                if (left <= 1) {
-                                        dotdotdot = true;
-                                        break;
-                                }
-
-                                *(k++) = (char) c;
-                                left--;
-                        } else if (k > ans)
-                                space = true;
-                }
-
-                if (dotdotdot) {
-                        if (max_length <= 4) {
-                                k = ans;
-                                left = max_length;
-                        } else {
-                                k = ans + max_length - 4;
-                                left = 4;
-
-                                /* Eat up final spaces */
-                                while (k > ans && isspace(k[-1])) {
-                                        k--;
-                                        left++;
-                                }
-                        }
-
-                        strncpy(k, "...", left-1);
-                        k[left-1] = 0;
-                } else
-                        *k = 0;
-        }
-
-        /* Kernel threads have no argv[] */
-        if (isempty(ans)) {
-                _cleanup_free_ char *t = NULL;
-                int h;
-
-                ans = mfree(ans);
-
-                if (!comm_fallback)
+        if (k == 0) {
+                if (!(flags & PROCESS_CMDLINE_COMM_FALLBACK))
                         return -ENOENT;
 
-                h = get_process_comm(pid, &t);
-                if (h < 0)
-                        return h;
+                /* Kernel threads have no argv[] */
+                _cleanup_free_ char *comm = NULL;
 
-                size_t l = strlen(t);
+                r = pid_get_comm(pid, &comm);
+                if (r < 0)
+                        return r;
 
-                if (l + 3 <= max_length) {
-                        ans = strjoin("[", t, "]");
-                        if (!ans)
-                                return -ENOMEM;
+                free(t);
+                t = strjoin("[", comm, "]");
+                if (!t)
+                        return -ENOMEM;
 
-                } else if (max_length <= 6) {
-                        ans = new(char, max_length);
-                        if (!ans)
-                                return -ENOMEM;
-
-                        memcpy(ans, "[...]", max_length-1);
-                        ans[max_length-1] = 0;
-                } else {
-                        t[max_length - 6] = 0;
-
-                        /* Chop off final spaces */
-                        delete_trailing_chars(t, WHITESPACE);
-
-                        ans = strjoin("[", t, "...]");
-                        if (!ans)
-                                return -ENOMEM;
-                }
-
-                *line = TAKE_PTR(ans);
-                return 0;
+                k = strlen(t);
+                r = k <= max_size;
+                if (r == 0) /* truncation */
+                        t[max_size] = '\0';
         }
 
-        k = realloc(ans, strlen(ans) + 1);
-        if (!k)
+        if (ret)
+                *ret = TAKE_PTR(t);
+        if (ret_size)
+                *ret_size = k;
+
+        return r;
+}
+
+int pid_get_cmdline(pid_t pid, size_t max_columns, ProcessCmdlineFlags flags, char **ret) {
+        _cleanup_free_ char *t = NULL;
+        size_t k;
+        char *ans;
+
+        assert(pid >= 0);
+        assert(ret);
+
+        /* Retrieve and format a command line. See above for discussion of retrieval options.
+         *
+         * There are two main formatting modes:
+         *
+         * - when PROCESS_CMDLINE_QUOTE is specified, output is quoted in C/Python style. If no shell special
+         *   characters are present, this output can be copy-pasted into the terminal to execute. UTF-8
+         *   output is assumed.
+         *
+         * - otherwise, a compact non-roundtrippable form is returned. Non-UTF8 bytes are replaced by �. The
+         *   returned string is of the specified console width at most, abbreviated with an ellipsis.
+         *
+         * Returns -ESRCH if the process doesn't exist, and -ENOENT if the process has no command line (and
+         * PROCESS_CMDLINE_COMM_FALLBACK is not specified). Returns 0 and sets *line otherwise. */
+
+        int full = pid_get_cmdline_nulstr(pid, max_columns, flags, &t, &k);
+        if (full < 0)
+                return full;
+
+        if (flags & (PROCESS_CMDLINE_QUOTE | PROCESS_CMDLINE_QUOTE_POSIX)) {
+                ShellEscapeFlags shflags = SHELL_ESCAPE_EMPTY |
+                        FLAGS_SET(flags, PROCESS_CMDLINE_QUOTE_POSIX) * SHELL_ESCAPE_POSIX;
+
+                assert(!(flags & PROCESS_CMDLINE_USE_LOCALE));
+
+                _cleanup_strv_free_ char **args = NULL;
+
+                /* Drop trailing NULs, otherwise strv_parse_nulstr() adds additional empty strings at the end.
+                 * See also issue #21186. */
+                args = strv_parse_nulstr_full(t, k, /* drop_trailing_nuls = */ true);
+                if (!args)
+                        return -ENOMEM;
+
+                ans = quote_command_line(args, shflags);
+                if (!ans)
+                        return -ENOMEM;
+        } else {
+                /* Arguments are separated by NULs. Let's replace those with spaces. */
+                for (size_t i = 0; i < k - 1; i++)
+                        if (t[i] == '\0')
+                                t[i] = ' ';
+
+                delete_trailing_chars(t, WHITESPACE);
+
+                bool eight_bit = (flags & PROCESS_CMDLINE_USE_LOCALE) && !is_locale_utf8();
+
+                ans = escape_non_printable_full(t, max_columns,
+                                                eight_bit * XESCAPE_8_BIT | !full * XESCAPE_FORCE_ELLIPSIS);
+                if (!ans)
+                        return -ENOMEM;
+
+                ans = str_realloc(ans);
+        }
+
+        *ret = ans;
+        return 0;
+}
+
+int pidref_get_cmdline(const PidRef *pid, size_t max_columns, ProcessCmdlineFlags flags, char **ret) {
+        _cleanup_free_ char *s = NULL;
+        int r;
+
+        if (!pidref_is_set(pid))
+                return -ESRCH;
+
+        if (pidref_is_remote(pid))
+                return -EREMOTE;
+
+        r = pid_get_cmdline(pid->pid, max_columns, flags, &s);
+        if (r < 0)
+                return r;
+
+        r = pidref_verify(pid);
+        if (r < 0)
+                return r;
+
+        if (ret)
+                *ret = TAKE_PTR(s);
+        return 0;
+}
+
+int pid_get_cmdline_strv(pid_t pid, ProcessCmdlineFlags flags, char ***ret) {
+        _cleanup_free_ char *t = NULL;
+        char **args;
+        size_t k;
+        int r;
+
+        assert(pid >= 0);
+        assert((flags & ~PROCESS_CMDLINE_COMM_FALLBACK) == 0);
+        assert(ret);
+
+        r = pid_get_cmdline_nulstr(pid, SIZE_MAX, flags, &t, &k);
+        if (r < 0)
+                return r;
+
+        args = strv_parse_nulstr_full(t, k, /* drop_trailing_nuls = */ true);
+        if (!args)
                 return -ENOMEM;
 
-        ans = NULL;
-        *line = k;
+        *ret = args;
+        return 0;
+}
+
+int pidref_get_cmdline_strv(const PidRef *pid, ProcessCmdlineFlags flags, char ***ret) {
+        _cleanup_strv_free_ char **args = NULL;
+        int r;
+
+        if (!pidref_is_set(pid))
+                return -ESRCH;
+
+        if (pidref_is_remote(pid))
+                return -EREMOTE;
+
+        r = pid_get_cmdline_strv(pid->pid, flags, &args);
+        if (r < 0)
+                return r;
+
+        r = pidref_verify(pid);
+        if (r < 0)
+                return r;
+
+        if (ret)
+                *ret = TAKE_PTR(args);
 
         return 0;
 }
 
-int rename_process(const char name[]) {
-        static size_t mm_size = 0;
-        static char *mm = NULL;
-        bool truncated = false;
-        size_t l;
+int container_get_leader(const char *machine, pid_t *pid) {
+        _cleanup_free_ char *s = NULL, *class = NULL;
+        const char *p;
+        pid_t leader;
+        int r;
 
-        /* This is a like a poor man's setproctitle(). It changes the comm field, argv[0], and also the glibc's
-         * internally used name of the process. For the first one a limit of 16 chars applies; to the second one in
-         * many cases one of 10 (i.e. length of "/sbin/init") — however if we have CAP_SYS_RESOURCES it is unbounded;
-         * to the third one 7 (i.e. the length of "systemd". If you pass a longer string it will likely be
-         * truncated.
-         *
-         * Returns 0 if a name was set but truncated, > 0 if it was set but not truncated. */
+        assert(machine);
+        assert(pid);
 
-        if (isempty(name))
-                return -EINVAL; /* let's not confuse users unnecessarily with an empty name */
-
-        if (!is_main_thread())
-                return -EPERM; /* Let's not allow setting the process name from other threads than the main one, as we
-                                * cache things without locking, and we make assumptions that PR_SET_NAME sets the
-                                * process name that isn't correct on any other threads */
-
-        l = strlen(name);
-
-        /* First step, change the comm field. The main thread's comm is identical to the process comm. This means we
-         * can use PR_SET_NAME, which sets the thread name for the calling thread. */
-        if (prctl(PR_SET_NAME, name) < 0)
-                log_debug_errno(errno, "PR_SET_NAME failed: %m");
-        if (l >= TASK_COMM_LEN) /* Linux process names can be 15 chars at max */
-                truncated = true;
-
-        /* Second step, change glibc's ID of the process name. */
-        if (program_invocation_name) {
-                size_t k;
-
-                k = strlen(program_invocation_name);
-                strncpy(program_invocation_name, name, k);
-                if (l > k)
-                        truncated = true;
+        if (streq(machine, ".host")) {
+                *pid = 1;
+                return 0;
         }
 
-        /* Third step, completely replace the argv[] array the kernel maintains for us. This requires privileges, but
-         * has the advantage that the argv[] array is exactly what we want it to be, and not filled up with zeros at
-         * the end. This is the best option for changing /proc/self/cmdline. */
+        if (!hostname_is_valid(machine, 0))
+                return -EINVAL;
 
-        /* Let's not bother with this if we don't have euid == 0. Strictly speaking we should check for the
-         * CAP_SYS_RESOURCE capability which is independent of the euid. In our own code the capability generally is
-         * present only for euid == 0, hence let's use this as quick bypass check, to avoid calling mmap() if
-         * PR_SET_MM_ARG_{START,END} fails with EPERM later on anyway. After all geteuid() is dead cheap to call, but
-         * mmap() is not. */
-        if (geteuid() != 0)
-                log_debug("Skipping PR_SET_MM, as we don't have privileges.");
-        else if (mm_size < l+1) {
-                size_t nn_size;
-                char *nn;
+        p = strjoina("/run/systemd/machines/", machine);
+        r = parse_env_file(NULL, p,
+                           "LEADER", &s,
+                           "CLASS", &class);
+        if (r == -ENOENT)
+                return -EHOSTDOWN;
+        if (r < 0)
+                return r;
+        if (!s)
+                return -EIO;
 
-                nn_size = PAGE_ALIGN(l+1);
-                nn = mmap(NULL, nn_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-                if (nn == MAP_FAILED) {
-                        log_debug_errno(errno, "mmap() failed: %m");
-                        goto use_saved_argv;
-                }
+        if (!streq_ptr(class, "container"))
+                return -EIO;
 
-                strncpy(nn, name, nn_size);
+        r = parse_pid(s, &leader);
+        if (r < 0)
+                return r;
+        if (leader <= 1)
+                return -EIO;
 
-                /* Now, let's tell the kernel about this new memory */
-                if (prctl(PR_SET_MM, PR_SET_MM_ARG_START, (unsigned long) nn, 0, 0) < 0) {
-                        /* HACK: prctl() API is kind of dumb on this point.  The existing end address may already be
-                         * below the desired start address, in which case the kernel may have kicked this back due
-                         * to a range-check failure (see linux/kernel/sys.c:validate_prctl_map() to see this in
-                         * action).  The proper solution would be to have a prctl() API that could set both start+end
-                         * simultaneously, or at least let us query the existing address to anticipate this condition
-                         * and respond accordingly.  For now, we can only guess at the cause of this failure and try
-                         * a workaround--which will briefly expand the arg space to something potentially huge before
-                         * resizing it to what we want. */
-                        log_debug_errno(errno, "PR_SET_MM_ARG_START failed, attempting PR_SET_MM_ARG_END hack: %m");
-
-                        if (prctl(PR_SET_MM, PR_SET_MM_ARG_END, (unsigned long) nn + l + 1, 0, 0) < 0) {
-                                log_debug_errno(errno, "PR_SET_MM_ARG_END hack failed, proceeding without: %m");
-                                (void) munmap(nn, nn_size);
-                                goto use_saved_argv;
-                        }
-
-                        if (prctl(PR_SET_MM, PR_SET_MM_ARG_START, (unsigned long) nn, 0, 0) < 0) {
-                                log_debug_errno(errno, "PR_SET_MM_ARG_START still failed, proceeding without: %m");
-                                goto use_saved_argv;
-                        }
-                } else {
-                        /* And update the end pointer to the new end, too. If this fails, we don't really know what
-                         * to do, it's pretty unlikely that we can rollback, hence we'll just accept the failure,
-                         * and continue. */
-                        if (prctl(PR_SET_MM, PR_SET_MM_ARG_END, (unsigned long) nn + l + 1, 0, 0) < 0)
-                                log_debug_errno(errno, "PR_SET_MM_ARG_END failed, proceeding without: %m");
-                }
-
-                if (mm)
-                        (void) munmap(mm, mm_size);
-
-                mm = nn;
-                mm_size = nn_size;
-        } else {
-                strncpy(mm, name, mm_size);
-
-                /* Update the end pointer, continuing regardless of any failure. */
-                if (prctl(PR_SET_MM, PR_SET_MM_ARG_END, (unsigned long) mm + l + 1, 0, 0) < 0)
-                        log_debug_errno(errno, "PR_SET_MM_ARG_END failed, proceeding without: %m");
-        }
-
-use_saved_argv:
-        /* Fourth step: in all cases we'll also update the original argv[], so that our own code gets it right too if
-         * it still looks here */
-
-        if (saved_argc > 0) {
-                int i;
-
-                if (saved_argv[0]) {
-                        size_t k;
-
-                        k = strlen(saved_argv[0]);
-                        strncpy(saved_argv[0], name, k);
-                        if (l > k)
-                                truncated = true;
-                }
-
-                for (i = 1; i < saved_argc; i++) {
-                        if (!saved_argv[i])
-                                break;
-
-                        memzero(saved_argv[i], strlen(saved_argv[i]));
-                }
-        }
-
-        return !truncated;
+        *pid = leader;
+        return 0;
 }
 
-int is_kernel_thread(pid_t pid) {
+int namespace_get_leader(pid_t pid, NamespaceType type, pid_t *ret) {
+        int r;
+
+        assert(ret);
+
+        for (;;) {
+                pid_t ppid;
+
+                r = get_process_ppid(pid, &ppid);
+                if (r < 0)
+                        return r;
+
+                r = in_same_namespace(pid, ppid, type);
+                if (r < 0)
+                        return r;
+                if (r == 0) {
+                        /* If the parent and the child are not in the same
+                         * namespace, then the child is the leader we are
+                         * looking for. */
+                        *ret = pid;
+                        return 0;
+                }
+
+                pid = ppid;
+        }
+}
+
+int pid_is_kernel_thread(pid_t pid) {
         _cleanup_free_ char *line = NULL;
         unsigned long long flags;
         size_t l, i;
@@ -450,165 +480,192 @@ int is_kernel_thread(pid_t pid) {
         return !!(flags & PF_KTHREAD);
 }
 
-int get_process_capeff(pid_t pid, char **capeff) {
+int pidref_is_kernel_thread(const PidRef *pid) {
+        int result, r;
+
+        if (!pidref_is_set(pid))
+                return -ESRCH;
+
+        if (pidref_is_remote(pid))
+                return -EREMOTE;
+
+        result = pid_is_kernel_thread(pid->pid);
+        if (result < 0)
+                return result;
+
+        r = pidref_verify(pid); /* Verify that the PID wasn't reused since */
+        if (r < 0)
+                return r;
+
+        return result;
+}
+
+int get_process_capeff(pid_t pid, char **ret) {
         const char *p;
         int r;
 
-        assert(capeff);
         assert(pid >= 0);
+        assert(ret);
 
         p = procfs_file_alloca(pid, "status");
 
-        r = get_proc_field(p, "CapEff", WHITESPACE, capeff);
+        r = get_proc_field(p, "CapEff", WHITESPACE, ret);
         if (r == -ENOENT)
                 return -ESRCH;
 
         return r;
 }
 
-static int get_process_link_contents(const char *proc_file, char **name) {
+static int get_process_link_contents(pid_t pid, const char *proc_file, char **ret) {
+        const char *p;
         int r;
 
         assert(proc_file);
-        assert(name);
 
-        r = readlink_malloc(proc_file, name);
-        if (r == -ENOENT)
-                return -ESRCH;
-        if (r < 0)
-                return r;
+        p = procfs_file_alloca(pid, proc_file);
 
-        return 0;
+        r = readlink_malloc(p, ret);
+        return (r == -ENOENT && proc_mounted() > 0) ? -ESRCH : r;
 }
 
-int get_process_exe(pid_t pid, char **name) {
-        const char *p;
+int get_process_exe(pid_t pid, char **ret) {
         char *d;
         int r;
 
         assert(pid >= 0);
 
-        p = procfs_file_alloca(pid, "exe");
-        r = get_process_link_contents(p, name);
+        r = get_process_link_contents(pid, "exe", ret);
         if (r < 0)
                 return r;
 
-        d = endswith(*name, " (deleted)");
-        if (d)
-                *d = '\0';
+        if (ret) {
+                d = endswith(*ret, " (deleted)");
+                if (d)
+                        *d = '\0';
+        }
 
         return 0;
 }
 
-static int get_process_id(pid_t pid, const char *field, uid_t *uid) {
+static int get_process_id(pid_t pid, const char *field, uid_t *ret) {
         _cleanup_fclose_ FILE *f = NULL;
         const char *p;
         int r;
 
         assert(field);
-        assert(uid);
+        assert(ret);
 
         if (pid < 0)
                 return -EINVAL;
 
         p = procfs_file_alloca(pid, "status");
-        f = fopen(p, "re");
-        if (!f) {
-                if (errno == ENOENT)
-                        return -ESRCH;
-                return -errno;
-        }
-
-        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
+        r = fopen_unlocked(p, "re", &f);
+        if (r == -ENOENT)
+                return -ESRCH;
+        if (r < 0)
+                return r;
 
         for (;;) {
                 _cleanup_free_ char *line = NULL;
                 char *l;
 
-                r = read_line(f, LONG_LINE_MAX, &line);
+                r = read_stripped_line(f, LONG_LINE_MAX, &line);
                 if (r < 0)
                         return r;
                 if (r == 0)
                         break;
 
-                l = strstrip(line);
-
-                if (startswith(l, field)) {
-                        l += strlen(field);
+                l = startswith(line, field);
+                if (l) {
                         l += strspn(l, WHITESPACE);
 
                         l[strcspn(l, WHITESPACE)] = 0;
 
-                        return parse_uid(l, uid);
+                        return parse_uid(l, ret);
                 }
         }
 
         return -EIO;
 }
 
-int get_process_uid(pid_t pid, uid_t *uid) {
+int pid_get_uid(pid_t pid, uid_t *ret) {
+        assert(ret);
 
         if (pid == 0 || pid == getpid_cached()) {
-                *uid = getuid();
+                *ret = getuid();
                 return 0;
         }
 
-        return get_process_id(pid, "Uid:", uid);
+        return get_process_id(pid, "Uid:", ret);
 }
 
-int get_process_gid(pid_t pid, gid_t *gid) {
+int pidref_get_uid(const PidRef *pid, uid_t *ret) {
+        uid_t uid;
+        int r;
+
+        if (!pidref_is_set(pid))
+                return -ESRCH;
+
+        if (pidref_is_remote(pid))
+                return -EREMOTE;
+
+        r = pid_get_uid(pid->pid, &uid);
+        if (r < 0)
+                return r;
+
+        r = pidref_verify(pid);
+        if (r < 0)
+                return r;
+
+        if (ret)
+                *ret = uid;
+        return 0;
+}
+
+int get_process_gid(pid_t pid, gid_t *ret) {
 
         if (pid == 0 || pid == getpid_cached()) {
-                *gid = getgid();
+                *ret = getgid();
                 return 0;
         }
 
         assert_cc(sizeof(uid_t) == sizeof(gid_t));
-        return get_process_id(pid, "Gid:", gid);
+        return get_process_id(pid, "Gid:", ret);
 }
 
-int get_process_cwd(pid_t pid, char **cwd) {
-        const char *p;
-
+int get_process_cwd(pid_t pid, char **ret) {
         assert(pid >= 0);
 
-        p = procfs_file_alloca(pid, "cwd");
+        if (pid == 0 || pid == getpid_cached())
+                return safe_getcwd(ret);
 
-        return get_process_link_contents(p, cwd);
+        return get_process_link_contents(pid, "cwd", ret);
 }
 
-int get_process_root(pid_t pid, char **root) {
-        const char *p;
-
+int get_process_root(pid_t pid, char **ret) {
         assert(pid >= 0);
-
-        p = procfs_file_alloca(pid, "root");
-
-        return get_process_link_contents(p, root);
+        return get_process_link_contents(pid, "root", ret);
 }
 
 #define ENVIRONMENT_BLOCK_MAX (5U*1024U*1024U)
 
-int get_process_environ(pid_t pid, char **env) {
+int get_process_environ(pid_t pid, char **ret) {
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_free_ char *outcome = NULL;
-        size_t allocated = 0, sz = 0;
+        size_t sz = 0;
         const char *p;
         int r;
 
         assert(pid >= 0);
-        assert(env);
+        assert(ret);
 
         p = procfs_file_alloca(pid, "environ");
 
-        f = fopen(p, "re");
-        if (!f) {
-                if (errno == ENOENT)
-                        return -ESRCH;
-                return -errno;
-        }
-
-        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
+        r = fopen_unlocked(p, "re", &f);
+        if (r == -ENOENT)
+                return -ESRCH;
+        if (r < 0)
+                return r;
 
         for (;;) {
                 char c;
@@ -616,7 +673,7 @@ int get_process_environ(pid_t pid, char **env) {
                 if (sz >= ENVIRONMENT_BLOCK_MAX)
                         return -ENOBUFS;
 
-                if (!GREEDY_REALLOC(outcome, allocated, sz + 5))
+                if (!GREEDY_REALLOC(outcome, sz + 5))
                         return -ENOMEM;
 
                 r = safe_fgetc(f, &c);
@@ -632,24 +689,27 @@ int get_process_environ(pid_t pid, char **env) {
         }
 
         outcome[sz] = '\0';
-        *env = TAKE_PTR(outcome);
+        *ret = TAKE_PTR(outcome);
 
         return 0;
 }
 
-int get_process_ppid(pid_t pid, pid_t *_ppid) {
-        int r;
+int get_process_ppid(pid_t pid, pid_t *ret) {
         _cleanup_free_ char *line = NULL;
-        long unsigned ppid;
+        unsigned long ppid;
         const char *p;
+        int r;
 
         assert(pid >= 0);
-        assert(_ppid);
 
         if (pid == 0 || pid == getpid_cached()) {
-                *_ppid = getppid();
+                if (ret)
+                        *ret = getppid();
                 return 0;
         }
+
+        if (pid == 1) /* PID 1 has no parent, shortcut this case */
+                return -EADDRNOTAVAIL;
 
         p = procfs_file_alloca(pid, "stat");
         r = read_one_line_file(p, &line);
@@ -658,9 +718,8 @@ int get_process_ppid(pid_t pid, pid_t *_ppid) {
         if (r < 0)
                 return r;
 
-        /* Let's skip the pid and comm fields. The latter is enclosed
-         * in () but does not escape any () in its value, so let's
-         * skip over it manually */
+        /* Let's skip the pid and comm fields. The latter is enclosed in () but does not escape any () in its
+         * value, so let's skip over it manually */
 
         p = strrchr(line, ')');
         if (!p)
@@ -674,12 +733,116 @@ int get_process_ppid(pid_t pid, pid_t *_ppid) {
                    &ppid) != 1)
                 return -EIO;
 
-        if ((long unsigned) (pid_t) ppid != ppid)
+        /* If ppid is zero the process has no parent. Which might be the case for PID 1 but also for
+         * processes originating in other namespaces that are inserted into a pidns. Return a recognizable
+         * error in this case. */
+        if (ppid == 0)
+                return -EADDRNOTAVAIL;
+
+        if ((pid_t) ppid < 0 || (unsigned long) (pid_t) ppid != ppid)
                 return -ERANGE;
 
-        *_ppid = (pid_t) ppid;
+        if (ret)
+                *ret = (pid_t) ppid;
 
         return 0;
+}
+
+int pid_get_start_time(pid_t pid, usec_t *ret) {
+        _cleanup_free_ char *line = NULL;
+        const char *p;
+        int r;
+
+        assert(pid >= 0);
+
+        p = procfs_file_alloca(pid, "stat");
+        r = read_one_line_file(p, &line);
+        if (r == -ENOENT)
+                return -ESRCH;
+        if (r < 0)
+                return r;
+
+        /* Let's skip the pid and comm fields. The latter is enclosed in () but does not escape any () in its
+         * value, so let's skip over it manually */
+
+        p = strrchr(line, ')');
+        if (!p)
+                return -EIO;
+        p++;
+
+        unsigned long llu;
+
+        if (sscanf(p, " "
+                   "%*c " /* state */
+                   "%*u " /* ppid */
+                   "%*u " /* pgrp */
+                   "%*u " /* session */
+                   "%*u " /* tty_nr */
+                   "%*u " /* tpgid */
+                   "%*u " /* flags */
+                   "%*u " /* minflt */
+                   "%*u " /* cminflt */
+                   "%*u " /* majflt */
+                   "%*u " /* cmajflt */
+                   "%*u " /* utime */
+                   "%*u " /* stime */
+                   "%*u " /* cutime */
+                   "%*u " /* cstime */
+                   "%*i " /* priority */
+                   "%*i " /* nice */
+                   "%*u " /* num_threads */
+                   "%*u " /* itrealvalue */
+                   "%lu ", /* starttime */
+                   &llu) != 1)
+                return -EIO;
+
+        if (ret)
+                *ret = jiffies_to_usec(llu); /* CLOCK_BOOTTIME */
+
+        return 0;
+}
+
+int pidref_get_start_time(const PidRef *pid, usec_t *ret) {
+        usec_t t;
+        int r;
+
+        if (!pidref_is_set(pid))
+                return -ESRCH;
+
+        if (pidref_is_remote(pid))
+                return -EREMOTE;
+
+        r = pid_get_start_time(pid->pid, ret ? &t : NULL);
+        if (r < 0)
+                return r;
+
+        r = pidref_verify(pid);
+        if (r < 0)
+                return r;
+
+        if (ret)
+                *ret = t;
+
+        return 0;
+}
+
+int get_process_umask(pid_t pid, mode_t *ret) {
+        _cleanup_free_ char *m = NULL;
+        const char *p;
+        int r;
+
+        assert(pid >= 0);
+        assert(ret);
+
+        p = procfs_file_alloca(pid, "status");
+
+        r = get_proc_field(p, "Umask", WHITESPACE, &m);
+        if (r == -ENOENT)
+                return -ESRCH;
+        if (r < 0)
+                return r;
+
+        return parse_mode(m, ret);
 }
 
 int wait_for_terminate(pid_t pid, siginfo_t *status) {
@@ -727,7 +890,7 @@ int wait_for_terminate_and_check(const char *name, pid_t pid, WaitFlags flags) {
         assert(pid > 1);
 
         if (!name) {
-                r = get_process_comm(pid, &buffer);
+                r = pid_get_comm(pid, &buffer);
                 if (r < 0)
                         log_debug_errno(r, "Failed to acquire process name of " PID_FMT ", ignoring: %m", pid);
                 else
@@ -783,23 +946,22 @@ int wait_for_terminate_with_timeout(pid_t pid, usec_t timeout) {
 
         /* Drop into a sigtimewait-based timeout. Waiting for the
          * pid to exit. */
-        until = now(CLOCK_MONOTONIC) + timeout;
+        until = usec_add(now(CLOCK_MONOTONIC), timeout);
         for (;;) {
                 usec_t n;
                 siginfo_t status = {};
-                struct timespec ts;
 
                 n = now(CLOCK_MONOTONIC);
                 if (n >= until)
                         break;
 
-                r = sigtimedwait(&mask, NULL, timespec_store(&ts, until - n)) < 0 ? -errno : 0;
+                r = RET_NERRNO(sigtimedwait(&mask, NULL, TIMESPEC_STORE(until - n)));
                 /* Assuming we woke due to the child exiting. */
                 if (waitid(P_PID, pid, &status, WEXITED|WNOHANG) == 0) {
                         if (status.si_pid == pid) {
-                                /* This is the correct child.*/
+                                /* This is the correct child. */
                                 if (status.si_code == CLD_EXITED)
-                                        return (status.si_status == 0) ? 0 : -EPROTO;
+                                        return status.si_status == 0 ? 0 : -EPROTO;
                                 else
                                         return -EPROTO;
                         }
@@ -826,8 +988,8 @@ int wait_for_terminate_with_timeout(pid_t pid, usec_t timeout) {
 void sigkill_wait(pid_t pid) {
         assert(pid > 1);
 
-        if (kill(pid, SIGKILL) >= 0)
-                (void) wait_for_terminate(pid, NULL);
+        (void) kill(pid, SIGKILL);
+        (void) wait_for_terminate(pid, NULL);
 }
 
 void sigkill_waitp(pid_t *pid) {
@@ -844,14 +1006,31 @@ void sigkill_waitp(pid_t *pid) {
 void sigterm_wait(pid_t pid) {
         assert(pid > 1);
 
-        if (kill_and_sigcont(pid, SIGTERM) >= 0)
-                (void) wait_for_terminate(pid, NULL);
+        (void) kill_and_sigcont(pid, SIGTERM);
+        (void) wait_for_terminate(pid, NULL);
+}
+
+void sigkill_nowait(pid_t pid) {
+        assert(pid > 1);
+
+        (void) kill(pid, SIGKILL);
+}
+
+void sigkill_nowaitp(pid_t *pid) {
+        PROTECT_ERRNO;
+
+        if (!pid)
+                return;
+        if (*pid <= 1)
+                return;
+
+        sigkill_nowait(*pid);
 }
 
 int kill_and_sigcont(pid_t pid, int sig) {
         int r;
 
-        r = kill(pid, sig) < 0 ? -errno : 0;
+        r = RET_NERRNO(kill(pid, sig));
 
         /* If this worked, also send SIGCONT, unless we already just sent a SIGCONT, or SIGKILL was sent which isn't
          * affected by a process being suspended anyway. */
@@ -863,50 +1042,31 @@ int kill_and_sigcont(pid_t pid, int sig) {
 
 int getenv_for_pid(pid_t pid, const char *field, char **ret) {
         _cleanup_fclose_ FILE *f = NULL;
-        char *value = NULL;
         const char *path;
-        size_t l, sum = 0;
+        size_t sum = 0;
         int r;
 
         assert(pid >= 0);
         assert(field);
         assert(ret);
 
-        if (pid == 0 || pid == getpid_cached()) {
-                const char *e;
-
-                e = getenv(field);
-                if (!e) {
-                        *ret = NULL;
-                        return 0;
-                }
-
-                value = strdup(e);
-                if (!value)
-                        return -ENOMEM;
-
-                *ret = value;
-                return 1;
-        }
+        if (pid == 0 || pid == getpid_cached())
+                return strdup_to_full(ret, getenv(field));
 
         if (!pid_is_valid(pid))
                 return -EINVAL;
 
         path = procfs_file_alloca(pid, "environ");
 
-        f = fopen(path, "re");
-        if (!f) {
-                if (errno == ENOENT)
-                        return -ESRCH;
+        r = fopen_unlocked(path, "re", &f);
+        if (r == -ENOENT)
+                return -ESRCH;
+        if (r < 0)
+                return r;
 
-                return -errno;
-        }
-
-        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
-
-        l = strlen(field);
         for (;;) {
                 _cleanup_free_ char *line = NULL;
+                const char *match;
 
                 if (sum > ENVIRONMENT_BLOCK_MAX) /* Give up searching eventually */
                         return -ENOBUFS;
@@ -919,25 +1079,57 @@ int getenv_for_pid(pid_t pid, const char *field, char **ret) {
 
                 sum += r;
 
-                if (strneq(line, field, l) && line[l] == '=') {
-                        value = strdup(line + l + 1);
-                        if (!value)
-                                return -ENOMEM;
-
-                        *ret = value;
-                        return 1;
-                }
+                match = startswith(line, field);
+                if (match && *match == '=')
+                        return strdup_to_full(ret, match + 1);
         }
 
         *ret = NULL;
         return 0;
 }
 
-bool pid_is_unwaited(pid_t pid) {
+int pid_is_my_child(pid_t pid) {
+        pid_t ppid;
+        int r;
+
+        if (pid < 0)
+                return -ESRCH;
+
+        if (pid <= 1)
+                return false;
+
+        r = get_process_ppid(pid, &ppid);
+        if (r < 0)
+                return r;
+
+        return ppid == getpid_cached();
+}
+
+int pidref_is_my_child(const PidRef *pid) {
+        int r, result;
+
+        if (!pidref_is_set(pid))
+                return -ESRCH;
+
+        if (pidref_is_remote(pid))
+                return -EREMOTE;
+
+        result = pid_is_my_child(pid->pid);
+        if (result < 0)
+                return result;
+
+        r = pidref_verify(pid);
+        if (r < 0)
+                return r;
+
+        return result;
+}
+
+int pid_is_unwaited(pid_t pid) {
         /* Checks whether a PID is still valid at all, including a zombie */
 
         if (pid < 0)
-                return false;
+                return -ESRCH;
 
         if (pid <= 1) /* If we or PID 1 would be dead and have been waited for, this code would not be running */
                 return true;
@@ -951,13 +1143,34 @@ bool pid_is_unwaited(pid_t pid) {
         return errno != ESRCH;
 }
 
-bool pid_is_alive(pid_t pid) {
+int pidref_is_unwaited(const PidRef *pid) {
+        int r;
+
+        if (!pidref_is_set(pid))
+                return -ESRCH;
+
+        if (pidref_is_remote(pid))
+                return -EREMOTE;
+
+        if (pid->pid == 1 || pidref_is_self(pid))
+                return true;
+
+        r = pidref_kill(pid, 0);
+        if (r == -ESRCH)
+                return false;
+        if (r < 0)
+                return r;
+
+        return true;
+}
+
+int pid_is_alive(pid_t pid) {
         int r;
 
         /* Checks whether a PID is still valid and not a zombie */
 
         if (pid < 0)
-                return false;
+                return -ESRCH;
 
         if (pid <= 1) /* If we or PID 1 would be a zombie, this code would not be running */
                 return true;
@@ -966,10 +1179,36 @@ bool pid_is_alive(pid_t pid) {
                 return true;
 
         r = get_process_state(pid);
-        if (IN_SET(r, -ESRCH, 'Z'))
+        if (r == -ESRCH)
                 return false;
+        if (r < 0)
+                return r;
 
-        return true;
+        return r != 'Z';
+}
+
+int pidref_is_alive(const PidRef *pidref) {
+        int r, result;
+
+        if (!pidref_is_set(pidref))
+                return -ESRCH;
+
+        if (pidref_is_remote(pidref))
+                return -EREMOTE;
+
+        result = pid_is_alive(pidref->pid);
+        if (result < 0) {
+                assert(result != -ESRCH);
+                return result;
+        }
+
+        r = pidref_verify(pidref);
+        if (r == -ESRCH)
+                return false;
+        if (r < 0)
+                return r;
+
+        return result;
 }
 
 int pid_from_same_root_fs(pid_t pid) {
@@ -983,7 +1222,7 @@ int pid_from_same_root_fs(pid_t pid) {
 
         root = procfs_file_alloca(pid, "root");
 
-        return files_same(root, "/proc/1/root", 0);
+        return inode_same(root, "/proc/1/root", 0);
 }
 
 bool is_main_thread(void) {
@@ -995,36 +1234,12 @@ bool is_main_thread(void) {
         return cached > 0;
 }
 
-_noreturn_ void freeze(void) {
-
-        log_close();
-
-        /* Make sure nobody waits for us on a socket anymore */
-        close_all_fds(NULL, 0);
-
-        sync();
-
-        /* Let's not freeze right away, but keep reaping zombies. */
-        for (;;) {
-                int r;
-                siginfo_t si = {};
-
-                r = waitid(P_ALL, 0, &si, WEXITED);
-                if (r < 0 && errno != EINTR)
-                        break;
-        }
-
-        /* waitid() failed with an unexpected error, things are really borked. Freeze now! */
-        for (;;)
-                pause();
-}
-
 bool oom_score_adjust_is_valid(int oa) {
         return oa >= OOM_SCORE_ADJ_MIN && oa <= OOM_SCORE_ADJ_MAX;
 }
 
 unsigned long personality_from_string(const char *p) {
-        int architecture;
+        Architecture architecture;
 
         if (!p)
                 return PERSONALITY_INVALID;
@@ -1039,8 +1254,8 @@ unsigned long personality_from_string(const char *p) {
 
         if (architecture == native_architecture())
                 return PER_LINUX;
-#ifdef SECONDARY_ARCHITECTURE
-        if (architecture == SECONDARY_ARCHITECTURE)
+#ifdef ARCHITECTURE_SECONDARY
+        if (architecture == ARCHITECTURE_SECONDARY)
                 return PER_LINUX32;
 #endif
 
@@ -1048,13 +1263,13 @@ unsigned long personality_from_string(const char *p) {
 }
 
 const char* personality_to_string(unsigned long p) {
-        int architecture = _ARCHITECTURE_INVALID;
+        Architecture architecture = _ARCHITECTURE_INVALID;
 
         if (p == PER_LINUX)
                 architecture = native_architecture();
-#ifdef SECONDARY_ARCHITECTURE
+#ifdef ARCHITECTURE_SECONDARY
         else if (p == PER_LINUX32)
-                architecture = SECONDARY_ARCHITECTURE;
+                architecture = ARCHITECTURE_SECONDARY;
 #endif
 
         if (architecture < 0)
@@ -1096,7 +1311,7 @@ int opinionated_personality(unsigned long *ret) {
         if (current < 0)
                 return current;
 
-        if (((unsigned long) current & 0xffff) == PER_LINUX32)
+        if (((unsigned long) current & OPINIONATED_PERSONALITY_MASK) == PER_LINUX32)
                 *ret = PER_LINUX32;
         else
                 *ret = PER_LINUX;
@@ -1110,7 +1325,10 @@ void valgrind_summary_hack(void) {
                 pid_t pid;
                 pid = raw_clone(SIGCHLD);
                 if (pid < 0)
-                        log_emergency_errno(errno, "Failed to fork off valgrind helper: %m");
+                        log_struct_errno(
+                                LOG_EMERG, errno,
+                                "MESSAGE_ID=" SD_MESSAGE_VALGRIND_HELPER_FORK_STR,
+                                LOG_MESSAGE( "Failed to fork off valgrind helper: %m"));
                 else if (pid == 0)
                         exit(EXIT_SUCCESS);
                 else {
@@ -1124,23 +1342,6 @@ void valgrind_summary_hack(void) {
 int pid_compare_func(const pid_t *a, const pid_t *b) {
         /* Suitable for usage in qsort() */
         return CMP(*a, *b);
-}
-
-int ioprio_parse_priority(const char *s, int *ret) {
-        int i, r;
-
-        assert(s);
-        assert(ret);
-
-        r = safe_atoi(s, &i);
-        if (r < 0)
-                return r;
-
-        if (!ioprio_priority_is_valid(i))
-                return -EINVAL;
-
-        *ret = i;
-        return 0;
 }
 
 /* The cached PID, possible values:
@@ -1160,15 +1361,9 @@ void reset_cached_pid(void) {
         cached_pid = CACHED_PID_UNSET;
 }
 
-/* We use glibc __register_atfork() + __dso_handle directly here, as they are not included in the glibc
- * headers. __register_atfork() is mostly equivalent to pthread_atfork(), but doesn't require us to link against
- * libpthread, as it is part of glibc anyway. */
-extern int __register_atfork(void (*prepare) (void), void (*parent) (void), void (*child) (void), void *dso_handle);
-extern void* __dso_handle _weak_;
-
 pid_t getpid_cached(void) {
         static bool installed = false;
-        pid_t current_value;
+        pid_t current_value = CACHED_PID_UNSET;
 
         /* getpid_cached() is much like getpid(), but caches the value in local memory, to avoid having to invoke a
          * system call each time. This restores glibc behaviour from before 2.24, when getpid() was unconditionally
@@ -1179,7 +1374,13 @@ pid_t getpid_cached(void) {
          * https://sourceware.org/git/gitweb.cgi?p=glibc.git;h=c579f48edba88380635ab98cb612030e3ed8691e
          */
 
-        current_value = __sync_val_compare_and_swap(&cached_pid, CACHED_PID_UNSET, CACHED_PID_BUSY);
+        (void) __atomic_compare_exchange_n(
+                        &cached_pid,
+                        &current_value,
+                        CACHED_PID_BUSY,
+                        false,
+                        __ATOMIC_SEQ_CST,
+                        __ATOMIC_SEQ_CST);
 
         switch (current_value) {
 
@@ -1193,7 +1394,7 @@ pid_t getpid_cached(void) {
                          * only half-documented (glibc doesn't document it but LSB does — though only superficially)
                          * we'll check for errors only in the most generic fashion possible. */
 
-                        if (__register_atfork(NULL, NULL, reset_cached_pid, __dso_handle) != 0) {
+                        if (pthread_atfork(NULL, NULL, reset_cached_pid) != 0) {
                                 /* OOM? Let's try again later */
                                 cached_pid = CACHED_PID_UNSET;
                                 return new_pid;
@@ -1222,17 +1423,72 @@ int must_be_root(void) {
         return log_error_errno(SYNTHETIC_ERRNO(EPERM), "Need to be root.");
 }
 
+static void restore_sigsetp(sigset_t **ssp) {
+        if (*ssp)
+                (void) sigprocmask(SIG_SETMASK, *ssp, NULL);
+}
+
+pid_t clone_with_nested_stack(int (*fn)(void *), int flags, void *userdata) {
+        size_t ps;
+        pid_t pid;
+        void *mystack;
+
+        /* A wrapper around glibc's clone() call that automatically sets up a "nested" stack. Only supports
+         * invocations without CLONE_VM, so that we can continue to use the parent's stack mapping.
+         *
+         * Note: glibc's clone() wrapper does not synchronize malloc() locks. This means that if the parent
+         * is threaded these locks will be in an undefined state in the child, and hence memory allocations
+         * are likely going to run into deadlocks. Hence: if you use this function make sure your parent is
+         * strictly single-threaded or your child never calls malloc(). */
+
+        assert((flags & (CLONE_VM|CLONE_PARENT_SETTID|CLONE_CHILD_SETTID|
+                         CLONE_CHILD_CLEARTID|CLONE_SETTLS)) == 0);
+
+        /* We allocate some space on the stack to use as the stack for the child (hence "nested"). Note that
+         * the net effect is that the child will have the start of its stack inside the stack of the parent,
+         * but since they are a CoW copy of each other that's fine. We allocate one page-aligned page. But
+         * since we don't want to deal with differences between systems where the stack grows backwards or
+         * forwards we'll allocate one more and place the stack address in the middle. Except that we also
+         * want it page aligned, hence we'll allocate one page more. Makes 3. */
+
+        ps = page_size();
+        mystack = alloca(ps*3);
+        mystack = (uint8_t*) mystack + ps; /* move pointer one page ahead since stacks usually grow backwards */
+        mystack = (void*) ALIGN_TO((uintptr_t) mystack, ps); /* align to page size (moving things further ahead) */
+
+#if HAVE_CLONE
+        pid = clone(fn, mystack, flags, userdata);
+#else
+        pid = __clone2(fn, mystack, ps, flags, userdata);
+#endif
+        if (pid < 0)
+                return -errno;
+
+        return pid;
+}
+
+static int fork_flags_to_signal(ForkFlags flags) {
+        return (flags & FORK_DEATHSIG_SIGTERM) ? SIGTERM :
+                (flags & FORK_DEATHSIG_SIGINT) ? SIGINT :
+                                                 SIGKILL;
+}
+
 int safe_fork_full(
                 const char *name,
-                const int except_fds[],
+                const int stdio_fds[3],
+                int except_fds[],
                 size_t n_except_fds,
                 ForkFlags flags,
                 pid_t *ret_pid) {
 
         pid_t original_pid, pid;
         sigset_t saved_ss, ss;
-        bool block_signals = false;
+        _unused_ _cleanup_(restore_sigsetp) sigset_t *saved_ssp = NULL;
+        bool block_signals = false, block_all = false, intermediary = false;
         int prio, r;
+
+        assert(!FLAGS_SET(flags, FORK_DETACH) ||
+               (!ret_pid && (flags & (FORK_WAIT|FORK_DEATHSIG_SIGTERM|FORK_DEATHSIG_SIGINT|FORK_DEATHSIG_SIGKILL)) == 0));
 
         /* A wrapper around fork(), that does a couple of important initializations in addition to mere forking. Always
          * returns the child's PID in *ret_pid. Returns == 0 in the child, and > 0 in the parent. */
@@ -1241,12 +1497,18 @@ int safe_fork_full(
 
         original_pid = getpid_cached();
 
-        if (flags & (FORK_RESET_SIGNALS|FORK_DEATHSIG)) {
-                /* We temporarily block all signals, so that the new child has them blocked initially. This way, we can
-                 * be sure that SIGTERMs are not lost we might send to the child. */
+        if (flags & FORK_FLUSH_STDIO) {
+                fflush(stdout);
+                fflush(stderr); /* This one shouldn't be necessary, stderr should be unbuffered anyway, but let's better be safe than sorry */
+        }
+
+        if (flags & (FORK_RESET_SIGNALS|FORK_DEATHSIG_SIGTERM|FORK_DEATHSIG_SIGINT)) {
+                /* We temporarily block all signals, so that the new child has them blocked initially. This
+                 * way, we can be sure that SIGTERMs are not lost we might send to the child. (Note that for
+                 * FORK_DEATHSIG_SIGKILL we don't bother, since it cannot be blocked anyway.) */
 
                 assert_se(sigfillset(&ss) >= 0);
-                block_signals = true;
+                block_signals = block_all = true;
 
         } else if (flags & FORK_WAIT) {
                 /* Let's block SIGCHLD at least, so that we can safely watch for the child process */
@@ -1256,37 +1518,70 @@ int safe_fork_full(
                 block_signals = true;
         }
 
-        if (block_signals)
+        if (block_signals) {
                 if (sigprocmask(SIG_SETMASK, &ss, &saved_ss) < 0)
                         return log_full_errno(prio, errno, "Failed to set signal mask: %m");
+                saved_ssp = &saved_ss;
+        }
 
-        if (flags & FORK_NEW_MOUNTNS)
-                pid = raw_clone(SIGCHLD|CLONE_NEWNS);
+        if (FLAGS_SET(flags, FORK_DETACH)) {
+                assert(!FLAGS_SET(flags, FORK_WAIT));
+                assert(!ret_pid);
+
+                /* Fork off intermediary child if needed */
+
+                r = is_reaper_process();
+                if (r < 0)
+                        return log_full_errno(prio, r, "Failed to determine if we are a reaper process: %m");
+
+                if (!r) {
+                        /* Not a reaper process, hence do a double fork() so we are reparented to one */
+
+                        pid = fork();
+                        if (pid < 0)
+                                return log_full_errno(prio, errno, "Failed to fork off '%s': %m", strna(name));
+                        if (pid > 0) {
+                                log_debug("Successfully forked off intermediary '%s' as PID " PID_FMT ".", strna(name), pid);
+                                return 1; /* return in the parent */
+                        }
+
+                        intermediary = true;
+                }
+        }
+
+        if ((flags & (FORK_NEW_MOUNTNS|FORK_NEW_USERNS|FORK_NEW_NETNS|FORK_NEW_PIDNS)) != 0)
+                pid = raw_clone(SIGCHLD|
+                                (FLAGS_SET(flags, FORK_NEW_MOUNTNS) ? CLONE_NEWNS : 0) |
+                                (FLAGS_SET(flags, FORK_NEW_USERNS) ? CLONE_NEWUSER : 0) |
+                                (FLAGS_SET(flags, FORK_NEW_NETNS) ? CLONE_NEWNET : 0) |
+                                (FLAGS_SET(flags, FORK_NEW_PIDNS) ? CLONE_NEWPID : 0));
         else
                 pid = fork();
-        if (pid < 0) {
-                r = -errno;
-
-                if (block_signals) /* undo what we did above */
-                        (void) sigprocmask(SIG_SETMASK, &saved_ss, NULL);
-
-                return log_full_errno(prio, r, "Failed to fork: %m");
-        }
+        if (pid < 0)
+                return log_full_errno(prio, errno, "Failed to fork off '%s': %m", strna(name));
         if (pid > 0) {
-                /* We are in the parent process */
 
+                /* If we are in the intermediary process, exit now */
+                if (intermediary)
+                        _exit(EXIT_SUCCESS);
+
+                /* We are in the parent process */
                 log_debug("Successfully forked off '%s' as PID " PID_FMT ".", strna(name), pid);
 
                 if (flags & FORK_WAIT) {
+                        if (block_all) {
+                                /* undo everything except SIGCHLD */
+                                ss = saved_ss;
+                                assert_se(sigaddset(&ss, SIGCHLD) >= 0);
+                                (void) sigprocmask(SIG_SETMASK, &ss, NULL);
+                        }
+
                         r = wait_for_terminate_and_check(name, pid, (flags & FORK_LOG ? WAIT_LOG : 0));
                         if (r < 0)
                                 return r;
                         if (r != EXIT_SUCCESS) /* exit status > 0 should be treated as failure, too */
                                 return -EPROTO;
                 }
-
-                if (block_signals) /* undo what we did above */
-                        (void) sigprocmask(SIG_SETMASK, &saved_ss, NULL);
 
                 if (ret_pid)
                         *ret_pid = pid;
@@ -1296,10 +1591,14 @@ int safe_fork_full(
 
         /* We are in the child process */
 
+        /* Restore signal mask manually */
+        saved_ssp = NULL;
+
         if (flags & FORK_REOPEN_LOG) {
                 /* Close the logs if requested, before we log anything. And make sure we reopen it if needed. */
                 log_close();
                 log_set_open_when_needed(true);
+                log_settle_target();
         }
 
         if (name) {
@@ -1309,8 +1608,8 @@ int safe_fork_full(
                                        r, "Failed to rename process, ignoring: %m");
         }
 
-        if (flags & FORK_DEATHSIG)
-                if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0) {
+        if (flags & (FORK_DEATHSIG_SIGTERM|FORK_DEATHSIG_SIGINT|FORK_DEATHSIG_SIGKILL))
+                if (prctl(PR_SET_PDEATHSIG, fork_flags_to_signal(flags)) < 0) {
                         log_full_errno(prio, errno, "Failed to set death signal: %m");
                         _exit(EXIT_FAILURE);
                 }
@@ -1335,27 +1634,63 @@ int safe_fork_full(
                 }
         }
 
-        if (flags & FORK_DEATHSIG) {
+        if (flags & (FORK_DEATHSIG_SIGTERM|FORK_DEATHSIG_SIGKILL|FORK_DEATHSIG_SIGINT)) {
                 pid_t ppid;
                 /* Let's see if the parent PID is still the one we started from? If not, then the parent
                  * already died by the time we set PR_SET_PDEATHSIG, hence let's emulate the effect */
 
                 ppid = getppid();
                 if (ppid == 0)
-                        /* Parent is in a differn't PID namespace. */;
+                        /* Parent is in a different PID namespace. */;
                 else if (ppid != original_pid) {
-                        log_debug("Parent died early, raising SIGTERM.");
-                        (void) raise(SIGTERM);
+                        int sig = fork_flags_to_signal(flags);
+                        log_debug("Parent died early, raising %s.", signal_to_string(sig));
+                        (void) raise(sig);
                         _exit(EXIT_FAILURE);
                 }
         }
 
         if (FLAGS_SET(flags, FORK_NEW_MOUNTNS | FORK_MOUNTNS_SLAVE)) {
-
                 /* Optionally, make sure we never propagate mounts to the host. */
-
                 if (mount(NULL, "/", NULL, MS_SLAVE | MS_REC, NULL) < 0) {
                         log_full_errno(prio, errno, "Failed to remount root directory as MS_SLAVE: %m");
+                        _exit(EXIT_FAILURE);
+                }
+        }
+
+        if (FLAGS_SET(flags, FORK_PRIVATE_TMP)) {
+                assert(FLAGS_SET(flags, FORK_NEW_MOUNTNS));
+
+                /* Optionally, overmount new tmpfs instance on /tmp/. */
+                r = mount_nofollow("tmpfs", "/tmp", "tmpfs",
+                                   MS_NOSUID|MS_NODEV,
+                                   "mode=01777" TMPFS_LIMITS_RUN);
+                if (r < 0) {
+                        log_full_errno(prio, r, "Failed to overmount /tmp/: %m");
+                        _exit(EXIT_FAILURE);
+                }
+        }
+
+        if (flags & FORK_REARRANGE_STDIO) {
+                if (stdio_fds) {
+                        r = rearrange_stdio(stdio_fds[0], stdio_fds[1], stdio_fds[2]);
+                        if (r < 0) {
+                                log_full_errno(prio, r, "Failed to rearrange stdio fds: %m");
+                                _exit(EXIT_FAILURE);
+                        }
+
+                        /* Turn off O_NONBLOCK on the fdio fds, in case it was left on */
+                        stdio_disable_nonblock();
+                } else {
+                        r = make_null_stdio();
+                        if (r < 0) {
+                                log_full_errno(prio, r, "Failed to connect stdin/stdout to /dev/null: %m");
+                                _exit(EXIT_FAILURE);
+                        }
+                }
+        } else if (flags & FORK_STDOUT_TO_STDERR) {
+                if (dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
+                        log_full_errno(prio, errno, "Failed to connect stdout to stderr: %m");
                         _exit(EXIT_FAILURE);
                 }
         }
@@ -1371,18 +1706,31 @@ int safe_fork_full(
                 }
         }
 
+        if (flags & FORK_PACK_FDS) {
+                /* FORK_CLOSE_ALL_FDS ensures that except_fds are the only FDs >= 3 that are
+                 * open, this is including the log. This is required by pack_fds, which will
+                 * get stuck in an infinite loop of any FDs other than except_fds are open. */
+                assert(FLAGS_SET(flags, FORK_CLOSE_ALL_FDS));
+
+                r = pack_fds(except_fds, n_except_fds);
+                if (r < 0) {
+                        log_full_errno(prio, r, "Failed to pack file descriptors: %m");
+                        _exit(EXIT_FAILURE);
+                }
+        }
+
+        if (flags & FORK_CLOEXEC_OFF) {
+                r = fd_cloexec_many(except_fds, n_except_fds, false);
+                if (r < 0) {
+                        log_full_errno(prio, r, "Failed to turn off O_CLOEXEC on file descriptors: %m");
+                        _exit(EXIT_FAILURE);
+                }
+        }
+
         /* When we were asked to reopen the logs, do so again now */
         if (flags & FORK_REOPEN_LOG) {
                 log_open();
                 log_set_open_when_needed(false);
-        }
-
-        if (flags & FORK_NULL_STDIO) {
-                r = make_null_stdio();
-                if (r < 0) {
-                        log_full_errno(prio, r, "Failed to connect stdin/stdout to /dev/null: %m");
-                        _exit(EXIT_FAILURE);
-                }
         }
 
         if (flags & FORK_RLIMIT_NOFILE_SAFE) {
@@ -1393,16 +1741,48 @@ int safe_fork_full(
                 }
         }
 
+        if (!FLAGS_SET(flags, FORK_KEEP_NOTIFY_SOCKET)) {
+                r = RET_NERRNO(unsetenv("NOTIFY_SOCKET"));
+                if (r < 0) {
+                        log_full_errno(prio, r, "Failed to unset $NOTIFY_SOCKET: %m");
+                        _exit(EXIT_FAILURE);
+                }
+        }
+
         if (ret_pid)
                 *ret_pid = getpid_cached();
 
         return 0;
 }
 
+int pidref_safe_fork_full(
+                const char *name,
+                const int stdio_fds[3],
+                int except_fds[],
+                size_t n_except_fds,
+                ForkFlags flags,
+                PidRef *ret_pid) {
+
+        pid_t pid;
+        int r, q;
+
+        assert(!FLAGS_SET(flags, FORK_WAIT));
+
+        r = safe_fork_full(name, stdio_fds, except_fds, n_except_fds, flags, &pid);
+        if (r < 0)
+                return r;
+
+        q = pidref_set_pid(ret_pid, pid);
+        if (q < 0) /* Let's not fail for this, no matter what, the process exists after all, and that's key */
+                *ret_pid = PIDREF_MAKE_FROM_PID(pid);
+
+        return r;
+}
+
 int namespace_fork(
                 const char *outer_name,
                 const char *inner_name,
-                const int except_fds[],
+                int except_fds[],
                 size_t n_except_fds,
                 ForkFlags flags,
                 int pidns_fd,
@@ -1418,7 +1798,10 @@ int namespace_fork(
          * process. This ensures that we are fully a member of the destination namespace, with pidns an all, so that
          * /proc/self/fd works correctly. */
 
-        r = safe_fork_full(outer_name, except_fds, n_except_fds, (flags|FORK_DEATHSIG) & ~(FORK_REOPEN_LOG|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE), ret_pid);
+        r = safe_fork_full(outer_name,
+                           NULL,
+                           except_fds, n_except_fds,
+                           (flags|FORK_DEATHSIG_SIGINT|FORK_DEATHSIG_SIGTERM|FORK_DEATHSIG_SIGKILL) & ~(FORK_REOPEN_LOG|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE), ret_pid);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -1433,7 +1816,10 @@ int namespace_fork(
                 }
 
                 /* We mask a few flags here that either make no sense for the grandchild, or that we don't have to do again */
-                r = safe_fork_full(inner_name, except_fds, n_except_fds, flags & ~(FORK_WAIT|FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_NULL_STDIO), &pid);
+                r = safe_fork_full(inner_name,
+                                   NULL,
+                                   except_fds, n_except_fds,
+                                   flags & ~(FORK_WAIT|FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_REARRANGE_STDIO), &pid);
                 if (r < 0)
                         _exit(EXIT_FAILURE);
                 if (r == 0) {
@@ -1453,95 +1839,420 @@ int namespace_fork(
         return 1;
 }
 
-int fork_agent(const char *name, const int except[], size_t n_except, pid_t *ret_pid, const char *path, ...) {
-        bool stdout_is_tty, stderr_is_tty;
-        size_t n, i;
-        va_list ap;
-        char **l;
-        int r;
-
-        assert(path);
-
-        /* Spawns a temporary TTY agent, making sure it goes away when we go away */
-
-        r = safe_fork_full(name, except, n_except, FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_CLOSE_ALL_FDS, ret_pid);
-        if (r < 0)
-                return r;
-        if (r > 0)
-                return 0;
-
-        /* In the child: */
-
-        stdout_is_tty = isatty(STDOUT_FILENO);
-        stderr_is_tty = isatty(STDERR_FILENO);
-
-        if (!stdout_is_tty || !stderr_is_tty) {
-                int fd;
-
-                /* Detach from stdout/stderr. and reopen
-                 * /dev/tty for them. This is important to
-                 * ensure that when systemctl is started via
-                 * popen() or a similar call that expects to
-                 * read EOF we actually do generate EOF and
-                 * not delay this indefinitely by because we
-                 * keep an unused copy of stdin around. */
-                fd = open("/dev/tty", O_WRONLY);
-                if (fd < 0) {
-                        log_error_errno(errno, "Failed to open /dev/tty: %m");
-                        _exit(EXIT_FAILURE);
-                }
-
-                if (!stdout_is_tty && dup2(fd, STDOUT_FILENO) < 0) {
-                        log_error_errno(errno, "Failed to dup2 /dev/tty: %m");
-                        _exit(EXIT_FAILURE);
-                }
-
-                if (!stderr_is_tty && dup2(fd, STDERR_FILENO) < 0) {
-                        log_error_errno(errno, "Failed to dup2 /dev/tty: %m");
-                        _exit(EXIT_FAILURE);
-                }
-
-                safe_close_above_stdio(fd);
-        }
-
-        (void) rlimit_nofile_safe();
-
-        /* Count arguments */
-        va_start(ap, path);
-        for (n = 0; va_arg(ap, char*); n++)
-                ;
-        va_end(ap);
-
-        /* Allocate strv */
-        l = newa(char*, n + 1);
-
-        /* Fill in arguments */
-        va_start(ap, path);
-        for (i = 0; i <= n; i++)
-                l[i] = va_arg(ap, char*);
-        va_end(ap);
-
-        execv(path, l);
-        _exit(EXIT_FAILURE);
-}
-
 int set_oom_score_adjust(int value) {
         char t[DECIMAL_STR_MAX(int)];
 
-        sprintf(t, "%i", value);
+        if (!oom_score_adjust_is_valid(value))
+                return -EINVAL;
+
+        xsprintf(t, "%i", value);
 
         return write_string_file("/proc/self/oom_score_adj", t,
                                  WRITE_STRING_FILE_VERIFY_ON_FAILURE|WRITE_STRING_FILE_DISABLE_BUFFER);
 }
 
-static const char *const ioprio_class_table[] = {
-        [IOPRIO_CLASS_NONE] = "none",
-        [IOPRIO_CLASS_RT] = "realtime",
-        [IOPRIO_CLASS_BE] = "best-effort",
-        [IOPRIO_CLASS_IDLE] = "idle"
-};
+int get_oom_score_adjust(int *ret) {
+        _cleanup_free_ char *t = NULL;
+        int r, a;
 
-DEFINE_STRING_TABLE_LOOKUP_WITH_FALLBACK(ioprio_class, int, IOPRIO_N_CLASSES);
+        r = read_virtual_file("/proc/self/oom_score_adj", SIZE_MAX, &t, NULL);
+        if (r < 0)
+                return r;
+
+        delete_trailing_chars(t, WHITESPACE);
+
+        r = safe_atoi(t, &a);
+        if (r < 0)
+                return r;
+
+        if (!oom_score_adjust_is_valid(a))
+                return -ENODATA;
+
+        if (ret)
+                *ret = a;
+
+        return 0;
+}
+
+int pidfd_get_pid(int fd, pid_t *ret) {
+        char path[STRLEN("/proc/self/fdinfo/") + DECIMAL_STR_MAX(int)];
+        _cleanup_free_ char *fdinfo = NULL;
+        int r;
+
+        /* Converts a pidfd into a pid. Well known errors:
+         *
+         *    -EBADF   → fd invalid
+         *    -ENOSYS  → /proc/ not mounted
+         *    -ENOTTY  → fd valid, but not a pidfd
+         *    -EREMOTE → fd valid, but pid is in another namespace we cannot translate to the local one
+         *    -ESRCH   → fd valid, but process is already reaped
+         */
+
+        assert(fd >= 0);
+
+        xsprintf(path, "/proc/self/fdinfo/%i", fd);
+
+        r = read_full_virtual_file(path, &fdinfo, NULL);
+        if (r == -ENOENT)
+                return proc_fd_enoent_errno();
+        if (r < 0)
+                return r;
+
+        char *p = find_line_startswith(fdinfo, "Pid:");
+        if (!p)
+                return -ENOTTY; /* not a pidfd? */
+
+        p = skip_leading_chars(p, /* bad = */ NULL);
+        p[strcspn(p, WHITESPACE)] = 0;
+
+        if (streq(p, "0"))
+                return -EREMOTE; /* PID is in foreign PID namespace? */
+        if (streq(p, "-1"))
+                return -ESRCH;   /* refers to reaped process? */
+
+        return parse_pid(p, ret);
+}
+
+int pidfd_verify_pid(int pidfd, pid_t pid) {
+        pid_t current_pid;
+        int r;
+
+        assert(pidfd >= 0);
+        assert(pid > 0);
+
+        r = pidfd_get_pid(pidfd, &current_pid);
+        if (r < 0)
+                return r;
+
+        return current_pid != pid ? -ESRCH : 0;
+}
+
+static int rlimit_to_nice(rlim_t limit) {
+        if (limit <= 1)
+                return PRIO_MAX-1; /* i.e. 19 */
+
+        if (limit >= -PRIO_MIN + PRIO_MAX)
+                return PRIO_MIN; /* i.e. -20 */
+
+        return PRIO_MAX - (int) limit;
+}
+
+int setpriority_closest(int priority) {
+        struct rlimit highest;
+        int r, current, limit;
+
+        /* Try to set requested nice level */
+        r = RET_NERRNO(setpriority(PRIO_PROCESS, 0, priority));
+        if (r >= 0)
+                return 1;
+        if (!ERRNO_IS_NEG_PRIVILEGE(r))
+                return r;
+
+        errno = 0;
+        current = getpriority(PRIO_PROCESS, 0);
+        if (errno != 0)
+                return -errno;
+
+        if (priority == current)
+                return 1;
+
+       /* Hmm, we'd expect that raising the nice level from our status quo would always work. If it doesn't,
+        * then the whole setpriority() system call is blocked to us, hence let's propagate the error
+        * right-away */
+        if (priority > current)
+                return r;
+
+        if (getrlimit(RLIMIT_NICE, &highest) < 0)
+                return -errno;
+
+        limit = rlimit_to_nice(highest.rlim_cur);
+
+        /* Push to the allowed limit if we're higher than that. Note that we could also be less nice than
+         * limit allows us, but still higher than what's requested. In that case our current value is
+         * the best choice. */
+        if (current > limit)
+                if (setpriority(PRIO_PROCESS, 0, limit) < 0)
+                        return -errno;
+
+        log_debug("Cannot set requested nice level (%i), using next best (%i).", priority, MIN(current, limit));
+        return 0;
+}
+
+_noreturn_ void freeze(void) {
+        log_close();
+
+        /* Make sure nobody waits for us (i.e. on one of our sockets) anymore. Note that we use
+         * close_all_fds_without_malloc() instead of plain close_all_fds() here, since we want this function
+         * to be compatible with being called from signal handlers. */
+        (void) close_all_fds_without_malloc(NULL, 0);
+
+        /* Let's not freeze right away, but keep reaping zombies. */
+        for (;;) {
+                siginfo_t si = {};
+
+                if (waitid(P_ALL, 0, &si, WEXITED) < 0 && errno != EINTR)
+                        break;
+        }
+
+        /* waitid() failed with an unexpected error, things are really borked. Freeze now! */
+        for (;;)
+                pause();
+}
+
+int get_process_threads(pid_t pid) {
+        _cleanup_free_ char *t = NULL;
+        const char *p;
+        int n, r;
+
+        if (pid < 0)
+                return -EINVAL;
+
+        p = procfs_file_alloca(pid, "status");
+
+        r = get_proc_field(p, "Threads", WHITESPACE, &t);
+        if (r == -ENOENT)
+                return proc_mounted() == 0 ? -ENOSYS : -ESRCH;
+        if (r < 0)
+                return r;
+
+        r = safe_atoi(t, &n);
+        if (r < 0)
+                return r;
+        if (n < 0)
+                return -EINVAL;
+
+        return n;
+}
+
+int is_reaper_process(void) {
+        int b = 0;
+
+        /* Checks if we are running in a reaper process, i.e. if we are expected to deal with processes
+         * reparented to us. This simply checks if we are PID 1 or if PR_SET_CHILD_SUBREAPER was called. */
+
+        if (getpid_cached() == 1)
+                return true;
+
+        if (prctl(PR_GET_CHILD_SUBREAPER, (unsigned long) &b, 0UL, 0UL, 0UL) < 0)
+                return -errno;
+
+        return b != 0;
+}
+
+int make_reaper_process(bool b) {
+
+        if (getpid_cached() == 1) {
+
+                if (!b)
+                        return -EINVAL;
+
+                return 0;
+        }
+
+        /* Some prctl()s insist that all 5 arguments are specified, others do not. Let's always specify all,
+         * to avoid any ambiguities */
+        if (prctl(PR_SET_CHILD_SUBREAPER, (unsigned long) b, 0UL, 0UL, 0UL) < 0)
+                return -errno;
+
+        return 0;
+}
+
+DEFINE_TRIVIAL_CLEANUP_FUNC_FULL(posix_spawnattr_t*, posix_spawnattr_destroy, NULL);
+
+int posix_spawn_wrapper(
+                const char *path,
+                char * const *argv,
+                char * const *envp,
+                const char *cgroup,
+                PidRef *ret_pidref) {
+
+        short flags = POSIX_SPAWN_SETSIGMASK;
+        posix_spawnattr_t attr;
+        sigset_t mask;
+        int r;
+
+        /* Forks and invokes 'path' with 'argv' and 'envp' using CLONE_VM and CLONE_VFORK, which means the
+         * caller will be blocked until the child either exits or exec's. The memory of the child will be
+         * fully shared with the memory of the parent, so that there are no copy-on-write or memory.max
+         * issues.
+         *
+         * Also, move the newly-created process into 'cgroup' through POSIX_SPAWN_SETCGROUP (clone3())
+         * if available. Note that CLONE_INTO_CGROUP is only supported on cgroup v2.
+         * returns 1: We're already in the right cgroup
+         *         0: 'cgroup' not specified or POSIX_SPAWN_SETCGROUP is not supported. The caller
+         *            needs to call 'cg_attach' on their own */
+
+        assert(path);
+        assert(argv);
+        assert(ret_pidref);
+
+        assert_se(sigfillset(&mask) >= 0);
+
+        r = posix_spawnattr_init(&attr);
+        if (r != 0)
+                return -r; /* These functions return a positive errno on failure */
+
+        /* Initialization needs to succeed before we can set up a destructor. */
+        _unused_ _cleanup_(posix_spawnattr_destroyp) posix_spawnattr_t *attr_destructor = &attr;
+
+#if HAVE_PIDFD_SPAWN
+        static enum {
+                CLONE_ONLY_PID,
+                CLONE_CAN_PIDFD,  /* 5.2 */
+                CLONE_CAN_CGROUP, /* 5.7 */
+        } clone_support = CLONE_CAN_CGROUP;
+        _cleanup_close_ int cgroup_fd = -EBADF;
+
+        if (cgroup && clone_support >= CLONE_CAN_CGROUP) {
+                _cleanup_free_ char *resolved_cgroup = NULL;
+
+                r = cg_get_path_and_check(
+                                SYSTEMD_CGROUP_CONTROLLER,
+                                cgroup,
+                                /* suffix= */ NULL,
+                                &resolved_cgroup);
+                if (r < 0)
+                        return r;
+
+                cgroup_fd = open(resolved_cgroup, O_PATH|O_DIRECTORY|O_CLOEXEC);
+                if (cgroup_fd < 0)
+                        return -errno;
+
+                r = posix_spawnattr_setcgroup_np(&attr, cgroup_fd);
+                if (r != 0)
+                        return -r;
+
+                flags |= POSIX_SPAWN_SETCGROUP;
+        }
+#endif
+
+        r = posix_spawnattr_setflags(&attr, flags);
+        if (r != 0)
+                return -r;
+        r = posix_spawnattr_setsigmask(&attr, &mask);
+        if (r != 0)
+                return -r;
+
+#if HAVE_PIDFD_SPAWN
+        if (clone_support >= CLONE_CAN_PIDFD) {
+                _cleanup_close_ int pidfd = -EBADF;
+
+                r = pidfd_spawn(&pidfd, path, NULL, &attr, argv, envp);
+                if (ERRNO_IS_NOT_SUPPORTED(r) && FLAGS_SET(flags, POSIX_SPAWN_SETCGROUP) &&
+                    cg_is_threaded(cgroup) > 0) /* clone3() could also return EOPNOTSUPP if the target cgroup is in threaded mode. */
+                        return -EUCLEAN;
+                if ((ERRNO_IS_NOT_SUPPORTED(r) || ERRNO_IS_PRIVILEGE(r) || r == E2BIG) &&
+                    FLAGS_SET(flags, POSIX_SPAWN_SETCGROUP)) {
+                        /* Compiled on a newer host, or seccomp&friends blocking clone3()? Fallback, but
+                         * need to disable POSIX_SPAWN_SETCGROUP, which is what redirects to clone3().
+                         * Note that we might get E2BIG here since some kernels (e.g. 5.4) support clone3()
+                         * but not CLONE_INTO_CGROUP. */
+
+                        /* CLONE_INTO_CGROUP definitely won't work, hence remember the fact so that we don't
+                         * retry every time. */
+                        assert(clone_support >= CLONE_CAN_CGROUP);
+                        clone_support = CLONE_CAN_PIDFD;
+
+                        flags &= ~POSIX_SPAWN_SETCGROUP;
+                        r = posix_spawnattr_setflags(&attr, flags);
+                        if (r != 0)
+                                return -r;
+
+                        r = pidfd_spawn(&pidfd, path, NULL, &attr, argv, envp);
+                }
+                if (r == 0) {
+                        r = pidref_set_pidfd_consume(ret_pidref, TAKE_FD(pidfd));
+                        if (r < 0)
+                                return r;
+
+                        return FLAGS_SET(flags, POSIX_SPAWN_SETCGROUP);
+                }
+                if (!ERRNO_IS_NOT_SUPPORTED(r) && !ERRNO_IS_PRIVILEGE(r))
+                        return -r;
+
+                clone_support = CLONE_ONLY_PID; /* No CLONE_PIDFD either? */
+        }
+#endif
+
+        pid_t pid;
+        r = posix_spawn(&pid, path, NULL, &attr, argv, envp);
+        if (r != 0)
+                return -r;
+
+        r = pidref_set_pid(ret_pidref, pid);
+        if (r < 0)
+                return r;
+
+        return 0; /* We did not use CLONE_INTO_CGROUP so return 0, the caller will have to move the child */
+}
+
+int proc_dir_open(DIR **ret) {
+        DIR *d;
+
+        assert(ret);
+
+        d = opendir("/proc");
+        if (!d)
+                return -errno;
+
+        *ret = d;
+        return 0;
+}
+
+int proc_dir_read(DIR *d, pid_t *ret) {
+        assert(d);
+
+        for (;;) {
+                struct dirent *de;
+
+                errno = 0;
+                de = readdir_no_dot(d);
+                if (!de) {
+                        if (errno != 0)
+                                return -errno;
+
+                        break;
+                }
+
+                if (!IN_SET(de->d_type, DT_DIR, DT_UNKNOWN))
+                        continue;
+
+                if (parse_pid(de->d_name, ret) >= 0)
+                        return 1;
+        }
+
+        if (ret)
+                *ret = 0;
+        return 0;
+}
+
+int proc_dir_read_pidref(DIR *d, PidRef *ret) {
+        int r;
+
+        assert(d);
+
+        for (;;) {
+                pid_t pid;
+
+                r = proc_dir_read(d, &pid);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        break;
+
+                r = pidref_set_pid(ret, pid);
+                if (r == -ESRCH) /* gone by now? skip it */
+                        continue;
+                if (r < 0)
+                        return r;
+
+                return 1;
+        }
+
+        if (ret)
+                *ret = PIDREF_NULL;
+        return 0;
+}
 
 static const char *const sigchld_code_table[] = {
         [CLD_EXITED] = "exited",
@@ -1559,7 +2270,22 @@ static const char* const sched_policy_table[] = {
         [SCHED_BATCH] = "batch",
         [SCHED_IDLE] = "idle",
         [SCHED_FIFO] = "fifo",
-        [SCHED_RR] = "rr"
+        [SCHED_RR] = "rr",
 };
 
 DEFINE_STRING_TABLE_LOOKUP_WITH_FALLBACK(sched_policy, int, INT_MAX);
+
+_noreturn_ void report_errno_and_exit(int errno_fd, int error) {
+        int r;
+
+        if (error >= 0)
+                _exit(EXIT_SUCCESS);
+
+        assert(errno_fd >= 0);
+
+        r = loop_write(errno_fd, &error, sizeof(error));
+        if (r < 0)
+                log_debug_errno(r, "Failed to write errno to errno_fd=%d: %m", errno_fd);
+
+        _exit(EXIT_FAILURE);
+}

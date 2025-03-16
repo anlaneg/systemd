@@ -1,17 +1,15 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <ctype.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 #include "libudev.h"
 
 #include "alloc-util.h"
 #include "fd-util.h"
-#include "missing.h"
 #include "string-util.h"
 
 /**
@@ -109,7 +107,7 @@ _public_ struct udev *udev_unref(struct udev *udev) {
         assert(udev->n_ref > 0);
         udev->n_ref--;
         if (udev->n_ref > 0)
-                /* This is different from our convetion, but let's keep backward
+                /* This is different from our convention, but let's keep backward
                  * compatibility. So, do not use DEFINE_PUBLIC_TRIVIAL_UNREF_FUNC()
                  * macro to define this function. */
                 return udev;

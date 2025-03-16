@@ -1,12 +1,14 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include "glyph-util.h"
+#include "kbd-util.h"
 #include "locale-util.h"
 #include "macro.h"
 #include "strv.h"
+#include "tests.h"
 
-static void test_get_locales(void) {
+TEST(get_locales) {
         _cleanup_strv_free_ char **locales = NULL;
-        char **p;
         int r;
 
         r = get_locales(&locales);
@@ -19,9 +21,7 @@ static void test_get_locales(void) {
         }
 }
 
-static void test_locale_is_valid(void) {
-        log_info("/* %s */", __func__);
-
+TEST(locale_is_valid) {
         assert_se(locale_is_valid("en_EN.utf8"));
         assert_se(locale_is_valid("fr_FR.utf8"));
         assert_se(locale_is_valid("fr_FR@euro"));
@@ -34,12 +34,29 @@ static void test_locale_is_valid(void) {
         assert_se(!locale_is_valid("\x01gar\x02 bage\x03"));
 }
 
-static void test_keymaps(void) {
-        _cleanup_strv_free_ char **kmaps = NULL;
-        char **p;
-        int r;
+TEST(locale_is_installed) {
+        /* Always available */
+        assert_se(locale_is_installed("POSIX") > 0);
+        assert_se(locale_is_installed("C") > 0);
 
-        log_info("/* %s */", __func__);
+        /* Might, or might not be installed. */
+        assert_se(locale_is_installed("en_EN.utf8") >= 0);
+        assert_se(locale_is_installed("fr_FR.utf8") >= 0);
+        assert_se(locale_is_installed("fr_FR@euro") >= 0);
+        assert_se(locale_is_installed("fi_FI") >= 0);
+
+        /* Definitely not valid */
+        assert_se(locale_is_installed("") == 0);
+        assert_se(locale_is_installed("/usr/bin/foo") == 0);
+        assert_se(locale_is_installed("\x01gar\x02 bage\x03") == 0);
+
+        /* Definitely not installed */
+        assert_se(locale_is_installed("zz_ZZ") == 0);
+}
+
+TEST(keymaps) {
+        _cleanup_strv_free_ char **kmaps = NULL;
+        int r;
 
         assert_se(!keymap_is_valid(""));
         assert_se(!keymap_is_valid("/usr/bin/foo"));
@@ -64,10 +81,8 @@ static void test_keymaps(void) {
 }
 
 #define dump_glyph(x) log_info(STRINGIFY(x) ": %s", special_glyph(x))
-static void dump_special_glyphs(void) {
-        assert_cc(SPECIAL_GLYPH_DEPRESSED_SMILEY + 1 == _SPECIAL_GLYPH_MAX);
-
-        log_info("/* %s */", __func__);
+TEST(dump_special_glyphs) {
+        assert_cc(SPECIAL_GLYPH_IDCARD + 1 == _SPECIAL_GLYPH_MAX);
 
         log_info("is_locale_utf8: %s", yes_no(is_locale_utf8()));
 
@@ -75,15 +90,29 @@ static void dump_special_glyphs(void) {
         dump_glyph(SPECIAL_GLYPH_TREE_BRANCH);
         dump_glyph(SPECIAL_GLYPH_TREE_RIGHT);
         dump_glyph(SPECIAL_GLYPH_TREE_SPACE);
+        dump_glyph(SPECIAL_GLYPH_TREE_TOP);
+        dump_glyph(SPECIAL_GLYPH_VERTICAL_DOTTED);
+        dump_glyph(SPECIAL_GLYPH_HORIZONTAL_DOTTED);
+        dump_glyph(SPECIAL_GLYPH_HORIZONTAL_FAT);
         dump_glyph(SPECIAL_GLYPH_TRIANGULAR_BULLET);
         dump_glyph(SPECIAL_GLYPH_BLACK_CIRCLE);
+        dump_glyph(SPECIAL_GLYPH_WHITE_CIRCLE);
+        dump_glyph(SPECIAL_GLYPH_MULTIPLICATION_SIGN);
+        dump_glyph(SPECIAL_GLYPH_CIRCLE_ARROW);
         dump_glyph(SPECIAL_GLYPH_BULLET);
-        dump_glyph(SPECIAL_GLYPH_ARROW);
-        dump_glyph(SPECIAL_GLYPH_MDASH);
-        dump_glyph(SPECIAL_GLYPH_ELLIPSIS);
         dump_glyph(SPECIAL_GLYPH_MU);
         dump_glyph(SPECIAL_GLYPH_CHECK_MARK);
         dump_glyph(SPECIAL_GLYPH_CROSS_MARK);
+        dump_glyph(SPECIAL_GLYPH_LIGHT_SHADE);
+        dump_glyph(SPECIAL_GLYPH_DARK_SHADE);
+        dump_glyph(SPECIAL_GLYPH_FULL_BLOCK);
+        dump_glyph(SPECIAL_GLYPH_SIGMA);
+        dump_glyph(SPECIAL_GLYPH_ARROW_UP);
+        dump_glyph(SPECIAL_GLYPH_ARROW_DOWN);
+        dump_glyph(SPECIAL_GLYPH_ARROW_LEFT);
+        dump_glyph(SPECIAL_GLYPH_ARROW_RIGHT);
+        dump_glyph(SPECIAL_GLYPH_ELLIPSIS);
+        dump_glyph(SPECIAL_GLYPH_EXTERNAL_LINK);
         dump_glyph(SPECIAL_GLYPH_ECSTATIC_SMILEY);
         dump_glyph(SPECIAL_GLYPH_HAPPY_SMILEY);
         dump_glyph(SPECIAL_GLYPH_SLIGHTLY_HAPPY_SMILEY);
@@ -91,14 +120,21 @@ static void dump_special_glyphs(void) {
         dump_glyph(SPECIAL_GLYPH_SLIGHTLY_UNHAPPY_SMILEY);
         dump_glyph(SPECIAL_GLYPH_UNHAPPY_SMILEY);
         dump_glyph(SPECIAL_GLYPH_DEPRESSED_SMILEY);
+        dump_glyph(SPECIAL_GLYPH_LOCK_AND_KEY);
+        dump_glyph(SPECIAL_GLYPH_TOUCH);
+        dump_glyph(SPECIAL_GLYPH_RECYCLING);
+        dump_glyph(SPECIAL_GLYPH_DOWNLOAD);
+        dump_glyph(SPECIAL_GLYPH_SPARKLES);
+        dump_glyph(SPECIAL_GLYPH_LOW_BATTERY);
+        dump_glyph(SPECIAL_GLYPH_WARNING_SIGN);
+        dump_glyph(SPECIAL_GLYPH_COMPUTER_DISK);
+        dump_glyph(SPECIAL_GLYPH_WORLD);
+        dump_glyph(SPECIAL_GLYPH_RED_CIRCLE);
+        dump_glyph(SPECIAL_GLYPH_YELLOW_CIRCLE);
+        dump_glyph(SPECIAL_GLYPH_BLUE_CIRCLE);
+        dump_glyph(SPECIAL_GLYPH_GREEN_CIRCLE);
+        dump_glyph(SPECIAL_GLYPH_SUPERHERO);
+        dump_glyph(SPECIAL_GLYPH_IDCARD);
 }
 
-int main(int argc, char *argv[]) {
-        test_get_locales();
-        test_locale_is_valid();
-        test_keymaps();
-
-        dump_special_glyphs();
-
-        return 0;
-}
+DEFINE_TEST_MAIN(LOG_INFO);

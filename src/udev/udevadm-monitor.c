@@ -1,14 +1,14 @@
-/* SPDX-License-Identifier: GPL-2.0+ */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include <errno.h>
 #include <getopt.h>
-#include <signal.h>
 
 #include "sd-device.h"
 #include "sd-event.h"
 
 #include "alloc-util.h"
 #include "device-monitor-private.h"
+#include "device-private.h"
 #include "device-util.h"
 #include "fd-util.h"
 #include "format-util.h"
@@ -18,6 +18,7 @@
 #include "string-util.h"
 #include "udevadm.h"
 #include "virt.h"
+#include "time-util.h"
 
 static bool arg_show_property = false;
 static bool arg_print_kernel = false;
@@ -26,14 +27,15 @@ static Set *arg_tag_filter = NULL;
 static Hashmap *arg_subsystem_filter = NULL;
 
 static int device_monitor_handler(sd_device_monitor *monitor, sd_device *device, void *userdata) {
-        const char *action = NULL, *devpath = NULL, *subsystem = NULL;
+        sd_device_action_t action = _SD_DEVICE_ACTION_INVALID;
+        const char *devpath = NULL, *subsystem = NULL;
         MonitorNetlinkGroup group = PTR_TO_INT(userdata);
         struct timespec ts;
 
         assert(device);
         assert(IN_SET(group, MONITOR_GROUP_UDEV, MONITOR_GROUP_KERNEL));
 
-        (void) sd_device_get_property_value(device, "ACTION", &action);
+        (void) sd_device_get_action(device, &action);
         (void) sd_device_get_devpath(device, &devpath);
         (void) sd_device_get_subsystem(device, &subsystem);
 
@@ -42,11 +44,10 @@ static int device_monitor_handler(sd_device_monitor *monitor, sd_device *device,
         printf("%-6s[%"PRI_TIME".%06"PRI_NSEC"] %-8s %s (%s)\n",
                group == MONITOR_GROUP_UDEV ? "UDEV" : "KERNEL",
                ts.tv_sec, (nsec_t)ts.tv_nsec/1000,
-               action, devpath, subsystem);
+               strna(device_action_to_string(action)),
+               devpath, subsystem);
 
         if (arg_show_property) {
-                const char *key, *value;
-
                 FOREACH_DEVICE_PROPERTY(device, key, value)
                         printf("%s=%s\n", key, value);
 
@@ -59,27 +60,24 @@ static int device_monitor_handler(sd_device_monitor *monitor, sd_device *device,
 static int setup_monitor(MonitorNetlinkGroup sender, sd_event *event, sd_device_monitor **ret) {
         _cleanup_(sd_device_monitor_unrefp) sd_device_monitor *monitor = NULL;
         const char *subsystem, *devtype, *tag;
-        Iterator i;
         int r;
 
         r = device_monitor_new_full(&monitor, sender, -1);
         if (r < 0)
                 return log_error_errno(r, "Failed to create netlink socket: %m");
 
-        (void) sd_device_monitor_set_receive_buffer_size(monitor, 128*1024*1024);
-
         r = sd_device_monitor_attach_event(monitor, event);
         if (r < 0)
                 return log_error_errno(r, "Failed to attach event: %m");
 
-        HASHMAP_FOREACH_KEY(devtype, subsystem, arg_subsystem_filter, i) {
+        HASHMAP_FOREACH_KEY(devtype, subsystem, arg_subsystem_filter) {
                 r = sd_device_monitor_filter_add_match_subsystem_devtype(monitor, subsystem, devtype);
                 if (r < 0)
                         return log_error_errno(r, "Failed to apply subsystem filter '%s%s%s': %m",
                                                subsystem, devtype ? "/" : "", strempty(devtype));
         }
 
-        SET_FOREACH(tag, arg_tag_filter, i) {
+        SET_FOREACH(tag, arg_tag_filter) {
                 r = sd_device_monitor_filter_add_match_tag(monitor, tag);
                 if (r < 0)
                         return log_error_errno(r, "Failed to apply tag filter '%s': %m", tag);
@@ -89,8 +87,7 @@ static int setup_monitor(MonitorNetlinkGroup sender, sd_event *event, sd_device_
         if (r < 0)
                 return log_error_errno(r, "Failed to start device monitor: %m");
 
-        (void) sd_event_source_set_description(sd_device_monitor_get_event_source(monitor),
-                                               sender == MONITOR_GROUP_UDEV ? "device-monitor-udev" : "device-monitor-kernel");
+        (void) sd_device_monitor_set_description(monitor, sender == MONITOR_GROUP_UDEV ? "udev" : "kernel");
 
         *ret = TAKE_PTR(monitor);
         return 0;
@@ -105,8 +102,8 @@ static int help(void) {
                "  -k --kernel                              Print kernel uevents\n"
                "  -u --udev                                Print udev events\n"
                "  -s --subsystem-match=SUBSYSTEM[/DEVTYPE] Filter events by subsystem\n"
-               "  -t --tag-match=TAG                       Filter events by tag\n"
-               , program_invocation_short_name);
+               "  -t --tag-match=TAG                       Filter events by tag\n",
+               program_invocation_short_name);
 
         return 0;
 }
@@ -155,35 +152,21 @@ static int parse_argv(int argc, char *argv[]) {
                         if (!subsystem)
                                 return -ENOMEM;
 
-                        r = hashmap_ensure_allocated(&arg_subsystem_filter, NULL);
+                        r = hashmap_ensure_put(&arg_subsystem_filter, NULL, subsystem, devtype);
                         if (r < 0)
                                 return r;
 
-                        r = hashmap_put(arg_subsystem_filter, subsystem, devtype);
-                        if (r < 0)
-                                return r;
-
-                        subsystem = devtype = NULL;
+                        TAKE_PTR(subsystem);
+                        TAKE_PTR(devtype);
                         break;
                 }
-                case 't': {
-                        _cleanup_free_ char *tag = NULL;
-
-                        r = set_ensure_allocated(&arg_tag_filter, &string_hash_ops);
+                case 't':
+                        /* optarg is stored in argv[], so we don't need to copy it */
+                        r = set_ensure_put(&arg_tag_filter, &string_hash_ops, optarg);
                         if (r < 0)
                                 return r;
-
-                        tag = strdup(optarg);
-                        if (!tag)
-                                return -ENOMEM;
-
-                        r = set_put(arg_tag_filter, tag);
-                        if (r < 0)
-                                return r;
-
-                        tag = NULL;
                         break;
-                }
+
                 case 'V':
                         return print_version();
                 case 'h':
@@ -191,7 +174,7 @@ static int parse_argv(int argc, char *argv[]) {
                 case '?':
                         return -EINVAL;
                 default:
-                        assert_not_reached("Unknown option.");
+                        assert_not_reached();
                 }
 
         if (!arg_print_kernel && !arg_print_udev) {
@@ -225,9 +208,11 @@ int monitor_main(int argc, char *argv[], void *userdata) {
                 goto finalize;
         }
 
-        assert_se(sigprocmask_many(SIG_UNBLOCK, NULL, SIGTERM, SIGINT, -1) >= 0);
-        (void) sd_event_add_signal(event, NULL, SIGTERM, NULL, NULL);
-        (void) sd_event_add_signal(event, NULL, SIGINT, NULL, NULL);
+        r = sd_event_set_signal_exit(event, true);
+        if (r < 0) {
+                log_error_errno(r, "Failed to install SIGINT/SIGTERM handling: %m");
+                goto finalize;
+        }
 
         printf("monitor will print the received events for:\n");
         if (arg_print_udev) {
@@ -257,7 +242,7 @@ int monitor_main(int argc, char *argv[], void *userdata) {
 
 finalize:
         hashmap_free_free_free(arg_subsystem_filter);
-        set_free_free(arg_tag_filter);
+        set_free(arg_tag_filter);
 
         return r;
 }

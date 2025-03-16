@@ -1,5 +1,8 @@
 ---
-title: The Boot Loader Interface
+title: Boot Loader Interface
+category: Booting
+layout: default
+SPDX-License-Identifier: LGPL-2.1-or-later
 ---
 
 # The Boot Loader Interface
@@ -28,7 +31,13 @@ variables. All EFI variables use the vendor UUID
 * The EFI variable `LoaderConfigTimeout` contains the boot menu timeout
   currently in use. It may be modified both by the boot loader and by the
   host. The value should be formatted as numeric, NUL-terminated, decimal
-  string, in UTF-16. The time is specified in µs.
+  string, in UTF-16. The time is specified in seconds. In addition some
+  non-numeric string values are also accepted. A value of `menu-force`
+  will disable the timeout and show the menu indefinitely. If set to `0` or
+  `menu-hidden` the default entry is booted immediately without showing a menu.
+  Unless a value of `menu-disabled` is set, the boot loader should provide a
+  way to interrupt this by for example listening for key presses for a brief
+  moment before booting.
 
 * Similarly, the EFI variable `LoaderConfigTimeoutOneShot` contains a boot menu
   timeout for a single following boot. It is set by the OS in order to request
@@ -60,7 +69,7 @@ variables. All EFI variables use the vendor UUID
   identifier that was booted. It is set by the boot loader and read by
   the OS in order to identify which entry has been used for the current boot.
 
-* The EFI variable `LoaderFeatures` contains a 64bit unsigned integer with a
+* The EFI variable `LoaderFeatures` contains a 64-bit unsigned integer with a
   number of flags bits that are set by the boot loader and passed to the OS and
   indicate the features the boot loader supports. Specifically, the following
   bits are defined:
@@ -69,7 +78,24 @@ variables. All EFI variables use the vendor UUID
   * `1 << 1` → The boot loader honours `LoaderConfigTimeoutOneShot` when set.
   * `1 << 2` → The boot loader honours `LoaderEntryDefault` when set.
   * `1 << 3` → The boot loader honours `LoaderEntryOneShot` when set.
-  * `1 << 4` → The boot loader supports boot counting as described in [Automatic Boot Assessment](https://systemd.io/AUTOMATIC_BOOT_ASSESSMENT).
+  * `1 << 4` → The boot loader supports boot counting as described in [Automatic Boot Assessment](/AUTOMATIC_BOOT_ASSESSMENT).
+  * `1 << 5` → The boot loader supports looking for boot menu entries in the Extended Boot Loader Partition.
+  * `1 << 6` → The boot loader supports passing a random seed to the OS.
+  * `1 << 13` → The boot loader honours `menu-disabled` option when set.
+
+* The EFI variable `LoaderSystemToken` contains binary random data,
+  persistently set by the OS installer. Boot loaders that support passing
+  random seeds to the OS should use this data and combine it with the random
+  seed file read from the ESP. By combining this random data with the random
+  seed read off the disk before generating a seed to pass to the OS and a new
+  seed to store in the ESP the boot loader can protect itself from situations
+  where "golden" OS images that include a random seed are replicated and used
+  on multiple systems. Since the EFI variable storage is usually independent
+  (i.e. in physical NVRAM) of the ESP file system storage, and only the latter
+  is part of "golden" OS images, this ensures that different systems still come
+  up with different random seeds. Note that the `LoaderSystemToken` is
+  generally only written once, by the OS installer, and is usually not touched
+  after that.
 
 If `LoaderTimeInitUSec` and `LoaderTimeExecUSec` are set, `systemd-analyze`
 will include them in its boot-time analysis.  If `LoaderDevicePartUUID` is set,
@@ -77,7 +103,8 @@ systemd will mount the ESP that was used for the boot to `/boot`, but only if
 that directory is empty, and only if no other file systems are mounted
 there. The `systemctl reboot --boot-loader-entry=…` and `systemctl reboot
 --boot-loader-menu=…` commands rely on the `LoaderFeatures` ,
-`LoaderConfigTimeoutOneShot`, `LoaderEntries`, `LoaderEntryOneShot` variables.
+`LoaderConfigTimeoutOneShot`, `LoaderEntries`, `LoaderEntryOneShot`
+variables.
 
 ## Boot Loader Entry Identifiers
 
@@ -88,10 +115,11 @@ the identifiers as passed in `LoaderEntries`, `LoaderEntryDefault`,
 `LoaderEntryOneShot`, `LoaderEntrySelected`, and possibly show nicely localized
 names for them in UIs.
 
-1. When boot loader entries are defined through [Boot Loader
-   Specification](https://systemd.io/BOOT_LOADER_SPECIFICATION) drop-in files
-   the identifier should be derived directly from the drop-in snippet name, but
-   with the `.conf` (or `.efi` in case of Type #2 entries) suffix removed.
+1. When boot loader entries are defined through the
+   [Boot Loader Specification](https://uapi-group.org/specifications/specs/boot_loader_specification/)
+   files, the identifier should be derived directly from the file name,
+   but with the `.conf` (Type #1 snippets) or `.efi` (Type #2 images)
+   suffix removed.
 
 2. Entries automatically discovered by the boot loader (as opposed to being
    configured in configuration files) should generally have an identifier
@@ -104,7 +132,7 @@ names for them in UIs.
    discovered Windows installation might have the identifier `auto-windows` or
    `auto-windows-10` or so.).
 
-4. Similar, boot menu entries referring to Apple MacOS X installations should
+4. Similarly, boot menu entries referring to Apple macOS installations should
    use the identifier `osx` or one that is prefixed with `osx-`. If such an
    entry is automatically discovered by the boot loader use `auto-osx` as
    identifier, or `auto-osx-` as prefix for the identifier, see above.
@@ -116,3 +144,11 @@ names for them in UIs.
 6. If a boot menu entry encapsulates a reboot into EFI firmware setup feature,
    it should use the identifier `reboot-to-firmware-setup` (or
    `auto-reboot-to-firmware-setup` in case it is automatically discovered).
+
+## Links
+
+[Boot Loader Specification](https://uapi-group.org/specifications/specs/boot_loader_specification)<br>
+[Discoverable Partitions Specification](https://uapi-group.org/specifications/specs/discoverable_partitions_specification)<br>
+[`systemd-boot(7)`](https://www.freedesktop.org/software/systemd/man/systemd-boot.html)<br>
+[`bootctl(1)`](https://www.freedesktop.org/software/systemd/man/bootctl.html)<br>
+[`systemd-gpt-auto-generator(8)`](https://www.freedesktop.org/software/systemd/man/systemd-gpt-auto-generator.html)

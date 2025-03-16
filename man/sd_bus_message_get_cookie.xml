@@ -1,10 +1,7 @@
 <?xml version='1.0'?> <!--*-nxml-*-->
-<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-  "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
-
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
--->
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+  "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
 <refentry id="sd_bus_message_get_cookie"
           xmlns:xi="http://www.w3.org/2001/XInclude">
@@ -66,49 +63,51 @@
   <refsect1>
     <title>Return Value</title>
 
-    <para>On success, these calls return 0 or a positive integer. On
-    failure, these calls return a negative errno-style error
-    code.</para>
+    <para>On success, these calls return 0 or a positive integer. On failure, they return a negative
+    errno-style error code.</para>
 
-    <para>On success, the cookie/reply cookie is returned in the
-    specified 64-bit unsigned integer variable.</para>
-  </refsect1>
+    <para>On success, the cookie/reply cookie is returned in the specified 64-bit unsigned integer
+    variable.</para>
 
-  <refsect1>
-    <title>Errors</title>
+    <refsect2>
+      <title>Errors</title>
 
-    <para>Returned errors may indicate the following problems:</para>
+      <para>Returned errors may indicate the following problems:</para>
 
-    <variablelist>
-      <varlistentry>
-        <term><constant>-EINVAL</constant></term>
+      <variablelist>
+        <varlistentry>
+          <term><constant>-EINVAL</constant></term>
 
-        <listitem><para>A specified parameter
-        is invalid.</para></listitem>
-      </varlistentry>
+          <listitem><para>A specified parameter is invalid.</para></listitem>
+        </varlistentry>
 
-      <varlistentry>
-        <term><constant>-ENODATA</constant></term>
+        <varlistentry>
+          <term><constant>-ENODATA</constant></term>
 
-        <listitem><para>No cookie has been assigned to this message.
-        This either indicates that the message has not been sent yet
-        and hence has no cookie assigned, or that the message is not a
-        method response message and hence carries a reply cookie
-        field.</para></listitem>
-      </varlistentry>
-    </variablelist>
+          <listitem><para>No cookie has been assigned to this message.  This either indicates that the
+          message has not been sent yet and hence has no cookie assigned, or that the message is not a method
+          response message and hence carries a reply cookie field.</para></listitem>
+        </varlistentry>
+      </variablelist>
+    </refsect2>
   </refsect1>
 
   <xi:include href="libsystemd-pkgconfig.xml" />
 
   <refsect1>
+    <title>History</title>
+    <para><function>sd_bus_message_get_cookie()</function> and
+    <function>sd_bus_message_get_reply_cookie()</function> were added in version 209.</para>
+  </refsect1>
+
+  <refsect1>
     <title>See Also</title>
 
-    <para>
-      <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>sd_bus_new</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-    </para>
+    <para><simplelist type="inline">
+      <member><citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd-bus</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+      <member><citerefentry><refentrytitle>sd_bus_new</refentrytitle><manvolnum>3</manvolnum></citerefentry></member>
+    </simplelist></para>
   </refsect1>
 
 </refentry>

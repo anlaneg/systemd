@@ -1,16 +1,18 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "alloc-util.h"
 #include "dns-domain.h"
 #include "dns-type.h"
 #include "resolved-dns-question.h"
+#include "socket-util.h"
 
 DnsQuestion *dns_question_new(size_t n) {
         DnsQuestion *q;
 
-        assert(n > 0);
+        if (n > UINT16_MAX) /* We can only place 64K key in an question section at max */
+                n = UINT16_MAX;
 
-        q = malloc0(offsetof(DnsQuestion, keys) + sizeof(DnsResourceKey*) * n);
+        q = malloc0(offsetof(DnsQuestion, items) + sizeof(DnsQuestionItem) * n);
         if (!q)
                 return NULL;
 
@@ -21,18 +23,19 @@ DnsQuestion *dns_question_new(size_t n) {
 }
 
 static DnsQuestion *dns_question_free(DnsQuestion *q) {
-        size_t i;
+        DnsResourceKey *key;
 
         assert(q);
 
-        for (i = 0; i < q->n_keys; i++)
-                dns_resource_key_unref(q->keys[i]);
+        DNS_QUESTION_FOREACH(key, q)
+                dns_resource_key_unref(key);
+
         return mfree(q);
 }
 
 DEFINE_TRIVIAL_REF_UNREF_FUNC(DnsQuestion, dns_question, dns_question_free);
 
-int dns_question_add_raw(DnsQuestion *q, DnsResourceKey *key) {
+int dns_question_add_raw(DnsQuestion *q, DnsResourceKey *key, DnsQuestionFlags flags) {
         /* Insert without checking for duplicates. */
 
         assert(key);
@@ -41,11 +44,28 @@ int dns_question_add_raw(DnsQuestion *q, DnsResourceKey *key) {
         if (q->n_keys >= q->n_allocated)
                 return -ENOSPC;
 
-        q->keys[q->n_keys++] = dns_resource_key_ref(key);
+        q->items[q->n_keys++] = (DnsQuestionItem) {
+                .key = dns_resource_key_ref(key),
+                .flags = flags,
+        };
         return 0;
 }
 
-int dns_question_add(DnsQuestion *q, DnsResourceKey *key) {
+static int dns_question_add_raw_all(DnsQuestion *a, DnsQuestion *b) {
+        DnsQuestionItem *item;
+        int r;
+
+        DNS_QUESTION_FOREACH_ITEM(item, b) {
+                r = dns_question_add_raw(a, item->key, item->flags);
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
+}
+
+int dns_question_add(DnsQuestion *q, DnsResourceKey *key, DnsQuestionFlags flags) {
+        DnsQuestionItem *item;
         int r;
 
         assert(key);
@@ -53,19 +73,32 @@ int dns_question_add(DnsQuestion *q, DnsResourceKey *key) {
         if (!q)
                 return -ENOSPC;
 
-        for (size_t i = 0; i < q->n_keys; i++) {
-                r = dns_resource_key_equal(q->keys[i], key);
+        DNS_QUESTION_FOREACH_ITEM(item, q) {
+                r = dns_resource_key_equal(item->key, key);
                 if (r < 0)
                         return r;
-                if (r > 0)
+                if (r > 0 && item->flags == flags)
                         return 0;
         }
 
-        return dns_question_add_raw(q, key);
+        return dns_question_add_raw(q, key, flags);
+}
+
+static int dns_question_add_all(DnsQuestion *a, DnsQuestion *b) {
+        DnsQuestionItem *item;
+        int r;
+
+        DNS_QUESTION_FOREACH_ITEM(item, b) {
+                r = dns_question_add(a, item->key, item->flags);
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
 }
 
 int dns_question_matches_rr(DnsQuestion *q, DnsResourceRecord *rr, const char *search_domain) {
-        size_t i;
+        DnsResourceKey *key;
         int r;
 
         assert(rr);
@@ -73,8 +106,8 @@ int dns_question_matches_rr(DnsQuestion *q, DnsResourceRecord *rr, const char *s
         if (!q)
                 return 0;
 
-        for (i = 0; i < q->n_keys; i++) {
-                r = dns_resource_key_match_rr(q->keys[i], rr, search_domain);
+        DNS_QUESTION_FOREACH(key, q) {
+                r = dns_resource_key_match_rr(key, rr, search_domain);
                 if (r != 0)
                         return r;
         }
@@ -83,7 +116,7 @@ int dns_question_matches_rr(DnsQuestion *q, DnsResourceRecord *rr, const char *s
 }
 
 int dns_question_matches_cname_or_dname(DnsQuestion *q, DnsResourceRecord *rr, const char *search_domain) {
-        size_t i;
+        DnsResourceKey *key;
         int r;
 
         assert(rr);
@@ -94,12 +127,12 @@ int dns_question_matches_cname_or_dname(DnsQuestion *q, DnsResourceRecord *rr, c
         if (!IN_SET(rr->key->type, DNS_TYPE_CNAME, DNS_TYPE_DNAME))
                 return 0;
 
-        for (i = 0; i < q->n_keys; i++) {
+        DNS_QUESTION_FOREACH(key, q) {
                 /* For a {C,D}NAME record we can never find a matching {C,D}NAME record */
-                if (!dns_type_may_redirect(q->keys[i]->type))
+                if (!dns_type_may_redirect(key->type))
                         return 0;
 
-                r = dns_resource_key_match_cname_or_dname(q->keys[i], rr->key, search_domain);
+                r = dns_resource_key_match_cname_or_dname(key, rr->key, search_domain);
                 if (r != 0)
                         return r;
         }
@@ -121,38 +154,38 @@ int dns_question_is_valid_for_query(DnsQuestion *q) {
         if (q->n_keys > 65535)
                 return 0;
 
-        name = dns_resource_key_name(q->keys[0]);
+        name = dns_resource_key_name(q->items[0].key);
         if (!name)
                 return 0;
 
         /* Check that all keys in this question bear the same name */
         for (i = 0; i < q->n_keys; i++) {
-                assert(q->keys[i]);
+                assert(q->items[i].key);
 
                 if (i > 0) {
-                        r = dns_name_equal(dns_resource_key_name(q->keys[i]), name);
+                        r = dns_name_equal(dns_resource_key_name(q->items[i].key), name);
                         if (r <= 0)
                                 return r;
                 }
 
-                if (!dns_type_is_valid_query(q->keys[i]->type))
+                if (!dns_type_is_valid_query(q->items[i].key->type))
                         return 0;
         }
 
         return 1;
 }
 
-int dns_question_contains(DnsQuestion *a, const DnsResourceKey *k) {
+int dns_question_contains_key(DnsQuestion *q, const DnsResourceKey *k) {
         size_t j;
         int r;
 
         assert(k);
 
-        if (!a)
+        if (!q)
                 return 0;
 
-        for (j = 0; j < a->n_keys; j++) {
-                r = dns_resource_key_equal(a->keys[j], k);
+        for (j = 0; j < q->n_keys; j++) {
+                r = dns_resource_key_equal(q->items[j].key, k);
                 if (r != 0)
                         return r;
         }
@@ -160,8 +193,25 @@ int dns_question_contains(DnsQuestion *a, const DnsResourceKey *k) {
         return 0;
 }
 
+static int dns_question_contains_item(DnsQuestion *q, const DnsQuestionItem *i) {
+        DnsQuestionItem *item;
+        int r;
+
+        assert(i);
+
+        DNS_QUESTION_FOREACH_ITEM(item, q) {
+                if (item->flags != i->flags)
+                        continue;
+                r = dns_resource_key_equal(item->key, i->key);
+                if (r != 0)
+                        return r;
+        }
+
+        return false;
+}
+
 int dns_question_is_equal(DnsQuestion *a, DnsQuestion *b) {
-        size_t j;
+        DnsQuestionItem *item;
         int r;
 
         if (a == b)
@@ -172,16 +222,15 @@ int dns_question_is_equal(DnsQuestion *a, DnsQuestion *b) {
         if (!b)
                 return a->n_keys == 0;
 
-        /* Checks if all keys in a are also contained b, and vice versa */
+        /* Checks if all items in a are also contained b, and vice versa */
 
-        for (j = 0; j < a->n_keys; j++) {
-                r = dns_question_contains(b, a->keys[j]);
+        DNS_QUESTION_FOREACH_ITEM(item, a) {
+                r = dns_question_contains_item(b, item);
                 if (r <= 0)
                         return r;
         }
-
-        for (j = 0; j < b->n_keys; j++) {
-                r = dns_question_contains(a, b->keys[j]);
+        DNS_QUESTION_FOREACH_ITEM(item, b) {
+                r = dns_question_contains_item(a, item);
                 if (r <= 0)
                         return r;
         }
@@ -248,7 +297,7 @@ int dns_question_cname_redirect(DnsQuestion *q, const DnsResourceRecord *cname, 
                 if (!k)
                         return -ENOMEM;
 
-                r = dns_question_add(n, k);
+                r = dns_question_add(n, k, 0);
                 if (r < 0)
                         return r;
         }
@@ -258,7 +307,7 @@ int dns_question_cname_redirect(DnsQuestion *q, const DnsResourceRecord *cname, 
         return 1;
 }
 
-const char *dns_question_first_name(DnsQuestion *q) {
+const char* dns_question_first_name(DnsQuestion *q) {
 
         if (!q)
                 return NULL;
@@ -266,7 +315,7 @@ const char *dns_question_first_name(DnsQuestion *q) {
         if (q->n_keys < 1)
                 return NULL;
 
-        return dns_resource_key_name(q->keys[0]);
+        return dns_resource_key_name(q->items[0].key);
 }
 
 int dns_question_new_address(DnsQuestion **ret, int family, const char *name, bool convert_idna) {
@@ -280,6 +329,11 @@ int dns_question_new_address(DnsQuestion **ret, int family, const char *name, bo
         if (!IN_SET(family, AF_INET, AF_INET6, AF_UNSPEC))
                 return -EAFNOSUPPORT;
 
+        /* If IPv6 is off and the request has an unspecified lookup family, restrict it automatically to
+         * IPv4. */
+        if (family == AF_UNSPEC && !socket_ipv6_is_enabled())
+                family = AF_INET;
+
         if (convert_idna) {
                 r = dns_name_apply_idna(name, &buf);
                 if (r < 0)
@@ -289,7 +343,7 @@ int dns_question_new_address(DnsQuestion **ret, int family, const char *name, bo
                 else
                         /* We did not manage to create convert the idna name, or it's
                          * the same as the original name. We assume the caller already
-                         * created an uncoverted question, so let's not repeat work
+                         * created an unconverted question, so let's not repeat work
                          * unnecessarily. */
                         return -EALREADY;
         }
@@ -305,7 +359,7 @@ int dns_question_new_address(DnsQuestion **ret, int family, const char *name, bo
                 if (!key)
                         return -ENOMEM;
 
-                r = dns_question_add(q, key);
+                r = dns_question_add(q, key, 0);
                 if (r < 0)
                         return r;
         }
@@ -317,7 +371,7 @@ int dns_question_new_address(DnsQuestion **ret, int family, const char *name, bo
                 if (!key)
                         return -ENOMEM;
 
-                r = dns_question_add(q, key);
+                r = dns_question_add(q, key, 0);
                 if (r < 0)
                         return r;
         }
@@ -353,7 +407,7 @@ int dns_question_new_reverse(DnsQuestion **ret, int family, const union in_addr_
 
         reverse = NULL;
 
-        r = dns_question_add(q, key);
+        r = dns_question_add(q, key, 0);
         if (r < 0)
                 return r;
 
@@ -425,7 +479,7 @@ int dns_question_new_service(
         if (!key)
                 return -ENOMEM;
 
-        r = dns_question_add(q, key);
+        r = dns_question_add(q, key, 0);
         if (r < 0)
                 return r;
 
@@ -435,12 +489,62 @@ int dns_question_new_service(
                 if (!key)
                         return -ENOMEM;
 
-                r = dns_question_add(q, key);
+                r = dns_question_add(q, key, 0);
                 if (r < 0)
                         return r;
         }
 
         *ret = TAKE_PTR(q);
 
+        return 0;
+}
+
+/*
+ * This function is not used in the code base, but is useful when debugging. Do not delete.
+ */
+void dns_question_dump(DnsQuestion *question, FILE *f) {
+        DnsResourceKey *k;
+
+        if (!f)
+                f = stdout;
+
+        DNS_QUESTION_FOREACH(k, question) {
+                char buf[DNS_RESOURCE_KEY_STRING_MAX];
+
+                fputc('\t', f);
+                fputs(dns_resource_key_to_string(k, buf, sizeof(buf)), f);
+                fputc('\n', f);
+        }
+}
+
+int dns_question_merge(DnsQuestion *a, DnsQuestion *b, DnsQuestion **ret) {
+        _cleanup_(dns_question_unrefp) DnsQuestion *k = NULL;
+        int r;
+
+        assert(ret);
+
+        if (a == b || dns_question_size(b) <= 0) {
+                *ret = dns_question_ref(a);
+                return 0;
+        }
+
+        if (dns_question_size(a) <= 0) {
+                *ret = dns_question_ref(b);
+                return 0;
+        }
+
+        k = dns_question_new(dns_question_size(a) + dns_question_size(b));
+        if (!k)
+                return -ENOMEM;
+
+        r = dns_question_add_raw_all(k, a);
+        if (r < 0)
+                return r;
+
+        r = dns_question_add_all(k, b);
+        if (r < 0)
+                return r;
+
+        *ret = TAKE_PTR(k);
         return 0;
 }

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <stdarg.h>
@@ -6,13 +6,13 @@
 #include <stdlib.h>
 
 #include "alloc-util.h"
+#include "chase.h"
 #include "conf-files.h"
 #include "dirent-util.h"
 #include "dropin.h"
 #include "escape.h"
 #include "fd-util.h"
-#include "fileio-label.h"
-#include "fs-util.h"
+#include "fileio.h"
 #include "hashmap.h"
 #include "log.h"
 #include "macro.h"
@@ -23,46 +23,59 @@
 #include "strv.h"
 #include "unit-name.h"
 
-int drop_in_file(const char *dir, const char *unit, unsigned level,
-                 const char *name, char **_p, char **_q) {
+int drop_in_file(
+                const char *dir,
+                const char *unit,
+                unsigned level,
+                const char *name,
+                char **ret_unit_dir,
+                char **ret_path) {
 
-        char prefix[DECIMAL_STR_MAX(unsigned)];
-        _cleanup_free_ char *b = NULL;
-        char *p, *q;
+        _cleanup_free_ char *n = NULL, *unit_dir = NULL;
 
+        assert(dir);
         assert(unit);
         assert(name);
-        assert(_p);
-        assert(_q);
 
-        sprintf(prefix, "%u", level);
-
-        b = xescape(name, "/.");
-        if (!b)
+        n = xescape(name, "/.");
+        if (!n)
                 return -ENOMEM;
-
-        if (!filename_is_valid(b))
+        if (!filename_is_valid(n))
                 return -EINVAL;
 
-        p = strjoin(dir, "/", unit, ".d");
-        if (!p)
-                return -ENOMEM;
-
-        q = strjoin(p, "/", prefix, "-", b, ".conf");
-        if (!q) {
-                free(p);
-                return -ENOMEM;
+        if (ret_unit_dir || ret_path) {
+                unit_dir = path_join(dir, strjoina(unit, ".d"));
+                if (!unit_dir)
+                        return -ENOMEM;
         }
 
-        *_p = p;
-        *_q = q;
+        if (ret_path) {
+                char prefix[DECIMAL_STR_MAX(unsigned) + 1] = {};
+
+                if (level != UINT_MAX)
+                        xsprintf(prefix, "%u-", level);
+
+                _cleanup_free_ char *path = strjoin(unit_dir, "/", prefix, n, ".conf");
+                if (!path)
+                        return -ENOMEM;
+
+                *ret_path = TAKE_PTR(path);
+        }
+
+        if (ret_unit_dir)
+                *ret_unit_dir = TAKE_PTR(unit_dir);
+
         return 0;
 }
 
-int write_drop_in(const char *dir, const char *unit, unsigned level,
-                  const char *name, const char *data) {
+int write_drop_in(
+                const char *dir,
+                const char *unit,
+                unsigned level,
+                const char *name,
+                const char *data) {
 
-        _cleanup_free_ char *p = NULL, *q = NULL;
+        _cleanup_free_ char *p = NULL;
         int r;
 
         assert(dir);
@@ -70,17 +83,21 @@ int write_drop_in(const char *dir, const char *unit, unsigned level,
         assert(name);
         assert(data);
 
-        r = drop_in_file(dir, unit, level, name, &p, &q);
+        r = drop_in_file(dir, unit, level, name, /* ret_unit_dir= */ NULL, &p);
         if (r < 0)
                 return r;
 
-        (void) mkdir_p(p, 0755);
-        return write_string_file_atomic_label(q, data);
+        return write_string_file(p, data, WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_ATOMIC|WRITE_STRING_FILE_MKDIR_0755|WRITE_STRING_FILE_LABEL);
 }
 
-int write_drop_in_format(const char *dir, const char *unit, unsigned level,
-                         const char *name, const char *format, ...) {
-        _cleanup_free_ char *p = NULL;
+int write_drop_in_format(
+                const char *dir,
+                const char *unit,
+                unsigned level,
+                const char *name,
+                const char *format, ...) {
+
+        _cleanup_free_ char *content = NULL;
         va_list ap;
         int r;
 
@@ -90,16 +107,16 @@ int write_drop_in_format(const char *dir, const char *unit, unsigned level,
         assert(format);
 
         va_start(ap, format);
-        r = vasprintf(&p, format, ap);
+        r = vasprintf(&content, format, ap);
         va_end(ap);
 
         if (r < 0)
                 return -ENOMEM;
 
-        return write_drop_in(dir, unit, level, name, p);
+        return write_drop_in(dir, unit, level, name, content);
 }
 
-static int unit_file_find_dir(
+static int unit_file_add_dir(
                 const char *original_root,
                 const char *path,
                 char ***dirs) {
@@ -109,7 +126,9 @@ static int unit_file_find_dir(
 
         assert(path);
 
-        r = chase_symlinks(path, original_root, 0, &chased);
+        /* This adds [original_root]/path to dirs, if it exists. */
+
+        r = chase(path, original_root, 0, &chased, NULL);
         if (r == -ENOENT) /* Ignore -ENOENT, after all most units won't have a drop-in dir. */
                 return 0;
         if (r == -ENAMETOOLONG) {
@@ -121,11 +140,9 @@ static int unit_file_find_dir(
         if (r < 0)
                 return log_warning_errno(r, "Failed to canonicalize path '%s': %m", path);
 
-        r = strv_push(dirs, chased);
-        if (r < 0)
+        if (strv_consume(dirs, TAKE_PTR(chased)) < 0)
                 return log_oom();
 
-        chased = NULL;
         return 0;
 }
 
@@ -151,7 +168,7 @@ static int unit_file_find_dirs(
 
         path = strjoina(unit_path, "/", name, suffix);
         if (!unit_path_cache || set_get(unit_path_cache, path)) {
-                r = unit_file_find_dir(original_root, path, dirs);
+                r = unit_file_add_dir(original_root, path, dirs);
                 if (r < 0)
                         return r;
         }
@@ -168,6 +185,10 @@ static int unit_file_find_dirs(
                 if (r < 0)
                         return r;
         }
+
+        /* Return early for top level drop-ins. */
+        if (unit_type_from_string(name) >= 0)
+                return 0;
 
         /* Let's see if there's a "-" prefix for this unit name. If so, let's invoke ourselves for it. This will then
          * recursively do the same for all our prefixes. i.e. this means given "foo-bar-waldo.service" we'll also
@@ -206,7 +227,7 @@ static int unit_file_find_dirs(
         type = unit_name_to_type(name);
         if (type < 0)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "Failed to to derive unit type from unit name: %s",
+                                       "Failed to derive unit type from unit name: %s",
                                        name);
 
         if (is_instance) {
@@ -228,19 +249,44 @@ int unit_file_find_dropin_paths(
                 Set *unit_path_cache,
                 const char *dir_suffix,
                 const char *file_suffix,
-                Set *names,
+                const char *name,
+                const Set *aliases,
                 char ***ret) {
 
         _cleanup_strv_free_ char **dirs = NULL;
-        char *t, **p;
-        Iterator i;
+        const char *n;
         int r;
 
         assert(ret);
 
-        SET_FOREACH(t, names, i)
+        if (name)
                 STRV_FOREACH(p, lookup_path)
-                        (void) unit_file_find_dirs(original_root, unit_path_cache, *p, t, dir_suffix, &dirs);
+                        (void) unit_file_find_dirs(original_root, unit_path_cache, *p, name, dir_suffix, &dirs);
+
+        SET_FOREACH(n, aliases)
+                STRV_FOREACH(p, lookup_path)
+                        (void) unit_file_find_dirs(original_root, unit_path_cache, *p, n, dir_suffix, &dirs);
+
+        /* All the names in the unit are of the same type so just grab one. */
+        n = name ?: (const char*) set_first(aliases);
+        if (n) {
+                UnitType type = _UNIT_TYPE_INVALID;
+
+                type = unit_name_to_type(n);
+                if (type < 0)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Failed to derive unit type from unit name: %s", n);
+
+                /* Special top level drop in for "<unit type>.<suffix>". Add this last as it's the most generic
+                 * and should be able to be overridden by more specific drop-ins. */
+                STRV_FOREACH(p, lookup_path)
+                        (void) unit_file_find_dirs(original_root,
+                                                   unit_path_cache,
+                                                   *p,
+                                                   unit_type_to_string(type),
+                                                   dir_suffix,
+                                                   &dirs);
+        }
 
         if (strv_isempty(dirs)) {
                 *ret = NULL;

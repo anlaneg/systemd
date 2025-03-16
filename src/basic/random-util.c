@@ -1,258 +1,270 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-
-#if defined(__i386__) || defined(__x86_64__)
-#include <cpuid.h>
-#endif
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/random.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/time.h>
 
 #if HAVE_SYS_AUXV_H
 #  include <sys/auxv.h>
 #endif
 
-#if USE_SYS_RANDOM_H
-#  include <sys/random.h>
-#else
-#  include <linux/random.h>
-#endif
-
 #include "alloc-util.h"
+#include "env-util.h"
+#include "errno-util.h"
 #include "fd-util.h"
+#include "fileio.h"
 #include "io-util.h"
-#include "missing.h"
+#include "iovec-util.h"
+#include "missing_random.h"
+#include "missing_syscall.h"
+#include "missing_threads.h"
+#include "parse-util.h"
+#include "process-util.h"
 #include "random-util.h"
+#include "sha256.h"
 #include "time-util.h"
 
-int rdrand(unsigned long *ret) {
-
-#if defined(__i386__) || defined(__x86_64__)
-        static int have_rdrand = -1;
-        unsigned char err;
-
-        if (have_rdrand < 0) {
-                uint32_t eax, ebx, ecx, edx;
-
-                /* Check if RDRAND is supported by the CPU */
-                if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) == 0) {
-                        have_rdrand = false;
-                        return -EOPNOTSUPP;
-                }
-
-                have_rdrand = !!(ecx & (1U << 30));
-        }
-
-        if (have_rdrand == 0)
-                return -EOPNOTSUPP;
-
-        asm volatile("rdrand %0;"
-                     "setc %1"
-                     : "=r" (*ret),
-                       "=qm" (err));
-        msan_unpoison(&err, sizeof(err));
-        if (!err)
-                return -EAGAIN;
-
-        return 0;
-#else
-        return -EOPNOTSUPP;
-#endif
-}
-
-int genuine_random_bytes(void *p, size_t n, RandomFlags flags) {
-        static int have_syscall = -1;
-        _cleanup_close_ int fd = -1;
-        bool got_some = false;
-        int r;
-
-        /* Gathers some randomness from the kernel (or the CPU if the RANDOM_ALLOW_RDRAND flag is set). This call won't
-         * block, unless the RANDOM_BLOCK flag is set. If RANDOM_DONT_DRAIN is set, an error is returned if the random
-         * pool is not initialized. Otherwise it will always return some data from the kernel, regardless of whether
-         * the random pool is fully initialized or not. */
-
-        if (n == 0)
-                return 0;
-
-        if (FLAGS_SET(flags, RANDOM_ALLOW_RDRAND))
-                /* Try x86-64' RDRAND intrinsic if we have it. We only use it if high quality randomness is not
-                 * required, as we don't trust it (who does?). Note that we only do a single iteration of RDRAND here,
-                 * even though the Intel docs suggest calling this in a tight loop of 10 invocations or so. That's
-                 * because we don't really care about the quality here. We generally prefer using RDRAND if the caller
-                 * allows us too, since this way we won't drain the kernel randomness pool if we don't need it, as the
-                 * pool's entropy is scarce. */
-                for (;;) {
-                        unsigned long u;
-                        size_t m;
-
-                        if (rdrand(&u) < 0) {
-                                if (got_some && FLAGS_SET(flags, RANDOM_EXTEND_WITH_PSEUDO)) {
-                                        /* Fill in the remaining bytes using pseudo-random values */
-                                        pseudo_random_bytes(p, n);
-                                        return 0;
-                                }
-
-                                /* OK, this didn't work, let's go to getrandom() + /dev/urandom instead */
-                                break;
-                        }
-
-                        m = MIN(sizeof(u), n);
-                        memcpy(p, &u, m);
-
-                        p = (uint8_t*) p + m;
-                        n -= m;
-
-                        if (n == 0)
-                                return 0; /* Yay, success! */
-
-                        got_some = true;
-                }
-
-        /* Use the getrandom() syscall unless we know we don't have it. */
-        if (have_syscall != 0 && !HAS_FEATURE_MEMORY_SANITIZER) {
-
-                for (;;) {
-                        r = getrandom(p, n, FLAGS_SET(flags, RANDOM_BLOCK) ? 0 : GRND_NONBLOCK);
-                        if (r > 0) {
-                                have_syscall = true;
-
-                                if ((size_t) r == n)
-                                        return 0; /* Yay, success! */
-
-                                assert((size_t) r < n);
-                                p = (uint8_t*) p + r;
-                                n -= r;
-
-                                if (FLAGS_SET(flags, RANDOM_EXTEND_WITH_PSEUDO)) {
-                                        /* Fill in the remaining bytes using pseudo-random values */
-                                        pseudo_random_bytes(p, n);
-                                        return 0;
-                                }
-
-                                got_some = true;
-
-                                /* Hmm, we didn't get enough good data but the caller insists on good data? Then try again */
-                                if (FLAGS_SET(flags, RANDOM_BLOCK))
-                                        continue;
-
-                                /* Fill in the rest with /dev/urandom */
-                                break;
-
-                        } else if (r == 0) {
-                                have_syscall = true;
-                                return -EIO;
-
-                        } else if (errno == ENOSYS) {
-                                /* We lack the syscall, continue with reading from /dev/urandom. */
-                                have_syscall = false;
-                                break;
-
-                        } else if (errno == EAGAIN) {
-                                /* The kernel has no entropy whatsoever. Let's remember to use the syscall the next
-                                 * time again though.
-                                 *
-                                 * If RANDOM_DONT_DRAIN is set, return an error so that random_bytes() can produce some
-                                 * pseudo-random bytes instead. Otherwise, fall back to /dev/urandom, which we know is empty,
-                                 * but the kernel will produce some bytes for us on a best-effort basis. */
-                                have_syscall = true;
-
-                                if (got_some && FLAGS_SET(flags, RANDOM_EXTEND_WITH_PSEUDO)) {
-                                        /* Fill in the remaining bytes using pseudorandom values */
-                                        pseudo_random_bytes(p, n);
-                                        return 0;
-                                }
-
-                                if (FLAGS_SET(flags, RANDOM_DONT_DRAIN))
-                                        return -ENODATA;
-
-                                /* Use /dev/urandom instead */
-                                break;
-                        } else
-                                return -errno;
-                }
-        }
-
-        fd = open("/dev/urandom", O_RDONLY|O_CLOEXEC|O_NOCTTY);
-        if (fd < 0)
-                return errno == ENOENT ? -ENOSYS : -errno;
-
-        return loop_read_exact(fd, p, n, true);
-}
-
-void initialize_srand(void) {
-        static bool srand_called = false;
-        unsigned x;
-#if HAVE_SYS_AUXV_H
-        const void *auxv;
-#endif
-        unsigned long k;
-
-        if (srand_called)
-                return;
+/* This is a "best effort" kind of thing, but has no real security value.  So, this should only be used by
+ * random_bytes(), which is not meant for crypto. This could be made better, but we're *not* trying to roll a
+ * userspace prng here, or even have forward secrecy, but rather just do the shortest thing that is at least
+ * better than libc rand(). */
+static void fallback_random_bytes(void *p, size_t n) {
+        static thread_local uint64_t fallback_counter = 0;
+        struct {
+                char label[32];
+                uint64_t call_id, block_id;
+                usec_t stamp_mono, stamp_real;
+                pid_t pid, tid;
+                uint8_t auxval[16];
+        } state = {
+                /* Arbitrary domain separation to prevent other usage of AT_RANDOM from clashing. */
+                .label = "systemd fallback random bytes v1",
+                .call_id = fallback_counter++,
+                .stamp_mono = now(CLOCK_MONOTONIC),
+                .stamp_real = now(CLOCK_REALTIME),
+                .pid = getpid_cached(),
+                .tid = gettid(),
+        };
 
 #if HAVE_SYS_AUXV_H
-        /* The kernel provides us with 16 bytes of entropy in auxv, so let's
-         * try to make use of that to seed the pseudo-random generator. It's
-         * better than nothing... */
-
-        auxv = (const void*) getauxval(AT_RANDOM);
-        if (auxv) {
-                assert_cc(sizeof(x) <= 16);
-                memcpy(&x, auxv, sizeof(x));
-        } else
-#endif
-                x = 0;
-
-        x ^= (unsigned) now(CLOCK_REALTIME);
-        x ^= (unsigned) gettid();
-
-        if (rdrand(&k) >= 0)
-                x ^= (unsigned) k;
-
-        srand(x);
-        srand_called = true;
-}
-
-/* INT_MAX gives us only 31 bits, so use 24 out of that. */
-#if RAND_MAX >= INT_MAX
-#  define RAND_STEP 3
-#else
-/* SHORT_INT_MAX or lower gives at most 15 bits, we just just 8 out of that. */
-#  define RAND_STEP 1
+        memcpy(state.auxval, ULONG_TO_PTR(getauxval(AT_RANDOM)), sizeof(state.auxval));
 #endif
 
-void pseudo_random_bytes(void *p, size_t n) {
-        uint8_t *q;
+        while (n > 0) {
+                struct sha256_ctx ctx;
 
-        initialize_srand();
-
-        for (q = p; q < (uint8_t*) p + n; q += RAND_STEP) {
-                unsigned rr;
-
-                rr = (unsigned) rand();
-
-#if RAND_STEP >= 3
-                if ((size_t) (q - (uint8_t*) p + 2) < n)
-                        q[2] = rr >> 16;
-#endif
-#if RAND_STEP >= 2
-                if ((size_t) (q - (uint8_t*) p + 1) < n)
-                        q[1] = rr >> 8;
-#endif
-                q[0] = rr;
+                sha256_init_ctx(&ctx);
+                sha256_process_bytes(&state, sizeof(state), &ctx);
+                if (n < SHA256_DIGEST_SIZE) {
+                        uint8_t partial[SHA256_DIGEST_SIZE];
+                        sha256_finish_ctx(&ctx, partial);
+                        memcpy(p, partial, n);
+                        break;
+                }
+                sha256_finish_ctx(&ctx, p);
+                p = (uint8_t *) p + SHA256_DIGEST_SIZE;
+                n -= SHA256_DIGEST_SIZE;
+                ++state.block_id;
         }
 }
 
 void random_bytes(void *p, size_t n) {
+        static bool have_getrandom = true, have_grndinsecure = true;
+        _cleanup_close_ int fd = -EBADF;
 
-        if (genuine_random_bytes(p, n, RANDOM_EXTEND_WITH_PSEUDO|RANDOM_DONT_DRAIN|RANDOM_ALLOW_RDRAND) >= 0)
+        if (n == 0)
                 return;
 
-        /* If for some reason some user made /dev/urandom unavailable to us, or the kernel has no entropy, use a PRNG instead. */
-        pseudo_random_bytes(p, n);
+        for (;;) {
+                ssize_t l;
+
+                if (!have_getrandom)
+                        break;
+
+                l = getrandom(p, n, have_grndinsecure ? GRND_INSECURE : GRND_NONBLOCK);
+                if (l > 0) {
+                        if ((size_t) l == n)
+                                return; /* Done reading, success. */
+                        p = (uint8_t *) p + l;
+                        n -= l;
+                        continue; /* Interrupted by a signal; keep going. */
+                } else if (l == 0)
+                        break; /* Weird, so fallback to /dev/urandom. */
+                else if (ERRNO_IS_NOT_SUPPORTED(errno)) {
+                        have_getrandom = false;
+                        break; /* No syscall, so fallback to /dev/urandom. */
+                } else if (errno == EINVAL && have_grndinsecure) {
+                        have_grndinsecure = false;
+                        continue; /* No GRND_INSECURE; fallback to GRND_NONBLOCK. */
+                } else if (errno == EAGAIN && !have_grndinsecure)
+                        break; /* Will block, but no GRND_INSECURE, so fallback to /dev/urandom. */
+
+                break; /* Unexpected, so just give up and fallback to /dev/urandom. */
+        }
+
+        fd = open("/dev/urandom", O_RDONLY|O_CLOEXEC|O_NOCTTY);
+        if (fd >= 0 && loop_read_exact(fd, p, n, false) == 0)
+                return;
+
+        /* This is a terrible fallback. Oh well. */
+        fallback_random_bytes(p, n);
+}
+
+int crypto_random_bytes(void *p, size_t n) {
+        static bool have_getrandom = true, seen_initialized = false;
+        _cleanup_close_ int fd = -EBADF;
+
+        if (n == 0)
+                return 0;
+
+        for (;;) {
+                ssize_t l;
+
+                if (!have_getrandom)
+                        break;
+
+                l = getrandom(p, n, 0);
+                if (l > 0) {
+                        if ((size_t) l == n)
+                                return 0; /* Done reading, success. */
+                        p = (uint8_t *) p + l;
+                        n -= l;
+                        continue; /* Interrupted by a signal; keep going. */
+                } else if (l == 0)
+                        return -EIO; /* Weird, should never happen. */
+                else if (ERRNO_IS_NOT_SUPPORTED(errno)) {
+                        have_getrandom = false;
+                        break; /* No syscall, so fallback to /dev/urandom. */
+                }
+                return -errno;
+        }
+
+        if (!seen_initialized) {
+                _cleanup_close_ int ready_fd = -EBADF;
+                int r;
+
+                ready_fd = open("/dev/random", O_RDONLY|O_CLOEXEC|O_NOCTTY);
+                if (ready_fd < 0)
+                        return -errno;
+                r = fd_wait_for_event(ready_fd, POLLIN, USEC_INFINITY);
+                if (r < 0)
+                        return r;
+                seen_initialized = true;
+        }
+
+        fd = open("/dev/urandom", O_RDONLY|O_CLOEXEC|O_NOCTTY);
+        if (fd < 0)
+                return -errno;
+        return loop_read_exact(fd, p, n, false);
+}
+
+int crypto_random_bytes_allocate_iovec(size_t n, struct iovec *ret) {
+        _cleanup_free_ void *p = NULL;
+        int r;
+
+        assert(ret);
+
+        p = malloc(MAX(n, 1U));
+        if (!p)
+                return -ENOMEM;
+
+        r = crypto_random_bytes(p, n);
+        if (r < 0)
+                return r;
+
+        *ret = IOVEC_MAKE(TAKE_PTR(p), n);
+        return 0;
+}
+
+size_t random_pool_size(void) {
+        _cleanup_free_ char *s = NULL;
+        int r;
+
+        /* Read pool size, if possible */
+        r = read_one_line_file("/proc/sys/kernel/random/poolsize", &s);
+        if (r < 0)
+                log_debug_errno(r, "Failed to read pool size from kernel: %m");
+        else {
+                unsigned sz;
+
+                r = safe_atou(s, &sz);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to parse pool size: %s", s);
+                else
+                        /* poolsize is in bits on 2.6, but we want bytes */
+                        return CLAMP(sz / 8, RANDOM_POOL_SIZE_MIN, RANDOM_POOL_SIZE_MAX);
+        }
+
+        /* Use the minimum as default, if we can't retrieve the correct value */
+        return RANDOM_POOL_SIZE_MIN;
+}
+
+int random_write_entropy(int fd, const void *seed, size_t size, bool credit) {
+        _cleanup_close_ int opened_fd = -EBADF;
+        int r;
+
+        assert(seed || size == 0);
+
+        if (size == 0)
+                return 0;
+
+        if (fd < 0) {
+                opened_fd = open("/dev/urandom", O_WRONLY|O_CLOEXEC|O_NOCTTY);
+                if (opened_fd < 0)
+                        return -errno;
+
+                fd = opened_fd;
+        }
+
+        if (credit) {
+                _cleanup_free_ struct rand_pool_info *info = NULL;
+
+                /* The kernel API only accepts "int" as entropy count (which is in bits), let's avoid any
+                 * chance for confusion here. */
+                if (size > INT_MAX / 8)
+                        return -EOVERFLOW;
+
+                info = malloc(offsetof(struct rand_pool_info, buf) + size);
+                if (!info)
+                        return -ENOMEM;
+
+                info->entropy_count = size * 8;
+                info->buf_size = size;
+                memcpy(info->buf, seed, size);
+
+                if (ioctl(fd, RNDADDENTROPY, info) < 0)
+                        return -errno;
+        } else {
+                r = loop_write(fd, seed, size);
+                if (r < 0)
+                        return r;
+        }
+
+        return 1;
+}
+
+uint64_t random_u64_range(uint64_t m) {
+        uint64_t x, remainder;
+
+        /* Generates a random number in the range 0…m-1, unbiased. (Java's algorithm) */
+
+        if (m == 0) /* Let's take m == 0 as special case to return an integer from the full range */
+                return random_u64();
+        if (m == 1)
+                return 0;
+
+        remainder = UINT64_MAX % m;
+
+        do {
+                x = random_u64();
+        } while (x >= UINT64_MAX - remainder);
+
+        return x % m;
 }

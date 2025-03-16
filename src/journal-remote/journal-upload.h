@@ -1,9 +1,12 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+
 #pragma once
 
 #include <inttypes.h>
 
 #include "sd-event.h"
 #include "sd-journal.h"
+
 #include "time-util.h"
 
 typedef enum {
@@ -21,8 +24,7 @@ typedef enum {
 } entry_state;
 
 typedef struct Uploader {
-        sd_event *events;
-        sd_event_source *sigint_event, *sigterm_event;
+        sd_event *event;
 
         char *url;
         CURL *easy;

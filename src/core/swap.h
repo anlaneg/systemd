@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 /***
@@ -6,6 +6,8 @@
 ***/
 
 #include "sd-device.h"
+
+#include "pidref.h"
 #include "unit.h"
 
 typedef struct Swap Swap;
@@ -14,7 +16,7 @@ typedef enum SwapExecCommand {
         SWAP_EXEC_ACTIVATE,
         SWAP_EXEC_DEACTIVATE,
         _SWAP_EXEC_COMMAND_MAX,
-        _SWAP_EXEC_COMMAND_INVALID = -1
+        _SWAP_EXEC_COMMAND_INVALID = -EINVAL,
 } SwapExecCommand;
 
 typedef enum SwapResult {
@@ -26,13 +28,14 @@ typedef enum SwapResult {
         SWAP_FAILURE_CORE_DUMP,
         SWAP_FAILURE_START_LIMIT_HIT,
         _SWAP_RESULT_MAX,
-        _SWAP_RESULT_INVALID = -1
+        _SWAP_RESULT_INVALID = -EINVAL,
 } SwapResult;
 
 typedef struct SwapParameters {
         char *what;
         char *options;
         int priority;
+        bool priority_set;
 } SwapParameters;
 
 struct Swap {
@@ -57,6 +60,7 @@ struct Swap {
         bool just_activated:1;
 
         SwapResult result;
+        SwapResult clean_result;
 
         usec_t timeout_usec;
 
@@ -66,13 +70,13 @@ struct Swap {
         CGroupContext cgroup_context;
 
         ExecRuntime *exec_runtime;
-        DynamicCreds dynamic_creds;
+        CGroupRuntime *cgroup_runtime;
 
         SwapState state, deserialized_state;
 
         ExecCommand* control_command;
         SwapExecCommand control_command_id;
-        pid_t control_pid;
+        PidRef control_pid;
 
         sd_event_source *timer_event_source;
 
@@ -87,6 +91,9 @@ extern const UnitVTable swap_vtable;
 
 int swap_process_device_new(Manager *m, sd_device *dev);
 int swap_process_device_remove(Manager *m, sd_device *dev);
+
+int swap_get_priority(const Swap *s);
+const char* swap_get_options(const Swap *s);
 
 const char* swap_exec_command_to_string(SwapExecCommand i) _const_;
 SwapExecCommand swap_exec_command_from_string(const char *s) _pure_;

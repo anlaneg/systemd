@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0+ */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * load kernel modules
  *
@@ -6,74 +6,97 @@
  */
 
 #include <errno.h>
-#include <libkmod.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "device-util.h"
 #include "module-util.h"
 #include "string-util.h"
+#include "strv.h"
 #include "udev-builtin.h"
 
 static struct kmod_ctx *ctx = NULL;
 
-_printf_(6,0) static void udev_kmod_log(void *data, int priority, const char *file, int line, const char *fn, const char *format, va_list args) {
-        log_internalv(priority, 0, file, line, fn, format, args);
-}
+static int builtin_kmod(UdevEvent *event, int argc, char *argv[]/*命令参数*/) {
+        sd_device *dev = ASSERT_PTR(ASSERT_PTR(event)->dev);
+        int r;
 
-static int builtin_kmod(sd_device *dev, int argc, char *argv[]/*命令参数*/, bool test) {
-        int i;
+        if (event->event_mode != EVENT_UDEV_WORKER) {
+                log_device_debug(dev, "Running in test mode, skipping execution of 'kmod' builtin command.");
+                return 0;
+        }
 
         if (!ctx)
                 return 0;
 
         /*首个参数必须为load*/
-        if (argc < 3 || !streq(argv[1], "load"))
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "%s: expected: load <module>", argv[0]);
+        if (argc < 2 || !streq(argv[1], "load"))
+                return log_device_warning_errno(dev, SYNTHETIC_ERRNO(EINVAL),
+                                                "%s: expected: load [module…]", argv[0]);
 
         /*加载参数指定的所有module*/
-        for (i = 2; argv[i]; i++)
-                (void) module_load_and_warn(ctx, argv[i], false);
+        char **modules = strv_skip(argv, 2);
+        if (strv_isempty(modules)) {
+                const char *modalias;
+
+                r = sd_device_get_property_value(dev, "MODALIAS", &modalias);
+                if (r < 0)
+                        return log_device_warning_errno(dev, r, "Failed to read property \"MODALIAS\": %m");
+
+                (void) module_load_and_warn(ctx, modalias, /* verbose = */ false);
+        } else
+                STRV_FOREACH(module, modules)
+                        (void) module_load_and_warn(ctx, *module, /* verbose = */ false);
 
         return 0;
 }
 
 /* called at udev startup and reload */
 static int builtin_kmod_init(void) {
+        int r;
+
         if (ctx)
                 return 0;
 
-        ctx = kmod_new(NULL, NULL);
-        if (!ctx)
-                return -ENOMEM;
+        log_debug("Loading kernel module index.");
 
-        log_debug("Load module index");
-        kmod_set_log_fn(ctx, udev_kmod_log, NULL);
-        kmod_load_resources(ctx);
+        r = module_setup_context(&ctx);
+        if (r < 0)
+                return log_error_errno(r, "Failed to initialize libkmod context: %m");
+
         return 0;
 }
 
 /* called on udev shutdown and reload request */
 static void builtin_kmod_exit(void) {
-        log_debug("Unload module index");
-        ctx = kmod_unref(ctx);
+        log_debug("Unload kernel module index.");
+
+        if (!ctx)
+                return;
+
+        ctx = sym_kmod_unref(ctx);
 }
 
 /* called every couple of seconds during event activity; 'true' if config has changed */
-static bool builtin_kmod_validate(void) {
-        log_debug("Validate module index");
+static bool builtin_kmod_should_reload(void) {
         if (!ctx)
                 return false;
-        return (kmod_validate_resources(ctx) != KMOD_RESOURCES_OK);
+
+        if (sym_kmod_validate_resources(ctx) != KMOD_RESOURCES_OK) {
+                log_debug("Kernel module index needs reloading.");
+                return true;
+        }
+
+        return false;
 }
 
-const struct udev_builtin udev_builtin_kmod = {
+const UdevBuiltin udev_builtin_kmod = {
         .name = "kmod",
         .cmd = builtin_kmod,
         .init = builtin_kmod_init,
         .exit = builtin_kmod_exit,
-        .validate = builtin_kmod_validate,
+        .should_reload = builtin_kmod_should_reload,
         .help = "Kernel module loader",
         .run_once = false,
 };

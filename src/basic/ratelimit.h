@@ -1,40 +1,30 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include <stdbool.h>
 
 #include "time-util.h"
-#include "util.h"
 
 typedef struct RateLimit {
-        usec_t interval;
-        usec_t begin;
-        unsigned burst;
+        usec_t interval; /* Keep those two fields first so they can be initialized easily: */
+        unsigned burst;  /*   RateLimit rl = { INTERVAL, BURST }; */
         unsigned num;
+        usec_t begin;
 } RateLimit;
 
-#define RATELIMIT_DEFINE(_name, _interval, _burst)       \
-        RateLimit _name = {                              \
-                .interval = (_interval),                 \
-                .burst = (_burst),                       \
-                .num = 0,                                \
-                .begin = 0                               \
-        }
+#define RATELIMIT_OFF (const RateLimit) { .interval = USEC_INFINITY, .burst = UINT_MAX }
 
-#define RATELIMIT_INIT(v, _interval, _burst)             \
-        do {                                             \
-                RateLimit *_r = &(v);                    \
-                _r->interval = (_interval);              \
-                _r->burst = (_burst);                    \
-                _r->num = 0;                             \
-                _r->begin = 0;                           \
-        } while (false)
+static inline void ratelimit_reset(RateLimit *rl) {
+        rl->num = rl->begin = 0;
+}
 
-#define RATELIMIT_RESET(v)                               \
-        do {                                             \
-                RateLimit *_r = &(v);                    \
-                _r->num = 0;                             \
-                _r->begin = 0;                           \
-        } while (false)
+static inline bool ratelimit_configured(const RateLimit *rl) {
+        return rl->interval > 0 && rl->burst > 0;
+}
 
-bool ratelimit_below(RateLimit *r);
+bool ratelimit_below(RateLimit *rl);
+
+unsigned ratelimit_num_dropped(const RateLimit *rl);
+
+usec_t ratelimit_end(const RateLimit *rl);
+usec_t ratelimit_left(const RateLimit *rl);

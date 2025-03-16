@@ -1,91 +1,190 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/magic.h>
 #include <sched.h>
-#include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include "alloc-util.h"
+#include "chase.h"
 #include "dirent-util.h"
+#include "errno-util.h"
 #include "fd-util.h"
+#include "fileio.h"
+#include "filesystems.h"
 #include "fs-util.h"
+#include "hash-funcs.h"
 #include "macro.h"
-#include "missing.h"
+#include "missing_fs.h"
+#include "missing_magic.h"
+#include "missing_syscall.h"
+#include "mountpoint-util.h"
+#include "nulstr-util.h"
 #include "parse-util.h"
 #include "stat-util.h"
 #include "string-util.h"
 
-int is_symlink(const char *path) {
-        struct stat info;
+static int verify_stat_at(
+                int fd,
+                const char *path,
+                bool follow,
+                int (*verify_func)(const struct stat *st),
+                bool verify) {
 
-        assert(path);
-
-        if (lstat(path, &info) < 0)
-                return -errno;
-
-        return !!S_ISLNK(info.st_mode);
-}
-
-int is_dir(const char* path, bool follow) {
         struct stat st;
         int r;
 
-        assert(path);
+        assert(fd >= 0 || fd == AT_FDCWD);
+        assert(!isempty(path) || !follow);
+        assert(verify_func);
 
-        if (follow)
-                r = stat(path, &st);
-        else
-                r = lstat(path, &st);
-        if (r < 0)
+        if (fstatat(fd, strempty(path), &st,
+                    (isempty(path) ? AT_EMPTY_PATH : 0) | (follow ? 0 : AT_SYMLINK_NOFOLLOW)) < 0)
                 return -errno;
 
-        return !!S_ISDIR(st.st_mode);
+        r = verify_func(&st);
+        return verify ? r : r >= 0;
 }
 
-int is_dir_fd(int fd) {
-        struct stat st;
+int stat_verify_regular(const struct stat *st) {
+        assert(st);
 
-        if (fstat(fd, &st) < 0)
-                return -errno;
+        /* Checks whether the specified stat() structure refers to a regular file. If not returns an
+         * appropriate error code. */
 
-        return !!S_ISDIR(st.st_mode);
+        if (S_ISDIR(st->st_mode))
+                return -EISDIR;
+
+        if (S_ISLNK(st->st_mode))
+                return -ELOOP;
+
+        if (!S_ISREG(st->st_mode))
+                return -EBADFD;
+
+        return 0;
+}
+
+int verify_regular_at(int fd, const char *path, bool follow) {
+        return verify_stat_at(fd, path, follow, stat_verify_regular, true);
+}
+
+int fd_verify_regular(int fd) {
+        assert(fd >= 0);
+        return verify_regular_at(fd, NULL, false);
+}
+
+int stat_verify_directory(const struct stat *st) {
+        assert(st);
+
+        if (S_ISLNK(st->st_mode))
+                return -ELOOP;
+
+        if (!S_ISDIR(st->st_mode))
+                return -ENOTDIR;
+
+        return 0;
+}
+
+int fd_verify_directory(int fd) {
+        assert(fd >= 0);
+        return verify_stat_at(fd, NULL, false, stat_verify_directory, true);
+}
+
+int is_dir_at(int fd, const char *path, bool follow) {
+        return verify_stat_at(fd, path, follow, stat_verify_directory, false);
+}
+
+int is_dir(const char *path, bool follow) {
+        assert(!isempty(path));
+        return is_dir_at(AT_FDCWD, path, follow);
+}
+
+int stat_verify_symlink(const struct stat *st) {
+        assert(st);
+
+        if (S_ISDIR(st->st_mode))
+                return -EISDIR;
+
+        if (!S_ISLNK(st->st_mode))
+                return -ENOLINK;
+
+        return 0;
+}
+
+int is_symlink(const char *path) {
+        assert(!isempty(path));
+        return verify_stat_at(AT_FDCWD, path, false, stat_verify_symlink, false);
+}
+
+int stat_verify_linked(const struct stat *st) {
+        assert(st);
+
+        if (st->st_nlink <= 0)
+                return -EIDRM; /* recognizable error. */
+
+        return 0;
+}
+
+int fd_verify_linked(int fd) {
+        assert(fd >= 0);
+        return verify_stat_at(fd, NULL, false, stat_verify_linked, true);
+}
+
+int stat_verify_device_node(const struct stat *st) {
+        assert(st);
+
+        if (S_ISLNK(st->st_mode))
+                return -ELOOP;
+
+        if (S_ISDIR(st->st_mode))
+                return -EISDIR;
+
+        if (!S_ISBLK(st->st_mode) && !S_ISCHR(st->st_mode))
+                return -ENOTTY;
+
+        return 0;
 }
 
 int is_device_node(const char *path) {
-        struct stat info;
-
-        assert(path);
-
-        if (lstat(path, &info) < 0)
-                return -errno;
-
-        return !!(S_ISBLK(info.st_mode) || S_ISCHR(info.st_mode));
+        assert(!isempty(path));
+        return verify_stat_at(AT_FDCWD, path, false, stat_verify_device_node, false);
 }
 
-int dir_is_empty_at(int dir_fd, const char *path) {
-        _cleanup_close_ int fd = -1;
-        _cleanup_closedir_ DIR *d = NULL;
-        struct dirent *de;
+int dir_is_empty_at(int dir_fd, const char *path, bool ignore_hidden_or_backup) {
+        _cleanup_close_ int fd = -EBADF;
+        struct dirent *buf;
+        size_t m;
 
-        if (path)
-                fd = openat(dir_fd, path, O_RDONLY|O_DIRECTORY|O_CLOEXEC);
-        else
-                fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+        fd = xopenat(dir_fd, path, O_DIRECTORY|O_CLOEXEC);
         if (fd < 0)
-                return -errno;
+                return fd;
 
-        d = fdopendir(fd);
-        if (!d)
-                return -errno;
-        fd = -1;
+        /* Allocate space for at least 3 full dirents, since every dir has at least two entries ("."  +
+         * ".."), and only once we have seen if there's a third we know whether the dir is empty or not. If
+         * 'ignore_hidden_or_backup' is true we'll allocate a bit more, since we might skip over a bunch of
+         * entries that we end up ignoring. */
+        m = (ignore_hidden_or_backup ? 16 : 3) * DIRENT_SIZE_MAX;
+        buf = alloca(m);
 
-        FOREACH_DIRENT(de, d, return -errno)
-                return 0;
+        for (;;) {
+                struct dirent *de;
+                ssize_t n;
+
+                n = getdents64(fd, buf, m);
+                if (n < 0)
+                        return -errno;
+                if (n == 0)
+                        break;
+
+                assert((size_t) n <= m);
+                msan_unpoison(buf, n);
+
+                FOREACH_DIRENT_IN_BUFFER(de, buf, n)
+                        if (!(ignore_hidden_or_backup ? hidden_or_backup_file(de->d_name) : dot_or_dot_dot(de->d_name)))
+                                return 0;
+        }
 
         return 1;
 }
@@ -97,10 +196,10 @@ bool null_or_empty(struct stat *st) {
             	/*普通文件，且文件大小为0*/
                 return true;
 
-        /* We don't want to hardcode the major/minor of /dev/null,
-         * hence we do a simpler "is this a device node?" check. */
+        /* We don't want to hardcode the major/minor of /dev/null, hence we do a simpler "is this a character
+         * device node?" check. */
 
-        if (S_ISCHR(st->st_mode) || S_ISBLK(st->st_mode))
+        if (S_ISCHR(st->st_mode))
             	/*字符设备或者block设备*/
                 return true;
 
@@ -108,63 +207,156 @@ bool null_or_empty(struct stat *st) {
         return false;
 }
 
-int null_or_empty_path(const char *fn) {
+int null_or_empty_path_with_root(const char *fn, const char *root) {
         struct stat st;
+        int r;
 
         assert(fn);
 
-        if (stat(fn, &st) < 0)
-                return -errno;
+        /* A symlink to /dev/null or an empty file?
+         * When looking under root_dir, we can't expect /dev/ to be mounted,
+         * so let's see if the path is a (possibly dangling) symlink to /dev/null. */
+
+        if (path_equal(path_startswith(fn, root ?: "/"), "dev/null"))
+                return true;
+
+        r = chase_and_stat(fn, root, CHASE_PREFIX_ROOT, NULL, &st);
+        if (r < 0)
+                return r;
 
         return null_or_empty(&st);
 }
 
 /*文件fstat调用失败，文件过大或过小均返回失败*/
-int null_or_empty_fd(int fd) {
-        struct stat st;
+int fd_is_read_only_fs(int fd) {
+        struct statvfs st;
 
         assert(fd >= 0);
 
-        if (fstat(fd, &st) < 0)
-                return -errno;
-
-        return null_or_empty(&st);
-}
-
-int path_is_read_only_fs(const char *path) {
-        struct statvfs st;
-
-        assert(path);
-
-        if (statvfs(path, &st) < 0)
+        if (fstatvfs(fd, &st) < 0)
                 return -errno;
 
         if (st.f_flag & ST_RDONLY)
                 return true;
 
-        /* On NFS, statvfs() might not reflect whether we can actually
-         * write to the remote share. Let's try again with
-         * access(W_OK) which is more reliable, at least sometimes. */
-        if (access(path, W_OK) < 0 && errno == EROFS)
+        /* On NFS, fstatvfs() might not reflect whether we can actually write to the remote share. Let's try
+         * again with access(W_OK) which is more reliable, at least sometimes. */
+        if (access_fd(fd, W_OK) == -EROFS)
                 return true;
 
         return false;
 }
 
-int files_same(const char *filea, const char *fileb, int flags) {
-        struct stat a, b;
+int path_is_read_only_fs(const char *path) {
+        _cleanup_close_ int fd = -EBADF;
 
-        assert(filea);
-        assert(fileb);
+        assert(path);
 
-        if (fstatat(AT_FDCWD, filea, &a, flags) < 0)
+        fd = open(path, O_CLOEXEC | O_PATH);
+        if (fd < 0)
                 return -errno;
 
-        if (fstatat(AT_FDCWD, fileb, &b, flags) < 0)
-                return -errno;
+        return fd_is_read_only_fs(fd);
+}
 
-        return a.st_dev == b.st_dev &&
-               a.st_ino == b.st_ino;
+int inode_same_at(int fda, const char *filea, int fdb, const char *fileb, int flags) {
+        struct stat sta, stb;
+        int r;
+
+        assert(fda >= 0 || fda == AT_FDCWD);
+        assert(fdb >= 0 || fdb == AT_FDCWD);
+        assert((flags & ~(AT_EMPTY_PATH|AT_SYMLINK_NOFOLLOW|AT_NO_AUTOMOUNT)) == 0);
+
+        /* Refuse an unset filea or fileb early unless AT_EMPTY_PATH is set */
+        if ((isempty(filea) || isempty(fileb)) && !FLAGS_SET(flags, AT_EMPTY_PATH))
+                return -EINVAL;
+
+        /* Shortcut: comparing the same fd with itself means we can return true */
+        if (fda >= 0 && fda == fdb && isempty(filea) && isempty(fileb) && FLAGS_SET(flags, AT_SYMLINK_NOFOLLOW))
+                return true;
+
+        _cleanup_close_ int pin_a = -EBADF, pin_b = -EBADF;
+        if (!FLAGS_SET(flags, AT_NO_AUTOMOUNT)) {
+                /* Let's try to use the name_to_handle_at() AT_HANDLE_FID API to identify identical
+                 * inodes. We have to issue multiple calls on the same file for that (first, to acquire the
+                 * FID, and then to check if .st_dev is actually the same). Hence let's pin the inode in
+                 * between via O_PATH, unless we already have an fd for it. */
+
+                if (!isempty(filea)) {
+                        pin_a = openat(fda, filea, O_PATH|O_CLOEXEC|(FLAGS_SET(flags, AT_SYMLINK_NOFOLLOW) ? O_NOFOLLOW : 0));
+                        if (pin_a < 0)
+                                return -errno;
+
+                        fda = pin_a;
+                        filea = NULL;
+                        flags |= AT_EMPTY_PATH;
+                }
+
+                if (!isempty(fileb)) {
+                        pin_b = openat(fdb, fileb, O_PATH|O_CLOEXEC|(FLAGS_SET(flags, AT_SYMLINK_NOFOLLOW) ? O_NOFOLLOW : 0));
+                        if (pin_b < 0)
+                                return -errno;
+
+                        fdb = pin_b;
+                        fileb = NULL;
+                        flags |= AT_EMPTY_PATH;
+                }
+
+                int ntha_flags = (flags & AT_EMPTY_PATH) | (FLAGS_SET(flags, AT_SYMLINK_NOFOLLOW) ? 0 : AT_SYMLINK_FOLLOW);
+                _cleanup_free_ struct file_handle *ha = NULL, *hb = NULL;
+                int mntida = -1, mntidb = -1;
+
+                r = name_to_handle_at_try_fid(
+                                fda,
+                                filea,
+                                &ha,
+                                &mntida,
+                                ntha_flags);
+                if (r < 0) {
+                        if (is_name_to_handle_at_fatal_error(r))
+                                return r;
+
+                        goto fallback;
+                }
+
+                r = name_to_handle_at_try_fid(
+                                fdb,
+                                fileb,
+                                &hb,
+                                &mntidb,
+                                ntha_flags);
+                if (r < 0) {
+                        if (is_name_to_handle_at_fatal_error(r))
+                                return r;
+
+                        goto fallback;
+                }
+
+                /* Now compare the two file handles */
+                if (!file_handle_equal(ha, hb))
+                        return false;
+
+                /* If the file handles are the same and they come from the same mount ID? Great, then we are
+                 * good, they are definitely the same */
+                if (mntida == mntidb)
+                        return true;
+
+                /* File handles are the same, they are not on the same mount id. This might either be because
+                 * they are on two entirely different file systems, that just happen to have the same FIDs
+                 * (because they originally where created off the same disk images), or it could be because
+                 * they are located on two distinct bind mounts of the same fs. To check that, let's look at
+                 * .st_rdev of the inode. We simply reuse the fallback codepath for that, since it checks
+                 * exactly that (it checks slightly more, but we don't care.) */
+        }
+
+fallback:
+        if (fstatat(fda, strempty(filea), &sta, flags) < 0)
+                return log_debug_errno(errno, "Cannot stat %s: %m", strna(filea));
+
+        if (fstatat(fdb, strempty(fileb), &stb, flags) < 0)
+                return log_debug_errno(errno, "Cannot stat %s: %m", strna(fileb));
+
+        return stat_inode_same(&sta, &stb);
 }
 
 bool is_fs_type(const struct statfs *s, statfs_f_type_t magic_value) {
@@ -174,39 +366,23 @@ bool is_fs_type(const struct statfs *s, statfs_f_type_t magic_value) {
         return F_TYPE_EQUAL(s->f_type, magic_value);
 }
 
-int fd_is_fs_type(int fd, statfs_f_type_t magic_value) {
+int is_fs_type_at(int dir_fd, const char *path, statfs_f_type_t magic_value) {
         struct statfs s;
+        int r;
 
-        if (fstatfs(fd, &s) < 0)
-                return -errno;
+        r = xstatfsat(dir_fd, path, &s);
+        if (r < 0)
+                return r;
 
         return is_fs_type(&s, magic_value);
 }
 
-int path_is_fs_type(const char *path, statfs_f_type_t magic_value) {
-        _cleanup_close_ int fd = -1;
-
-        fd = open(path, O_RDONLY|O_CLOEXEC|O_NOCTTY|O_PATH);
-        if (fd < 0)
-                return -errno;
-
-        return fd_is_fs_type(fd, magic_value);
-}
-
 bool is_temporary_fs(const struct statfs *s) {
-        return is_fs_type(s, TMPFS_MAGIC) ||
-                is_fs_type(s, RAMFS_MAGIC);
+        return fs_in_group(s, FILESYSTEM_SET_TEMPORARY);
 }
 
 bool is_network_fs(const struct statfs *s) {
-        return is_fs_type(s, CIFS_MAGIC_NUMBER) ||
-                is_fs_type(s, CODA_SUPER_MAGIC) ||
-                is_fs_type(s, NCP_SUPER_MAGIC) ||
-                is_fs_type(s, NFS_SUPER_MAGIC) ||
-                is_fs_type(s, SMB_SUPER_MAGIC) ||
-                is_fs_type(s, V9FS_MAGIC) ||
-                is_fs_type(s, AFS_SUPER_MAGIC) ||
-                is_fs_type(s, OCFS2_SUPER_MAGIC);
+        return fs_in_group(s, FILESYSTEM_SET_NETWORK);
 }
 
 int fd_is_temporary_fs(int fd) {
@@ -227,208 +403,235 @@ int fd_is_network_fs(int fd) {
         return is_network_fs(&s);
 }
 
-int fd_is_network_ns(int fd) {
-        struct statfs s;
-        int r;
-
-        /* Checks whether the specified file descriptor refers to a network namespace. On old kernels there's no nice
-         * way to detect that, hence on those we'll return a recognizable error (EUCLEAN), so that callers can handle
-         * this somewhat nicely.
-         *
-         * This function returns > 0 if the fd definitely refers to a network namespace, 0 if it definitely does not
-         * refer to a network namespace, -EUCLEAN if we can't determine, and other negative error codes on error. */
-
-        if (fstatfs(fd, &s) < 0)
-                return -errno;
-
-        if (!is_fs_type(&s, NSFS_MAGIC)) {
-                /* On really old kernels, there was no "nsfs", and network namespace sockets belonged to procfs
-                 * instead. Handle that in a somewhat smart way. */
-
-                if (is_fs_type(&s, PROC_SUPER_MAGIC)) {
-                        struct statfs t;
-
-                        /* OK, so it is procfs. Let's see if our own network namespace is procfs, too. If so, then the
-                         * passed fd might refer to a network namespace, but we can't know for sure. In that case,
-                         * return a recognizable error. */
-
-                        if (statfs("/proc/self/ns/net", &t) < 0)
-                                return -errno;
-
-                        if (s.f_type == t.f_type)
-                                return -EUCLEAN; /* It's possible, we simply don't know */
-                }
-
-                return 0; /* No! */
-        }
-
-        r = ioctl(fd, NS_GET_NSTYPE);
-        if (r < 0) {
-                if (errno == ENOTTY) /* Old kernels didn't know this ioctl, let's also return a recognizable error in that case */
-                        return -EUCLEAN;
-
-                return -errno;
-        }
-
-        return r == CLONE_NEWNET;
-}
-
 int path_is_temporary_fs(const char *path) {
-        _cleanup_close_ int fd = -1;
+        struct statfs s;
 
-        fd = open(path, O_RDONLY|O_CLOEXEC|O_NOCTTY|O_PATH);
-        if (fd < 0)
+        if (statfs(path, &s) < 0)
                 return -errno;
 
-        return fd_is_temporary_fs(fd);
+        return is_temporary_fs(&s);
 }
 
-int stat_verify_regular(const struct stat *st) {
-        assert(st);
+int path_is_network_fs(const char *path) {
+        struct statfs s;
 
-        /* Checks whether the specified stat() structure refers to a regular file. If not returns an appropriate error
-         * code. */
-
-        if (S_ISDIR(st->st_mode))
-        	/*为目录*/
-                return -EISDIR;
-
-        if (S_ISLNK(st->st_mode))
-        	/*为link文件*/
-                return -ELOOP;
-
-        if (!S_ISREG(st->st_mode))
-        	/*非普通文件*/
-                return -EBADFD;
-
-        return 0;
-}
-
-int fd_verify_regular(int fd) {
-        struct stat st;
-
-        assert(fd >= 0);
-
-        if (fstat(fd, &st) < 0)
+        if (statfs(path, &s) < 0)
                 return -errno;
 
-        return stat_verify_regular(&st);
+        return is_network_fs(&s);
 }
 
-int stat_verify_directory(const struct stat *st) {
-        assert(st);
-
-        if (S_ISLNK(st->st_mode))
-                return -ELOOP;
-
-        if (!S_ISDIR(st->st_mode))
-                return -ENOTDIR;
-
-        return 0;
-}
-
-int fd_verify_directory(int fd) {
-        struct stat st;
-
-        assert(fd >= 0);
-
-        if (fstat(fd, &st) < 0)
-                return -errno;
-
-        return stat_verify_directory(&st);
-}
-
-int device_path_make_major_minor(mode_t mode, dev_t devno, char **ret) {
-        const char *t;
-
-        /* Generates the /dev/{char|block}/MAJOR:MINOR path for a dev_t */
-
-        if (S_ISCHR(mode))
-                t = "char";
-        else if (S_ISBLK(mode))
-                t = "block";
-        else
-                return -ENODEV;
-
-        if (asprintf(ret, "/dev/%s/%u:%u", t, major(devno), minor(devno)) < 0)
-                return -ENOMEM;
-
-        return 0;
-}
-
-int device_path_make_canonical(mode_t mode, dev_t devno, char **ret) {
-        _cleanup_free_ char *p = NULL;
+int proc_mounted(void) {
         int r;
 
-        /* Finds the canonical path for a device, i.e. resolves the /dev/{char|block}/MAJOR:MINOR path to the end. */
+        /* A quick check of procfs is properly mounted */
 
+        r = path_is_fs_type("/proc/", PROC_SUPER_MAGIC);
+        if (r == -ENOENT) /* not mounted at all */
+                return false;
+
+        return r;
+}
+
+bool stat_inode_same(const struct stat *a, const struct stat *b) {
+
+        /* Returns if the specified stat structure references the same (though possibly modified) inode. Does
+         * a thorough check, comparing inode nr, backing device and if the inode is still of the same type. */
+
+        return stat_is_set(a) && stat_is_set(b) &&
+                ((a->st_mode ^ b->st_mode) & S_IFMT) == 0 &&  /* same inode type */
+                a->st_dev == b->st_dev &&
+                a->st_ino == b->st_ino;
+}
+
+bool stat_inode_unmodified(const struct stat *a, const struct stat *b) {
+
+        /* Returns if the specified stat structures reference the same, unmodified inode. This check tries to
+         * be reasonably careful when detecting changes: we check both inode and mtime, to cater for file
+         * systems where mtimes are fixed to 0 (think: ostree/nixos type installations). We also check file
+         * size, backing device, inode type and if this refers to a device not the major/minor.
+         *
+         * Note that we don't care if file attributes such as ownership or access mode change, this here is
+         * about contents of the file. The purpose here is to detect file contents changes, and nothing
+         * else. */
+
+        return stat_inode_same(a, b) &&
+                a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
+                a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
+                (!S_ISREG(a->st_mode) || a->st_size == b->st_size) && /* if regular file, compare file size */
+                (!(S_ISCHR(a->st_mode) || S_ISBLK(a->st_mode)) || a->st_rdev == b->st_rdev); /* if device node, also compare major/minor, because we can */
+}
+
+bool statx_inode_same(const struct statx *a, const struct statx *b) {
+
+        /* Same as stat_inode_same() but for struct statx */
+
+        return statx_is_set(a) && statx_is_set(b) &&
+                FLAGS_SET(a->stx_mask, STATX_TYPE|STATX_INO) && FLAGS_SET(b->stx_mask, STATX_TYPE|STATX_INO) &&
+                ((a->stx_mode ^ b->stx_mode) & S_IFMT) == 0 &&
+                a->stx_dev_major == b->stx_dev_major &&
+                a->stx_dev_minor == b->stx_dev_minor &&
+                a->stx_ino == b->stx_ino;
+}
+
+bool statx_mount_same(const struct new_statx *a, const struct new_statx *b) {
+        if (!new_statx_is_set(a) || !new_statx_is_set(b))
+                return false;
+
+        /* if we have the mount ID, that's all we need */
+        if (FLAGS_SET(a->stx_mask, STATX_MNT_ID) && FLAGS_SET(b->stx_mask, STATX_MNT_ID))
+                return a->stx_mnt_id == b->stx_mnt_id;
+
+        /* Otherwise, major/minor of backing device must match */
+        return a->stx_dev_major == b->stx_dev_major &&
+                a->stx_dev_minor == b->stx_dev_minor;
+}
+
+static bool is_statx_fatal_error(int err, int flags) {
+        assert(err < 0);
+
+        /* If statx() is not supported or if we see EPERM (which might indicate seccomp filtering or so),
+         * let's do a fallback. Note that on EACCES we'll not fall back, since that is likely an indication of
+         * fs access issues, which we should propagate. */
+        if (ERRNO_IS_NOT_SUPPORTED(err) || err == -EPERM)
+                return false;
+
+        /* When unsupported flags are specified, glibc's fallback function returns -EINVAL.
+         * See statx_generic() in glibc. */
+        if (err != -EINVAL)
+                return true;
+
+        if ((flags & ~(AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT)) != 0)
+                return false; /* Unsupported flags are specified. Let's try to use our implementation. */
+
+        return true;
+}
+
+int statx_fallback(int dfd, const char *path, int flags, unsigned mask, struct statx *sx) {
+        static bool avoid_statx = false;
+        struct stat st;
+        int r;
+
+        if (!avoid_statx) {
+                r = RET_NERRNO(statx(dfd, path, flags, mask, sx));
+                if (r >= 0 || is_statx_fatal_error(r, flags))
+                        return r;
+
+                avoid_statx = true;
+        }
+
+        /* Only do fallback if fstatat() supports the flag too, or if it's one of the sync flags, which are
+         * OK to ignore */
+        if ((flags & ~(AT_EMPTY_PATH|AT_NO_AUTOMOUNT|AT_SYMLINK_NOFOLLOW|
+                      AT_STATX_SYNC_AS_STAT|AT_STATX_FORCE_SYNC|AT_STATX_DONT_SYNC)) != 0)
+                return -EOPNOTSUPP;
+
+        if (fstatat(dfd, path, &st, flags & (AT_EMPTY_PATH|AT_NO_AUTOMOUNT|AT_SYMLINK_NOFOLLOW)) < 0)
+                return -errno;
+
+        *sx = (struct statx) {
+                .stx_mask = STATX_TYPE|STATX_MODE|
+                STATX_NLINK|STATX_UID|STATX_GID|
+                STATX_ATIME|STATX_MTIME|STATX_CTIME|
+                STATX_INO|STATX_SIZE|STATX_BLOCKS,
+                .stx_blksize = st.st_blksize,
+                .stx_nlink = st.st_nlink,
+                .stx_uid = st.st_uid,
+                .stx_gid = st.st_gid,
+                .stx_mode = st.st_mode,
+                .stx_ino = st.st_ino,
+                .stx_size = st.st_size,
+                .stx_blocks = st.st_blocks,
+                .stx_rdev_major = major(st.st_rdev),
+                .stx_rdev_minor = minor(st.st_rdev),
+                .stx_dev_major = major(st.st_dev),
+                .stx_dev_minor = minor(st.st_dev),
+                .stx_atime.tv_sec = st.st_atim.tv_sec,
+                .stx_atime.tv_nsec = st.st_atim.tv_nsec,
+                .stx_mtime.tv_sec = st.st_mtim.tv_sec,
+                .stx_mtime.tv_nsec = st.st_mtim.tv_nsec,
+                .stx_ctime.tv_sec = st.st_ctim.tv_sec,
+                .stx_ctime.tv_nsec = st.st_ctim.tv_nsec,
+        };
+
+        return 0;
+}
+
+int xstatfsat(int dir_fd, const char *path, struct statfs *ret) {
+        _cleanup_close_ int fd = -EBADF;
+
+        assert(dir_fd >= 0 || dir_fd == AT_FDCWD);
         assert(ret);
 
-        if (major(devno) == 0 && minor(devno) == 0) {
-                char *s;
+        fd = xopenat(dir_fd, path, O_PATH|O_CLOEXEC|O_NOCTTY);
+        if (fd < 0)
+                return fd;
 
-                /* A special hack to make sure our 'inaccessible' device nodes work. They won't have symlinks in
-                 * /dev/block/ and /dev/char/, hence we handle them specially here. */
-
-                if (S_ISCHR(mode))
-                        s = strdup("/run/systemd/inaccessible/chr");
-                else if (S_ISBLK(mode))
-                        s = strdup("/run/systemd/inaccessible/blk");
-                else
-                        return -ENODEV;
-
-                if (!s)
-                        return -ENOMEM;
-
-                *ret = s;
-                return 0;
-        }
-
-        r = device_path_make_major_minor(mode, devno, &p);
-        if (r < 0)
-                return r;
-
-        return chase_symlinks(p, NULL, 0, ret);
+        return RET_NERRNO(fstatfs(fd, ret));
 }
 
-int device_path_parse_major_minor(const char *path, mode_t *ret_mode, dev_t *ret_devno) {
-        mode_t mode;
-        dev_t devno;
+void inode_hash_func(const struct stat *q, struct siphash *state) {
+        siphash24_compress_typesafe(q->st_dev, state);
+        siphash24_compress_typesafe(q->st_ino, state);
+}
+
+int inode_compare_func(const struct stat *a, const struct stat *b) {
         int r;
 
-        /* Tries to extract the major/minor directly from the device path if we can. Handles /dev/block/ and /dev/char/
-         * paths, as well out synthetic inaccessible device nodes. Never goes to disk. Returns -ENODEV if the device
-         * path cannot be parsed like this.  */
+        r = CMP(a->st_dev, b->st_dev);
+        if (r != 0)
+                return r;
 
-        if (path_equal(path, "/run/systemd/inaccessible/chr")) {
-                mode = S_IFCHR;
-                devno = makedev(0, 0);
-        } else if (path_equal(path, "/run/systemd/inaccessible/blk")) {
-                mode = S_IFBLK;
-                devno = makedev(0, 0);
-        } else {
-                const char *w;
+        return CMP(a->st_ino, b->st_ino);
+}
 
-                w = path_startswith(path, "/dev/block/");
-                if (w)
-                        mode = S_IFBLK;
-                else {
-                        w = path_startswith(path, "/dev/char/");
-                        if (!w)
-                                return -ENODEV;
+DEFINE_HASH_OPS_WITH_KEY_DESTRUCTOR(inode_hash_ops, struct stat, inode_hash_func, inode_compare_func, free);
 
-                        mode = S_IFCHR;
-                }
+const char* inode_type_to_string(mode_t m) {
 
-                r = parse_dev(w, &devno);
-                if (r < 0)
-                        return r;
+        /* Returns a short string for the inode type. We use the same name as the underlying macros for each
+         * inode type. */
+
+        switch (m & S_IFMT) {
+        case S_IFREG:
+                return "reg";
+        case S_IFDIR:
+                return "dir";
+        case S_IFLNK:
+                return "lnk";
+        case S_IFCHR:
+                return "chr";
+        case S_IFBLK:
+                return "blk";
+        case S_IFIFO:
+                return "fifo";
+        case S_IFSOCK:
+                return "sock";
         }
 
-        if (ret_mode)
-                *ret_mode = mode;
-        if (ret_devno)
-                *ret_devno = devno;
+        /* Note anonymous inodes in the kernel will have a zero type. Hence fstat() of an eventfd() will
+         * return an .st_mode where we'll return NULL here! */
+        return NULL;
+}
 
-        return 0;
+mode_t inode_type_from_string(const char *s) {
+        if (!s)
+                return MODE_INVALID;
+
+        if (streq(s, "reg"))
+                return S_IFREG;
+        if (streq(s, "dir"))
+                return S_IFDIR;
+        if (streq(s, "lnk"))
+                return S_IFLNK;
+        if (streq(s, "chr"))
+                return S_IFCHR;
+        if (streq(s, "blk"))
+                return S_IFBLK;
+        if (streq(s, "fifo"))
+                return S_IFIFO;
+        if (streq(s, "sock"))
+                return S_IFSOCK;
+
+        return MODE_INVALID;
 }

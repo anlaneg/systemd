@@ -1,6 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
-
-#include <util.h>
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include "sd-bus.h"
 
@@ -144,5 +142,5 @@ bool signature_is_valid(const char *s, bool allow_dict_entry) {
                 p += t;
         }
 
-        return p - s <= 255;
+        return p - s <= SD_BUS_MAXIMUM_SIGNATURE_LENGTH;
 }

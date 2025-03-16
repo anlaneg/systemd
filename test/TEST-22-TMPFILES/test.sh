@@ -1,40 +1,24 @@
-#!/bin/bash
-# -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
-# ex: ts=8 sw=4 sts=4 et filetype=sh
+#!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
 set -e
+
 TEST_DESCRIPTION="Tmpfiles related tests"
 TEST_NO_QEMU=1
 
-. $TEST_BASE_DIR/test-functions
+# shellcheck source=test/test-functions
+. "${TEST_BASE_DIR:?}/test-functions"
 
-test_setup() {
-    # create the basic filesystem layout
-    setup_basic_environment
-    inst_binary mv
-    inst_binary stat
-    inst_binary seq
-    inst_binary xargs
-    inst_binary mkfifo
-    inst_binary readlink
+test_append_files() {
+    if get_bool "${IS_BUILT_WITH_ASAN:=}"; then
+        if [[ -z "${initdir:=}" ]]; then
+            echo >&2 "\$initdir is not defined, can't continue"
+            exit 1
+        fi
 
-    # mask some services that we do not want to run in these tests
-    ln -fs /dev/null $initdir/etc/systemd/system/systemd-hwdb-update.service
-    ln -fs /dev/null $initdir/etc/systemd/system/systemd-journal-catalog-update.service
-    ln -fs /dev/null $initdir/etc/systemd/system/systemd-networkd.service
-    ln -fs /dev/null $initdir/etc/systemd/system/systemd-networkd.socket
-    ln -fs /dev/null $initdir/etc/systemd/system/systemd-resolved.service
-    ln -fs /dev/null $initdir/etc/systemd/system/systemd-machined.service
+        sed -i "s/systemd//g" "$initdir/etc/nsswitch.conf"
+    fi
 
-    # setup the testsuite service
-    cp testsuite.service $initdir/etc/systemd/system/
-    setup_testsuite
-
-    mkdir -p $initdir/testsuite
-    cp run-tmpfiles-tests.sh $initdir/testsuite/
-    cp test-*.sh $initdir/testsuite/
-
-    # create dedicated rootfs for nspawn (located in $TESTDIR/nspawn-root)
-    setup_nspawn_root
+    image_install setfacl
 }
 
 do_test "$@"

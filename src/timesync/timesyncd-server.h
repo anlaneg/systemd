@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include "list.h"
@@ -11,6 +11,9 @@ typedef enum ServerType {
         SERVER_SYSTEM,
         SERVER_FALLBACK,
         SERVER_LINK,
+        SERVER_RUNTIME,
+        _SERVER_TYPE_MAX,
+        _SERVER_TYPE_INVALID = -EINVAL,
 } ServerType;
 
 #include "timesyncd-manager.h"
@@ -27,10 +30,10 @@ struct ServerAddress {
 struct ServerName {
         Manager *manager;
 
+        bool marked;
+
         ServerType type;
         char *string;
-
-        bool marked:1;
 
         LIST_HEAD(ServerAddress, addresses);
         LIST_FIELDS(ServerName, names);

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <sys/stat.h>
 
@@ -9,7 +9,6 @@
 #include "string-util.h"
 #include "tests.h"
 #include "time-util.h"
-#include "util.h"
 
 static void test_testing(void) {
         bool b;
@@ -55,9 +54,9 @@ static void test_cleanup(void) {
 }
 
 static void test_misc(const char* fname) {
-        _cleanup_(mac_selinux_freep) char *label = NULL, *label2 = NULL, *label3 = NULL;
+        _cleanup_freecon_ char *label = NULL, *label2 = NULL, *label3 = NULL;
         int r;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
 
         log_info("============ %s ==========", __func__);
 

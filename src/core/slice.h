@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include "unit.h"
@@ -11,6 +11,8 @@ struct Slice {
         SliceState state, deserialized_state;
 
         CGroupContext cgroup_context;
+
+        CGroupRuntime *cgroup_runtime;
 };
 
 extern const UnitVTable slice_vtable;

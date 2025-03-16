@@ -1,18 +1,19 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include "sd-bus.h"
 
 #include "alloc-util.h"
 #include "bus-internal.h"
 #include "bus-kernel.h"
-#include "bus-util.h"
-#include "def.h"
+#include "constants.h"
 #include "fd-util.h"
 #include "missing_resource.h"
+#include "string-util.h"
+#include "tests.h"
 #include "time-util.h"
-#include "util.h"
 
 #define MAX_SIZE (2*1024*1024)
 
@@ -56,7 +57,7 @@ static void server(sd_bus *b, size_t *result) {
                         return;
 
                 } else if (!sd_bus_message_is_signal(m, NULL, NULL))
-                        assert_not_reached("Unknown method");
+                        assert_not_reached();
         }
 }
 
@@ -211,15 +212,17 @@ int main(int argc, char *argv[]) {
                 MODE_CHART,
         } mode = MODE_BISECT;
         Type type = TYPE_LEGACY;
-        int i, pair[2] = { -1, -1 };
+        int i, pair[2] = EBADF_PAIR;
         _cleanup_free_ char *address = NULL, *server_name = NULL;
-        _cleanup_close_ int bus_ref = -1;
+        _cleanup_close_ int bus_ref = -EBADF;
         const char *unique;
         cpu_set_t cpuset;
         size_t result;
         sd_bus *b;
         pid_t pid;
         int r;
+
+        test_setup_logging(LOG_DEBUG);
 
         for (i = 1; i < argc; i++) {
                 if (streq(argv[i], "chart")) {

@@ -1,9 +1,10 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <sys/mman.h>
 
 #include "alloc-util.h"
 #include "fd-util.h"
+#include "fileio.h"
 #include "fs-util.h"
 #include "hexdecoct.h"
 #include "macro.h"
@@ -13,89 +14,191 @@
 #include "path-util.h"
 #include "process-util.h"
 #include "random-util.h"
+#include "stat-util.h"
 #include "stdio-util.h"
 #include "string-util.h"
+#include "sync-util.h"
 #include "tmpfile-util.h"
 #include "umask-util.h"
 
-int fopen_temporary(const char *path, FILE **_f, char **_temp_path) {
-        FILE *f;
-        char *t;
-        int r, fd;
+static int fopen_temporary_internal(int dir_fd, const char *path, FILE **ret_file) {
+        _cleanup_fclose_ FILE *f = NULL;
+        _cleanup_close_ int fd = -EBADF;
+        int r;
 
+        assert(dir_fd >= 0 || dir_fd == AT_FDCWD);
         assert(path);
-        assert(_f);
-        assert(_temp_path);
 
-        r = tempfn_xxxxxx(path, NULL, &t);
+        fd = openat(dir_fd, path, O_CLOEXEC|O_NOCTTY|O_RDWR|O_CREAT|O_EXCL, 0600);
+        if (fd < 0)
+                return -errno;
+
+        /* This assumes that returned FILE object is short-lived and used within the same single-threaded
+         * context and never shared externally, hence locking is not necessary. */
+
+        r = take_fdopen_unlocked(&fd, "w", &f);
+        if (r < 0) {
+                (void) unlinkat(dir_fd, path, 0);
+                return r;
+        }
+
+        if (ret_file)
+                *ret_file = TAKE_PTR(f);
+
+        return 0;
+}
+
+int fopen_temporary_at(int dir_fd, const char *path, FILE **ret_file, char **ret_path) {
+        _cleanup_free_ char *t = NULL;
+        int r;
+
+        assert(dir_fd >= 0 || dir_fd == AT_FDCWD);
+        assert(path);
+
+        r = tempfn_random(path, NULL, &t);
         if (r < 0)
                 return r;
 
-        fd = mkostemp_safe(t);
-        if (fd < 0) {
-                free(t);
-                return -errno;
+        r = fopen_temporary_internal(dir_fd, t, ret_file);
+        if (r < 0)
+                return r;
+
+        if (ret_path)
+                *ret_path = TAKE_PTR(t);
+
+        return 0;
+}
+
+int fopen_temporary_child_at(int dir_fd, const char *path, FILE **ret_file, char **ret_path) {
+        _cleanup_free_ char *t = NULL;
+        int r;
+
+        assert(dir_fd >= 0 || dir_fd == AT_FDCWD);
+
+        if (!path) {
+                r = tmp_dir(&path);
+                if (r < 0)
+                        return r;
         }
 
-        f = fdopen(fd, "w");
-        if (!f) {
-                unlink_noerrno(t);
-                free(t);
-                safe_close(fd);
-                return -errno;
-        }
+        r = tempfn_random_child(path, NULL, &t);
+        if (r < 0)
+                return r;
 
-        *_f = f;
-        *_temp_path = t;
+        r = fopen_temporary_internal(dir_fd, t, ret_file);
+        if (r < 0)
+                return r;
+
+        if (ret_path)
+                *ret_path = TAKE_PTR(t);
 
         return 0;
 }
 
 /* This is much like mkostemp() but is subject to umask(). */
 int mkostemp_safe(char *pattern) {
-        _cleanup_umask_ mode_t u = 0;
-        int fd;
-
         assert(pattern);
-
-        u = umask(077);
-
-        fd = mkostemp(pattern, O_CLOEXEC);
-        if (fd < 0)
-                return -errno;
-
-        return fd;
+        BLOCK_WITH_UMASK(0077);
+        return RET_NERRNO(mkostemp(pattern, O_CLOEXEC));
 }
 
 int fmkostemp_safe(char *pattern, const char *mode, FILE **ret_f) {
-        int fd;
+        _cleanup_close_ int fd = -EBADF;
         FILE *f;
 
         fd = mkostemp_safe(pattern);
         if (fd < 0)
                 return fd;
 
-        f = fdopen(fd, mode);
-        if (!f) {
-                safe_close(fd);
+        f = take_fdopen(&fd, mode);
+        if (!f)
                 return -errno;
-        }
 
         *ret_f = f;
         return 0;
 }
 
-int tempfn_xxxxxx(const char *p, const char *extra, char **ret) {
-        const char *fn;
-        char *t;
+void unlink_tempfilep(char (*p)[]) {
+        assert(p);
 
+        /* If the file is created with mkstemp(), it will (almost always) change the suffix.
+         * Treat this as a sign that the file was successfully created. We ignore both the rare case
+         * where the original suffix is used and unlink failures. */
+
+        if (!endswith(*p, ".XXXXXX"))
+                (void) unlink(*p);
+}
+
+static int tempfn_build(const char *p, const char *pre, const char *post, bool child, char **ret) {
+        _cleanup_free_ char *d = NULL, *fn = NULL, *nf = NULL, *result = NULL;
+        size_t len_pre, len_post, len_add;
+        int r;
+
+        assert(p);
         assert(ret);
 
-        if (isempty(p))
-                return -EINVAL;
-        if (path_equal(p, "/"))
+        /*
+         * Turns this:
+         *         /foo/bar/waldo
+         *
+         * Into this :
+         *         /foo/bar/waldo/.#<pre><post> (child == true)
+         *         /foo/bar/.#<pre>waldo<post> (child == false)
+         */
+
+        if (pre && strchr(pre, '/'))
                 return -EINVAL;
 
+        if (post && strchr(post, '/'))
+                return -EINVAL;
+
+        len_pre = strlen_ptr(pre);
+        len_post = strlen_ptr(post);
+        /* NAME_MAX is counted *without* the trailing NUL byte. */
+        if (len_pre > NAME_MAX - STRLEN(".#") ||
+            len_post > NAME_MAX - STRLEN(".#") - len_pre)
+                return -EINVAL;
+
+        len_add = len_pre + len_post + STRLEN(".#");
+
+        if (child) {
+                d = strdup(p);
+                if (!d)
+                        return -ENOMEM;
+        } else {
+                r = path_extract_directory(p, &d);
+                if (r < 0 && r != -EDESTADDRREQ) /* EDESTADDRREQ → No directory specified, just a filename */
+                        return r;
+
+                r = path_extract_filename(p, &fn);
+                if (r < 0)
+                        return r;
+
+                if (strlen(fn) > NAME_MAX - len_add)
+                        /* We cannot simply prepend and append strings to the filename. Let's truncate the filename. */
+                        fn[NAME_MAX - len_add] = '\0';
+        }
+
+        nf = strjoin(".#", strempty(pre), strempty(fn), strempty(post));
+        if (!nf)
+                return -ENOMEM;
+
+        if (d) {
+                if (!path_extend(&d, nf))
+                        return -ENOMEM;
+
+                result = path_simplify(TAKE_PTR(d));
+        } else
+                result = TAKE_PTR(nf);
+
+        if (!path_is_valid(result)) /* New path is not valid? (Maybe because too long?) Refuse. */
+                return -EINVAL;
+
+        *ret = TAKE_PTR(result);
+        return 0;
+}
+
+int tempfn_xxxxxx(const char *p, const char *extra, char **ret) {
         /*
          * Turns this:
          *         /foo/bar/waldo
@@ -104,34 +207,14 @@ int tempfn_xxxxxx(const char *p, const char *extra, char **ret) {
          *         /foo/bar/.#<extra>waldoXXXXXX
          */
 
-        fn = basename(p);
-        if (!filename_is_valid(fn))
-                return -EINVAL;
-
-        extra = strempty(extra);
-
-        t = new(char, strlen(p) + 2 + strlen(extra) + 6 + 1);
-        if (!t)
-                return -ENOMEM;
-
-        strcpy(stpcpy(stpcpy(stpcpy(mempcpy(t, p, fn - p), ".#"), extra), fn), "XXXXXX");
-
-        *ret = path_simplify(t, false);
-        return 0;
+        return tempfn_build(p, extra, "XXXXXX", /* child = */ false, ret);
 }
 
 int tempfn_random(const char *p, const char *extra, char **ret) {
-        const char *fn;
-        char *t, *x;
-        uint64_t u;
-        unsigned i;
+        _cleanup_free_ char *s = NULL;
 
+        assert(p);
         assert(ret);
-
-        if (isempty(p))
-                return -EINVAL;
-        if (path_equal(p, "/"))
-                return -EINVAL;
 
         /*
          * Turns this:
@@ -141,34 +224,14 @@ int tempfn_random(const char *p, const char *extra, char **ret) {
          *         /foo/bar/.#<extra>waldobaa2a261115984a9
          */
 
-        fn = basename(p);
-        if (!filename_is_valid(fn))
-                return -EINVAL;
-
-        extra = strempty(extra);
-
-        t = new(char, strlen(p) + 2 + strlen(extra) + 16 + 1);
-        if (!t)
+        if (asprintf(&s, "%016" PRIx64, random_u64()) < 0)
                 return -ENOMEM;
 
-        x = stpcpy(stpcpy(stpcpy(mempcpy(t, p, fn - p), ".#"), extra), fn);
-
-        u = random_u64();
-        for (i = 0; i < 16; i++) {
-                *(x++) = hexchar(u & 0xF);
-                u >>= 4;
-        }
-
-        *x = 0;
-
-        *ret = path_simplify(t, false);
-        return 0;
+        return tempfn_build(p, extra, s, /* child = */ false, ret);
 }
 
 int tempfn_random_child(const char *p, const char *extra, char **ret) {
-        char *t, *x;
-        uint64_t u;
-        unsigned i;
+        _cleanup_free_ char *s = NULL;
         int r;
 
         assert(ret);
@@ -185,27 +248,10 @@ int tempfn_random_child(const char *p, const char *extra, char **ret) {
                         return r;
         }
 
-        extra = strempty(extra);
-
-        t = new(char, strlen(p) + 3 + strlen(extra) + 16 + 1);
-        if (!t)
+        if (asprintf(&s, "%016" PRIx64, random_u64()) < 0)
                 return -ENOMEM;
 
-        if (isempty(p))
-                x = stpcpy(stpcpy(t, ".#"), extra);
-        else
-                x = stpcpy(stpcpy(stpcpy(t, p), "/.#"), extra);
-
-        u = random_u64();
-        for (i = 0; i < 16; i++) {
-                *(x++) = hexchar(u & 0xF);
-                u >>= 4;
-        }
-
-        *x = 0;
-
-        *ret = path_simplify(t, false);
-        return 0;
+        return tempfn_build(p, extra, s, /* child = */ true, ret);
 }
 
 int open_tmpfile_unlinkable(const char *directory, int flags) {
@@ -238,7 +284,7 @@ int open_tmpfile_unlinkable(const char *directory, int flags) {
         return fd;
 }
 
-int open_tmpfile_linkable(const char *target, int flags, char **ret_path) {
+int open_tmpfile_linkable_at(int dir_fd, const char *target, int flags, char **ret_path) {
         _cleanup_free_ char *tmp = NULL;
         int r, fd;
 
@@ -249,10 +295,10 @@ int open_tmpfile_linkable(const char *target, int flags, char **ret_path) {
         assert((flags & O_EXCL) == 0);
 
         /* Creates a temporary file, that shall be renamed to "target" later. If possible, this uses O_TMPFILE – in
-         * which case "ret_path" will be returned as NULL. If not possible a the tempoary path name used is returned in
+         * which case "ret_path" will be returned as NULL. If not possible the temporary path name used is returned in
          * "ret_path". Use link_tmpfile() below to rename the result after writing the file in full. */
 
-        fd = open_parent(target, O_TMPFILE|flags, 0640);
+        fd = open_parent_at(dir_fd, target, O_TMPFILE|flags, 0640);
         if (fd >= 0) {
                 *ret_path = NULL;
                 return fd;
@@ -264,7 +310,7 @@ int open_tmpfile_linkable(const char *target, int flags, char **ret_path) {
         if (r < 0)
                 return r;
 
-        fd = open(tmp, O_CREAT|O_EXCL|O_NOFOLLOW|O_NOCTTY|flags, 0640);
+        fd = openat(dir_fd, tmp, O_CREAT|O_EXCL|O_NOFOLLOW|O_NOCTTY|flags, 0640);
         if (fd < 0)
                 return -errno;
 
@@ -273,33 +319,80 @@ int open_tmpfile_linkable(const char *target, int flags, char **ret_path) {
         return fd;
 }
 
-int link_tmpfile(int fd, const char *path, const char *target) {
+int fopen_tmpfile_linkable(const char *target, int flags, char **ret_path, FILE **ret_file) {
+        _cleanup_free_ char *path = NULL;
+        _cleanup_fclose_ FILE *f = NULL;
+        _cleanup_close_ int fd = -EBADF;
+
+        assert(target);
+        assert(ret_file);
+        assert(ret_path);
+
+        fd = open_tmpfile_linkable(target, flags, &path);
+        if (fd < 0)
+                return fd;
+
+        f = take_fdopen(&fd, "w");
+        if (!f)
+                return -ENOMEM;
+
+        *ret_path = TAKE_PTR(path);
+        *ret_file = TAKE_PTR(f);
+        return 0;
+}
+
+int link_tmpfile_at(int fd, int dir_fd, const char *path, const char *target, LinkTmpfileFlags flags) {
         int r;
 
         assert(fd >= 0);
+        assert(dir_fd >= 0 || dir_fd == AT_FDCWD);
         assert(target);
 
-        /* Moves a temporary file created with open_tmpfile() above into its final place. if "path" is NULL an fd
-         * created with O_TMPFILE is assumed, and linkat() is used. Otherwise it is assumed O_TMPFILE is not supported
-         * on the directory, and renameat2() is used instead.
-         *
-         * Note that in both cases we will not replace existing files. This is because linkat() does not support this
-         * operation currently (renameat2() does), and there is no nice way to emulate this. */
+        /* Moves a temporary file created with open_tmpfile() above into its final place. If "path" is NULL
+         * an fd created with O_TMPFILE is assumed, and linkat() is used. Otherwise it is assumed O_TMPFILE
+         * is not supported on the directory, and renameat2() is used instead. */
+
+        if (FLAGS_SET(flags, LINK_TMPFILE_SYNC) && fsync(fd) < 0)
+                return -errno;
 
         if (path) {
-                r = rename_noreplace(AT_FDCWD, path, AT_FDCWD, target);
+                if (FLAGS_SET(flags, LINK_TMPFILE_REPLACE))
+                        r = RET_NERRNO(renameat(dir_fd, path, dir_fd, target));
+                else
+                        r = rename_noreplace(dir_fd, path, dir_fd, target);
+        } else {
+                if (FLAGS_SET(flags, LINK_TMPFILE_REPLACE))
+                        r = linkat_replace(fd, /* oldpath= */ NULL, dir_fd, target);
+                else
+                        r = link_fd(fd, dir_fd, target);
+        }
+        if (r < 0)
+                return r;
+
+        if (FLAGS_SET(flags, LINK_TMPFILE_SYNC)) {
+                r = fsync_full(fd);
                 if (r < 0)
                         return r;
-        } else {
-                char proc_fd_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(fd) + 1];
-
-                xsprintf(proc_fd_path, "/proc/self/fd/%i", fd);
-
-                if (linkat(AT_FDCWD, proc_fd_path, AT_FDCWD, target, AT_SYMLINK_FOLLOW) < 0)
-                        return -errno;
         }
 
         return 0;
+}
+
+int flink_tmpfile(FILE *f, const char *path, const char *target, LinkTmpfileFlags flags) {
+        int fd, r;
+
+        assert(f);
+        assert(target);
+
+        fd = fileno(f);
+        if (fd < 0) /* Not all FILE* objects encapsulate fds */
+                return -EBADF;
+
+        r = fflush_and_check(f);
+        if (r < 0)
+                return r;
+
+        return link_tmpfile(fd, path, target, flags);
 }
 
 int mkdtemp_malloc(const char *template, char **ret) {
@@ -317,7 +410,7 @@ int mkdtemp_malloc(const char *template, char **ret) {
                 if (r < 0)
                         return r;
 
-                p = strjoin(tmp, "/XXXXXX");
+                p = path_join(tmp, "XXXXXX");
         }
         if (!p)
                 return -ENOMEM;
@@ -327,4 +420,24 @@ int mkdtemp_malloc(const char *template, char **ret) {
 
         *ret = TAKE_PTR(p);
         return 0;
+}
+
+int mkdtemp_open(const char *template, int flags, char **ret) {
+        _cleanup_free_ char *p = NULL;
+        int fd, r;
+
+        r = mkdtemp_malloc(template, &p);
+        if (r < 0)
+                return r;
+
+        fd = RET_NERRNO(open(p, O_DIRECTORY|O_CLOEXEC|flags));
+        if (fd < 0) {
+                (void) rmdir(p);
+                return fd;
+        }
+
+        if (ret)
+                *ret = TAKE_PTR(p);
+
+        return fd;
 }

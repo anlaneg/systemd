@@ -1,9 +1,5 @@
 <?xml version='1.0'?> <!--*-nxml-*-->
-
-<!--
-  SPDX-License-Identifier: LGPL-2.1+
-
--->
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
 <xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0">
 
@@ -23,7 +19,8 @@
 <xsl:template match="citerefentry[not(@project)]">
   <a>
     <xsl:attribute name="href">
-      <xsl:value-of select="refentrytitle"/><xsl:text>.html#</xsl:text>
+      <xsl:value-of select="refentrytitle"/>
+      <xsl:text>.html#</xsl:text>
       <xsl:value-of select="refentrytitle/@target"/>
     </xsl:attribute>
     <xsl:call-template name="inline.charseq"/>
@@ -33,7 +30,7 @@
 <xsl:template match="citerefentry[@project='man-pages'] | citerefentry[manvolnum='2'] | citerefentry[manvolnum='4']">
   <a>
     <xsl:attribute name="href">
-      <xsl:text>http://man7.org/linux/man-pages/man</xsl:text>
+      <xsl:text>https://man7.org/linux/man-pages/man</xsl:text>
       <xsl:value-of select="manvolnum"/>
       <xsl:text>/</xsl:text>
       <xsl:value-of select="refentrytitle"/>
@@ -57,18 +54,6 @@
   </a>
 </xsl:template>
 
-<xsl:template match="citerefentry[@project='wireguard']">
-  <a>
-    <xsl:attribute name="href">
-      <xsl:text>https://git.zx2c4.com/WireGuard/about/src/tools/</xsl:text>
-      <xsl:value-of select="refentrytitle"/>
-      <xsl:text>.</xsl:text>
-      <xsl:value-of select="manvolnum"/>
-    </xsl:attribute>
-    <xsl:call-template name="inline.charseq"/>
-  </a>
-</xsl:template>
-
 <xsl:template match="citerefentry[@project='mankier']">
   <a>
     <xsl:attribute name="href">
@@ -84,13 +69,26 @@
 <xsl:template match="citerefentry[@project='archlinux']">
   <a>
     <xsl:attribute name="href">
-      <xsl:text>https://www.archlinux.org/</xsl:text>
+      <xsl:text>https://man.archlinux.org/man/</xsl:text>
+      <xsl:value-of select="refentrytitle"/>
+      <xsl:text>.</xsl:text>
+      <xsl:value-of select="manvolnum"/>
+      <xsl:text>.en.html</xsl:text>
+    </xsl:attribute>
+    <xsl:call-template name="inline.charseq"/>
+  </a>
+</xsl:template>
+
+<xsl:template match="citerefentry[@project='debian']">
+  <a>
+    <xsl:attribute name="href">
+      <xsl:text>https://manpages.debian.org/unstable/</xsl:text>
       <xsl:value-of select="refentrytitle"/>
       <xsl:text>/</xsl:text>
       <xsl:value-of select="refentrytitle"/>
       <xsl:text>.</xsl:text>
       <xsl:value-of select="manvolnum"/>
-      <xsl:text>.html</xsl:text>
+      <xsl:text>.en.html</xsl:text>
     </xsl:attribute>
     <xsl:call-template name="inline.charseq"/>
   </a>
@@ -112,11 +110,20 @@
 <xsl:template match="citerefentry[@project='dbus']">
   <a>
     <xsl:attribute name="href">
-      <xsl:text>http://dbus.freedesktop.org/doc/</xsl:text>
+      <xsl:text>https://dbus.freedesktop.org/doc/</xsl:text>
       <xsl:value-of select="refentrytitle"/>
       <xsl:text>.</xsl:text>
       <xsl:value-of select="manvolnum"/>
       <xsl:text>.html</xsl:text>
+    </xsl:attribute>
+    <xsl:call-template name="inline.charseq"/>
+  </a>
+</xsl:template>
+
+<xsl:template match="citerefentry[@project='url']">
+  <a>
+    <xsl:attribute name="href">
+      <xsl:value-of select="refentrytitle/@url"/>
     </xsl:attribute>
     <xsl:call-template name="inline.charseq"/>
   </a>

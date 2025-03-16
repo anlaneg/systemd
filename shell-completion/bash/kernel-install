@@ -1,8 +1,8 @@
+# shellcheck shell=bash
 # kernel-install(8) completion                                   -*- shell-script -*-
-# SPDX-License-Identifier: LGPL-2.1+
+# SPDX-License-Identifier: LGPL-2.1-or-later
 #
 # This file is part of systemd.
-#
 #
 # systemd is free software; you can redistribute it and/or modify it
 # under the terms of the GNU Lesser General Public License as published by
@@ -15,35 +15,35 @@
 # General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with systemd; If not, see <http://www.gnu.org/licenses/>.
+# along with systemd; If not, see <https://www.gnu.org/licenses/>.
 
 _kernel_install() {
-        local comps
-        local MACHINE_ID
-        local cur=${COMP_WORDS[COMP_CWORD]}
+    local comps
+    local MACHINE_ID
+    local cur=${COMP_WORDS[COMP_CWORD]}
 
-        case $COMP_CWORD in
-            1)
-                comps="add remove"
-                ;;
-            2)
-                comps=$(cd /lib/modules; echo [0-9]*)
-                if [[ ${COMP_WORDS[1]} == "remove" ]] && [[ -f /etc/machine-id ]]; then
-                    read MACHINE_ID < /etc/machine-id
-                    if [[ $MACHINE_ID ]] && ( [[ -d /boot/$MACHINE_ID ]] || [[ -L /boot/$MACHINE_ID ]] ); then
-                        comps=$(cd "/boot/$MACHINE_ID"; echo [0-9]*)
-                    fi
+    case $COMP_CWORD in
+        1)
+            comps="add remove"
+            ;;
+        2)
+            comps=$(cd /lib/modules; echo [0-9]*)
+            if [[ ${COMP_WORDS[1]} == "remove" ]] && [[ -f /etc/machine-id ]]; then
+                read MACHINE_ID < /etc/machine-id
+                if [[ $MACHINE_ID ]] && ( [[ -d /boot/$MACHINE_ID ]] || [[ -L /boot/$MACHINE_ID ]] ); then
+                    comps=$(cd "/boot/$MACHINE_ID"; echo [0-9]*)
                 fi
-                ;;
-            3)
-                [[ "$cur" ]] || cur=/lib/modules/${COMP_WORDS[2]}/vmlinuz
-                comps=$(compgen -f -- "$cur")
-                compopt -o filenames
-                ;;
-        esac
+            fi
+            ;;
+        3)
+            [[ "$cur" ]] || cur=/lib/modules/${COMP_WORDS[2]}/vmlinuz
+            comps=$(compgen -f -- "$cur")
+            compopt -o filenames
+            ;;
+    esac
 
-        COMPREPLY=( $(compgen -W '$comps' -- "$cur") )
-        return 0
+    COMPREPLY=( $(compgen -W '$comps' -- "$cur") )
+    return 0
 }
 
 complete -F _kernel_install kernel-install

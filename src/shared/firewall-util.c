@@ -1,350 +1,160 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-/* Temporary work-around for broken glibc vs. linux kernel header definitions
- * This is already fixed upstream, remove this when distributions have updated.
- */
-#define _NET_IF_H 1
-
-#include <alloca.h>
-#include <arpa/inet.h>
-#include <endian.h>
 #include <errno.h>
 #include <stddef.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <net/if.h>
-#ifndef IFNAMSIZ
-#define IFNAMSIZ 16
-#endif
-#include <linux/if.h>
-#include <linux/netfilter_ipv4/ip_tables.h>
-#include <linux/netfilter/nf_nat.h>
-#include <linux/netfilter/xt_addrtype.h>
-#include <libiptc/libiptc.h>
 
 #include "alloc-util.h"
 #include "firewall-util.h"
-#include "in-addr-util.h"
-#include "macro.h"
-#include "socket-util.h"
+#include "firewall-util-private.h"
+#include "log.h"
+#include "netlink-util.h"
+#include "string-table.h"
 
-DEFINE_TRIVIAL_CLEANUP_FUNC(struct xtc_handle*, iptc_free);
+static const char * const firewall_backend_table[_FW_BACKEND_MAX] = {
+        [FW_BACKEND_NONE] = "none",
+#if HAVE_LIBIPTC
+        [FW_BACKEND_IPTABLES] = "iptables",
+#endif
+        [FW_BACKEND_NFTABLES] = "nftables",
+};
 
-static int entry_fill_basics(
-                struct ipt_entry *entry,
-                int protocol,
-                const char *in_interface,
-                const union in_addr_union *source,
-                unsigned source_prefixlen,
-                const char *out_interface,
-                const union in_addr_union *destination,
-                unsigned destination_prefixlen) {
+DEFINE_STRING_TABLE_LOOKUP_TO_STRING(firewall_backend, FirewallBackend);
 
-        assert(entry);
+static void firewall_backend_probe(FirewallContext *ctx, bool init_tables) {
+        const char *e;
 
-        if (out_interface && !ifname_valid(out_interface))
-                return -EINVAL;
-        if (in_interface && !ifname_valid(in_interface))
-                return -EINVAL;
+        assert(ctx);
 
-        entry->ip.proto = protocol;
+        if (ctx->backend != _FW_BACKEND_INVALID)
+                return;
 
-        if (in_interface) {
-                size_t l;
-
-                l = strlen(in_interface);
-                assert(l < sizeof entry->ip.iniface);
-                assert(l < sizeof entry->ip.iniface_mask);
-
-                strcpy(entry->ip.iniface, in_interface);
-                memset(entry->ip.iniface_mask, 0xFF, l + 1);
-        }
-        if (source) {
-                entry->ip.src = source->in;
-                in4_addr_prefixlen_to_netmask(&entry->ip.smsk, source_prefixlen);
+        e = secure_getenv("SYSTEMD_FIREWALL_BACKEND");
+        if (e) {
+                if (streq(e, "nftables"))
+                        ctx->backend = FW_BACKEND_NFTABLES;
+                else if (streq(e, "iptables"))
+#if HAVE_LIBIPTC
+                        ctx->backend = FW_BACKEND_IPTABLES;
+#else
+                        log_debug("Unsupported firewall backend requested, ignoring: %s", e);
+#endif
+                else
+                        log_debug("Unrecognized $SYSTEMD_FIREWALL_BACKEND value, ignoring: %s", e);
         }
 
-        if (out_interface) {
-                size_t l = strlen(out_interface);
-                assert(l < sizeof entry->ip.outiface);
-                assert(l < sizeof entry->ip.outiface_mask);
+        if (ctx->backend == _FW_BACKEND_INVALID) {
 
-                strcpy(entry->ip.outiface, out_interface);
-                memset(entry->ip.outiface_mask, 0xFF, l + 1);
-        }
-        if (destination) {
-                entry->ip.dst = destination->in;
-                in4_addr_prefixlen_to_netmask(&entry->ip.dmsk, destination_prefixlen);
+                if (fw_nftables_init_full(ctx, init_tables) >= 0)
+                        ctx->backend = FW_BACKEND_NFTABLES;
+                else
+#if HAVE_LIBIPTC
+                        ctx->backend = FW_BACKEND_IPTABLES;
+#else
+                        ctx->backend = FW_BACKEND_NONE;
+#endif
         }
 
+        if (ctx->backend != FW_BACKEND_NONE)
+                log_debug("Using %s as firewall backend.", firewall_backend_to_string(ctx->backend));
+        else
+                log_debug("No firewall backend found.");
+}
+
+int fw_ctx_new_full(FirewallContext **ret, bool init_tables) {
+        _cleanup_free_ FirewallContext *ctx = NULL;
+
+        ctx = new(FirewallContext, 1);
+        if (!ctx)
+                return -ENOMEM;
+
+        *ctx = (FirewallContext) {
+                .backend = _FW_BACKEND_INVALID,
+        };
+
+        firewall_backend_probe(ctx, init_tables);
+
+        *ret = TAKE_PTR(ctx);
         return 0;
+}
+
+int fw_ctx_new(FirewallContext **ret) {
+        return fw_ctx_new_full(ret, /* init_tables= */ true);
+}
+
+FirewallContext *fw_ctx_free(FirewallContext *ctx) {
+        if (!ctx)
+                return NULL;
+
+        fw_nftables_exit(ctx);
+
+        return mfree(ctx);
+}
+
+size_t fw_ctx_get_reply_callback_count(FirewallContext *ctx) {
+        if (!ctx || !ctx->nfnl)
+                return 0;
+
+        return netlink_get_reply_callback_count(ctx->nfnl);
 }
 
 int fw_add_masquerade(
+                FirewallContext **ctx,
                 bool add,
                 int af,
-                int protocol,
                 const union in_addr_union *source,
-                unsigned source_prefixlen,
-                const char *out_interface,
-                const union in_addr_union *destination,
-                unsigned destination_prefixlen) {
+                unsigned source_prefixlen) {
 
-        _cleanup_(iptc_freep) struct xtc_handle *h = NULL;
-        struct ipt_entry *entry, *mask;
-        struct ipt_entry_target *t;
-        size_t sz;
-        struct nf_nat_ipv4_multi_range_compat *mr;
         int r;
 
-        if (af != AF_INET)
-                return -EOPNOTSUPP;
+        assert(ctx);
 
-        if (!IN_SET(protocol, 0, IPPROTO_TCP, IPPROTO_UDP))
-                return -EOPNOTSUPP;
-
-        h = iptc_init("nat");
-        if (!h)
-                return -errno;
-
-        sz = XT_ALIGN(sizeof(struct ipt_entry)) +
-             XT_ALIGN(sizeof(struct ipt_entry_target)) +
-             XT_ALIGN(sizeof(struct nf_nat_ipv4_multi_range_compat));
-
-        /* Put together the entry we want to add or remove */
-        entry = alloca0(sz);
-        entry->next_offset = sz;
-        entry->target_offset = XT_ALIGN(sizeof(struct ipt_entry));
-        r = entry_fill_basics(entry, protocol, NULL, source, source_prefixlen, out_interface, destination, destination_prefixlen);
-        if (r < 0)
-                return r;
-
-        /* Fill in target part */
-        t = ipt_get_target(entry);
-        t->u.target_size =
-                XT_ALIGN(sizeof(struct ipt_entry_target)) +
-                XT_ALIGN(sizeof(struct nf_nat_ipv4_multi_range_compat));
-        strncpy(t->u.user.name, "MASQUERADE", sizeof(t->u.user.name));
-        mr = (struct nf_nat_ipv4_multi_range_compat*) t->data;
-        mr->rangesize = 1;
-
-        /* Create a search mask entry */
-        mask = alloca(sz);
-        memset(mask, 0xFF, sz);
-
-        if (add) {
-                if (iptc_check_entry("POSTROUTING", entry, (unsigned char*) mask, h))
-                        return 0;
-                if (errno != ENOENT) /* if other error than not existing yet, fail */
-                        return -errno;
-
-                if (!iptc_insert_entry("POSTROUTING", entry, 0, h))
-                        return -errno;
-        } else {
-                if (!iptc_delete_entry("POSTROUTING", entry, (unsigned char*) mask, h)) {
-                        if (errno == ENOENT) /* if it's already gone, all is good! */
-                                return 0;
-
-                        return -errno;
-                }
+        if (!*ctx) {
+                r = fw_ctx_new(ctx);
+                if (r < 0)
+                        return r;
         }
 
-        if (!iptc_commit(h))
-                return -errno;
-
-        return 0;
+        switch ((*ctx)->backend) {
+#if HAVE_LIBIPTC
+        case FW_BACKEND_IPTABLES:
+                return fw_iptables_add_masquerade(add, af, source, source_prefixlen);
+#endif
+        case FW_BACKEND_NFTABLES:
+                return fw_nftables_add_masquerade(*ctx, add, af, source, source_prefixlen);
+        default:
+                return -EOPNOTSUPP;
+        }
 }
 
 int fw_add_local_dnat(
+                FirewallContext **ctx,
                 bool add,
                 int af,
                 int protocol,
-                const char *in_interface,
-                const union in_addr_union *source,
-                unsigned source_prefixlen,
-                const union in_addr_union *destination,
-                unsigned destination_prefixlen,
                 uint16_t local_port,
                 const union in_addr_union *remote,
                 uint16_t remote_port,
                 const union in_addr_union *previous_remote) {
 
-        _cleanup_(iptc_freep) struct xtc_handle *h = NULL;
-        struct ipt_entry *entry, *mask;
-        struct ipt_entry_target *t;
-        struct ipt_entry_match *m;
-        struct xt_addrtype_info_v1 *at;
-        struct nf_nat_ipv4_multi_range_compat *mr;
-        size_t sz, msz;
         int r;
 
-        assert(add || !previous_remote);
+        assert(ctx);
 
-        if (af != AF_INET)
-                return -EOPNOTSUPP;
-
-        if (!IN_SET(protocol, IPPROTO_TCP, IPPROTO_UDP))
-                return -EOPNOTSUPP;
-
-        if (local_port <= 0)
-                return -EINVAL;
-
-        if (remote_port <= 0)
-                return -EINVAL;
-
-        h = iptc_init("nat");
-        if (!h)
-                return -errno;
-
-        sz = XT_ALIGN(sizeof(struct ipt_entry)) +
-             XT_ALIGN(sizeof(struct ipt_entry_match)) +
-             XT_ALIGN(sizeof(struct xt_addrtype_info_v1)) +
-             XT_ALIGN(sizeof(struct ipt_entry_target)) +
-             XT_ALIGN(sizeof(struct nf_nat_ipv4_multi_range_compat));
-
-        if (protocol == IPPROTO_TCP)
-                msz = XT_ALIGN(sizeof(struct ipt_entry_match)) +
-                      XT_ALIGN(sizeof(struct xt_tcp));
-        else
-                msz = XT_ALIGN(sizeof(struct ipt_entry_match)) +
-                      XT_ALIGN(sizeof(struct xt_udp));
-
-        sz += msz;
-
-        /* Fill in basic part */
-        entry = alloca0(sz);
-        entry->next_offset = sz;
-        entry->target_offset =
-                XT_ALIGN(sizeof(struct ipt_entry)) +
-                XT_ALIGN(sizeof(struct ipt_entry_match)) +
-                XT_ALIGN(sizeof(struct xt_addrtype_info_v1)) +
-                msz;
-        r = entry_fill_basics(entry, protocol, in_interface, source, source_prefixlen, NULL, destination, destination_prefixlen);
-        if (r < 0)
-                return r;
-
-        /* Fill in first match */
-        m = (struct ipt_entry_match*) ((uint8_t*) entry + XT_ALIGN(sizeof(struct ipt_entry)));
-        m->u.match_size = msz;
-        if (protocol == IPPROTO_TCP) {
-                struct xt_tcp *tcp;
-
-                strncpy(m->u.user.name, "tcp", sizeof(m->u.user.name));
-                tcp = (struct xt_tcp*) m->data;
-                tcp->dpts[0] = tcp->dpts[1] = local_port;
-                tcp->spts[0] = 0;
-                tcp->spts[1] = 0xFFFF;
-
-        } else {
-                struct xt_udp *udp;
-
-                strncpy(m->u.user.name, "udp", sizeof(m->u.user.name));
-                udp = (struct xt_udp*) m->data;
-                udp->dpts[0] = udp->dpts[1] = local_port;
-                udp->spts[0] = 0;
-                udp->spts[1] = 0xFFFF;
+        if (!*ctx) {
+                r = fw_ctx_new(ctx);
+                if (r < 0)
+                        return r;
         }
 
-        /* Fill in second match */
-        m = (struct ipt_entry_match*) ((uint8_t*) entry + XT_ALIGN(sizeof(struct ipt_entry)) + msz);
-        m->u.match_size =
-                XT_ALIGN(sizeof(struct ipt_entry_match)) +
-                XT_ALIGN(sizeof(struct xt_addrtype_info_v1));
-        strncpy(m->u.user.name, "addrtype", sizeof(m->u.user.name));
-        m->u.user.revision = 1;
-        at = (struct xt_addrtype_info_v1*) m->data;
-        at->dest = XT_ADDRTYPE_LOCAL;
-
-        /* Fill in target part */
-        t = ipt_get_target(entry);
-        t->u.target_size =
-                XT_ALIGN(sizeof(struct ipt_entry_target)) +
-                XT_ALIGN(sizeof(struct nf_nat_ipv4_multi_range_compat));
-        strncpy(t->u.user.name, "DNAT", sizeof(t->u.user.name));
-        mr = (struct nf_nat_ipv4_multi_range_compat*) t->data;
-        mr->rangesize = 1;
-        mr->range[0].flags = NF_NAT_RANGE_PROTO_SPECIFIED|NF_NAT_RANGE_MAP_IPS;
-        mr->range[0].min_ip = mr->range[0].max_ip = remote->in.s_addr;
-        if (protocol == IPPROTO_TCP)
-                mr->range[0].min.tcp.port = mr->range[0].max.tcp.port = htons(remote_port);
-        else
-                mr->range[0].min.udp.port = mr->range[0].max.udp.port = htons(remote_port);
-
-        mask = alloca0(sz);
-        memset(mask, 0xFF, sz);
-
-        if (add) {
-                /* Add the PREROUTING rule, if it is missing so far */
-                if (!iptc_check_entry("PREROUTING", entry, (unsigned char*) mask, h)) {
-                        if (errno != ENOENT)
-                                return -EINVAL;
-
-                        if (!iptc_insert_entry("PREROUTING", entry, 0, h))
-                                return -errno;
-                }
-
-                /* If a previous remote is set, remove its entry */
-                if (previous_remote && previous_remote->in.s_addr != remote->in.s_addr) {
-                        mr->range[0].min_ip = mr->range[0].max_ip = previous_remote->in.s_addr;
-
-                        if (!iptc_delete_entry("PREROUTING", entry, (unsigned char*) mask, h)) {
-                                if (errno != ENOENT)
-                                        return -errno;
-                        }
-
-                        mr->range[0].min_ip = mr->range[0].max_ip = remote->in.s_addr;
-                }
-
-                /* Add the OUTPUT rule, if it is missing so far */
-                if (!in_interface) {
-
-                        /* Don't apply onto loopback addresses */
-                        if (!destination) {
-                                entry->ip.dst.s_addr = htobe32(0x7F000000);
-                                entry->ip.dmsk.s_addr = htobe32(0xFF000000);
-                                entry->ip.invflags = IPT_INV_DSTIP;
-                        }
-
-                        if (!iptc_check_entry("OUTPUT", entry, (unsigned char*) mask, h)) {
-                                if (errno != ENOENT)
-                                        return -errno;
-
-                                if (!iptc_insert_entry("OUTPUT", entry, 0, h))
-                                        return -errno;
-                        }
-
-                        /* If a previous remote is set, remove its entry */
-                        if (previous_remote && previous_remote->in.s_addr != remote->in.s_addr) {
-                                mr->range[0].min_ip = mr->range[0].max_ip = previous_remote->in.s_addr;
-
-                                if (!iptc_delete_entry("OUTPUT", entry, (unsigned char*) mask, h)) {
-                                        if (errno != ENOENT)
-                                                return -errno;
-                                }
-                        }
-                }
-        } else {
-                if (!iptc_delete_entry("PREROUTING", entry, (unsigned char*) mask, h)) {
-                        if (errno != ENOENT)
-                                return -errno;
-                }
-
-                if (!in_interface) {
-                        if (!destination) {
-                                entry->ip.dst.s_addr = htobe32(0x7F000000);
-                                entry->ip.dmsk.s_addr = htobe32(0xFF000000);
-                                entry->ip.invflags = IPT_INV_DSTIP;
-                        }
-
-                        if (!iptc_delete_entry("OUTPUT", entry, (unsigned char*) mask, h)) {
-                                if (errno != ENOENT)
-                                        return -errno;
-                        }
-                }
+        switch ((*ctx)->backend) {
+#if HAVE_LIBIPTC
+        case FW_BACKEND_IPTABLES:
+                return fw_iptables_add_local_dnat(add, af, protocol, local_port, remote, remote_port, previous_remote);
+#endif
+        case FW_BACKEND_NFTABLES:
+                return fw_nftables_add_local_dnat(*ctx, add, af, protocol, local_port, remote, remote_port, previous_remote);
+        default:
+                return -EOPNOTSUPP;
         }
-
-        if (!iptc_commit(h))
-                return -errno;
-
-        return 0;
 }

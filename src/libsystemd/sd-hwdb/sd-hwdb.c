@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /***
   Copyright © 2008 Alan Jenkins <alan.christopher.jenkins@googlemail.com>
 ***/
@@ -8,33 +8,19 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 #include "sd-hwdb.h"
 
 #include "alloc-util.h"
 #include "fd-util.h"
+#include "fileio.h"
 #include "hashmap.h"
 #include "hwdb-internal.h"
-#include "hwdb-util.h"
+#include "nulstr-util.h"
 #include "string-util.h"
-#include "util.h"
-
-struct sd_hwdb {
-        unsigned n_ref;
-
-        FILE *f;
-        struct stat st;
-        union {
-                struct trie_header_f *head;
-                const char *map;
-        };
-
-        OrderedHashmap *properties;
-        Iterator properties_iterator;
-        bool properties_modified;
-};
+#include "time-util.h"
 
 struct linebuf {
         char bytes[LINE_MAX];
@@ -180,11 +166,7 @@ static int hwdb_add_property(sd_hwdb *hwdb, const struct trie_value_entry_f *ent
                 }
         }
 
-        r = ordered_hashmap_ensure_allocated(&hwdb->properties, &string_hash_ops);
-        if (r < 0)
-                return r;
-
-        r = ordered_hashmap_replace(hwdb->properties, key, (void *)entry);
+        r = ordered_hashmap_ensure_replace(&hwdb->properties, &string_hash_ops, key, (void *) entry);
         if (r < 0)
                 return r;
 
@@ -295,19 +277,9 @@ static int trie_search_f(sd_hwdb *hwdb, const char *search) {
         return 0;
 }
 
-static const char hwdb_bin_paths[] =
-        "/etc/systemd/hwdb/hwdb.bin\0"
-        "/etc/udev/hwdb.bin\0"
-        "/usr/lib/systemd/hwdb/hwdb.bin\0"
-#if HAVE_SPLIT_USR
-        "/lib/systemd/hwdb/hwdb.bin\0"
-#endif
-        UDEVLIBEXECDIR "/hwdb.bin\0";
-
 /*打开hwdb.bin文件，读取其内容，返回sd_hwdb*/
-_public_ int sd_hwdb_new(sd_hwdb **ret) {
+static int hwdb_new(const char *path, sd_hwdb **ret) {
         _cleanup_(sd_hwdb_unrefp) sd_hwdb *hwdb = NULL;
-        const char *hwdb_bin_path;
         const char sig[] = HWDB_SIG;
 
         assert_return(ret, -EINVAL);
@@ -318,42 +290,51 @@ _public_ int sd_hwdb_new(sd_hwdb **ret) {
 
         hwdb->n_ref = 1;
 
-        /* find hwdb.bin in hwdb_bin_paths */
-        NULSTR_FOREACH(hwdb_bin_path, hwdb_bin_paths) {
-                log_debug("Trying to open \"%s\"...", hwdb_bin_path);
-                hwdb->f = fopen(hwdb_bin_path, "re");/*尝试打开hwdb.bin文件*/
-                if (hwdb->f)
-                    /*打开成功，跳出*/
-                        break;
-                if (errno != ENOENT)
-                    /*文件存在，但打开失败，报错*/
-                        return log_debug_errno(errno, "Failed to open %s: %m", hwdb_bin_path);
-        }
+        /* Find hwdb.bin in the explicit path if provided, or iterate over HWDB_BIN_PATHS otherwise  */
+        if (!isempty(path)) {
+                log_debug("Trying to open \"%s\"...", path);
+                hwdb->f = fopen(path, "re");/*尝试打开hwdb.bin文件*/
+                if (!hwdb->f)
+			/*打开成功，跳出*/
+                        return log_debug_errno(errno, "Failed to open %s: %m", path);
+        } else {
+                NULSTR_FOREACH(p, HWDB_BIN_PATHS) {
+                        log_debug("Trying to open \"%s\"...", p);
+                        hwdb->f = fopen(p, "re");
+                        if (hwdb->f) {
+                                path = p;
+                                break;
+                        }
+                        if (errno != ENOENT)
+				/*文件存在，但打开失败，报错*/
+                                return log_debug_errno(errno, "Failed to open %s: %m", p);
+                }
 
-        if (!hwdb->f)
-            /*查找hwdb.bin文件不存在，报错*/
-                return log_debug_errno(SYNTHETIC_ERRNO(ENOENT),
-                                       "hwdb.bin does not exist, please run 'systemd-hwdb update'");
+                if (!hwdb->f)
+			/*查找hwdb.bin文件不存在，报错*/
+                        return log_debug_errno(SYNTHETIC_ERRNO(ENOENT),
+                                               "hwdb.bin does not exist, please run 'systemd-hwdb update'.");
+        }
 
         /*取文件状态失败，报错*/
         if (fstat(fileno(hwdb->f), &hwdb->st) < 0)
-                return log_debug_errno(errno, "Failed to stat %s: %m", hwdb_bin_path);
+                return log_debug_errno(errno, "Failed to stat %s: %m", path);
         /*文件内容过小（不足文件头），报错*/
         if (hwdb->st.st_size < (off_t) offsetof(struct trie_header_f, strings_len) + 8)
-                return log_debug_errno(SYNTHETIC_ERRNO(EIO),
-                                       "File %s is too short: %m", hwdb_bin_path);
+                return log_debug_errno(SYNTHETIC_ERRNO(EIO), "File %s is too short.", path);
+        if (file_offset_beyond_memory_size(hwdb->st.st_size))
+                return log_debug_errno(SYNTHETIC_ERRNO(EFBIG), "File %s is too long.", path);
 
         /*文件载入内存*/
         hwdb->map = mmap(0, hwdb->st.st_size, PROT_READ, MAP_SHARED, fileno(hwdb->f), 0);
         if (hwdb->map == MAP_FAILED)
-                return log_debug_errno(errno, "Failed to map %s: %m", hwdb_bin_path);
+                return log_debug_errno(errno, "Failed to map %s: %m", path);
 
         /*文件magic比较*/
         if (memcmp(hwdb->map, sig, sizeof(hwdb->head->signature)) != 0 ||
-            (size_t) hwdb->st.st_size != le64toh(hwdb->head->file_size)) {
-                log_debug("Failed to recognize the format of %s", hwdb_bin_path);
-                return -EINVAL;
-        }
+            (size_t) hwdb->st.st_size != le64toh(hwdb->head->file_size))
+                return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Failed to recognize the format of %s.", path);
 
         log_debug("=== trie on-disk ===");
         log_debug("tool version:          %"PRIu64, le64toh(hwdb->head->tool_version));
@@ -367,6 +348,16 @@ _public_ int sd_hwdb_new(sd_hwdb **ret) {
         return 0;
 }
 
+_public_ int sd_hwdb_new_from_path(const char *path, sd_hwdb **ret) {
+        assert_return(!isempty(path), -EINVAL);
+
+        return hwdb_new(path, ret);
+}
+
+_public_ int sd_hwdb_new(sd_hwdb **ret) {
+        return hwdb_new(NULL, ret);
+}
+
 static sd_hwdb *hwdb_free(sd_hwdb *hwdb) {
         assert(hwdb);
 
@@ -378,30 +369,6 @@ static sd_hwdb *hwdb_free(sd_hwdb *hwdb) {
 }
 
 DEFINE_PUBLIC_TRIVIAL_REF_UNREF_FUNC(sd_hwdb, sd_hwdb, hwdb_free)
-
-bool hwdb_validate(sd_hwdb *hwdb) {
-        bool found = false;
-        const char* p;
-        struct stat st;
-
-        if (!hwdb)
-                return false;
-        if (!hwdb->f)
-                return false;
-
-        /* if hwdb.bin doesn't exist anywhere, we need to update */
-        NULSTR_FOREACH(p, hwdb_bin_paths)
-                if (stat(p, &st) >= 0) {
-                        found = true;
-                        break;
-                }
-        if (!found)
-                return true;
-
-        if (timespec_load(&hwdb->st.st_mtim) != timespec_load(&st.st_mtim))
-                return true;
-        return false;
-}
 
 static int properties_prepare(sd_hwdb *hwdb, const char *modalias) {
         assert(hwdb);
@@ -463,8 +430,7 @@ _public_ int sd_hwdb_enumerate(sd_hwdb *hwdb, const char **key, const char **val
         if (hwdb->properties_modified)
                 return -EAGAIN;
 
-        ordered_hashmap_iterate(hwdb->properties, &hwdb->properties_iterator, (void **)&entry, &k);
-        if (!k)
+        if (!ordered_hashmap_iterate(hwdb->properties, &hwdb->properties_iterator, (void **)&entry, &k))
                 return 0;
 
         *key = k;

@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?> <!--*-nxml-*-->
 <!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
-        "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+        "https://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 
 <!--
-  SPDX-License-Identifier: LGPL-2.1+
+  SPDX-License-Identifier: LGPL-2.1-or-later
 
   This file is part of systemd.
 
@@ -16,7 +16,7 @@
 <policyconfig>
 
         <vendor>The systemd Project</vendor>
-        <vendor_url>http://www.freedesktop.org/wiki/Software/systemd</vendor_url>
+        <vendor_url>https://systemd.io</vendor_url>
 
         <action id="org.freedesktop.machine1.login">
                 <description gettext-domain="systemd">Log into a local container</description>
@@ -83,6 +83,17 @@
         <action id="org.freedesktop.machine1.manage-machines">
                 <description gettext-domain="systemd">Manage local virtual machines and containers</description>
                 <message gettext-domain="systemd">Authentication is required to manage local virtual machines and containers.</message>
+                <defaults>
+                        <allow_any>auth_admin</allow_any>
+                        <allow_inactive>auth_admin</allow_inactive>
+                        <allow_active>auth_admin_keep</allow_active>
+                </defaults>
+                <annotate key="org.freedesktop.policykit.imply">org.freedesktop.login1.shell org.freedesktop.login1.login</annotate>
+        </action>
+
+        <action id="org.freedesktop.machine1.create-machine">
+                <description gettext-domain="systemd">Create a local virtual machine or container</description>
+                <message gettext-domain="systemd">Authentication is required to create a local virtual machine or container.</message>
                 <defaults>
                         <allow_any>auth_admin</allow_any>
                         <allow_inactive>auth_admin</allow_inactive>

@@ -1,13 +1,18 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+
 #include <errno.h>
+#include <net/if_arp.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "alloc-util.h"
-#include "dhcp-internal.h"
-#include "dhcp-protocol.h"
+#include "dhcp-option.h"
+#include "dhcp-packet.h"
+#include "ether-addr-util.h"
 #include "macro.h"
-#include "util.h"
+#include "memory-util.h"
+#include "tests.h"
 
 struct option_desc {
         uint8_t sname[64];
@@ -50,7 +55,7 @@ static struct option_desc option_tests[] = {
 };
 
 static const char *dhcp_type(int type) {
-        switch(type) {
+        switch (type) {
         case DHCP_DISCOVER:
                 return "DHCPDISCOVER";
         case DHCP_OFFER:
@@ -86,7 +91,8 @@ static void test_message_init(void) {
         message = malloc0(len);
 
         assert_se(dhcp_message_init(message, BOOTREQUEST, 0x12345678,
-                  DHCP_DISCOVER, ARPHRD_ETHER, optlen, &optoffset) >= 0);
+                                    DHCP_DISCOVER, ARPHRD_ETHER, ETH_ALEN, (uint8_t[16]){},
+                                    optlen, &optoffset) >= 0);
 
         assert_se(message->xid == htobe32(0x12345678));
         assert_se(message->op == BOOTREQUEST);
@@ -118,10 +124,10 @@ static DHCPMessage *create_message(uint8_t *options, uint16_t optlen,
 }
 
 static void test_ignore_opts(uint8_t *descoption, int *descpos, int *desclen) {
-        assert(*descpos >= 0);
+        assert_se(*descpos >= 0);
 
         while (*descpos < *desclen) {
-                switch(descoption[*descpos]) {
+                switch (descoption[*descpos]) {
                 case SD_DHCP_OPTION_PAD:
                         *descpos += 1;
                         break;
@@ -143,7 +149,6 @@ static int test_options_cb(uint8_t code, uint8_t len, const void *option, void *
         int *desclen = NULL, *descpos = NULL;
         uint8_t optcode = 0;
         uint8_t optlen = 0;
-        uint8_t i;
 
         assert_se((!desc && !code && !len) || desc);
 
@@ -196,11 +201,11 @@ static int test_options_cb(uint8_t code, uint8_t len, const void *option, void *
         assert_se(code == optcode);
         assert_se(len == optlen);
 
-        for (i = 0; i < len; i++) {
-
+        for (unsigned i = 0; i < len; i++) {
                 if (verbose)
-                        printf("0x%02x(0x%02x) ", ((uint8_t*) option)[i],
-                                        descoption[*descpos + 2 + i]);
+                        printf("0x%02x(0x%02x) ",
+                               ((uint8_t*) option)[i],
+                               descoption[*descpos + 2 + i]);
 
                 assert_se(((uint8_t*) option)[i] == descoption[*descpos + 2 + i]);
         }
@@ -267,7 +272,15 @@ static void test_options(struct option_desc *desc) {
                 printf("DHCP type %s\n", dhcp_type(res));
 }
 
-static uint8_t options[64] = {
+static void test_option_removal(struct option_desc *desc) {
+        _cleanup_free_ DHCPMessage *message = create_message(&desc->options[0], desc->len, NULL, 0, NULL, 0);
+
+        assert_se(dhcp_option_parse(message, sizeof(DHCPMessage) + desc->len, NULL, NULL, NULL) >= 0);
+        assert_se((desc->len = dhcp_option_remove_option(message->options, desc->len, SD_DHCP_OPTION_MESSAGE_TYPE)) >= 0);
+        assert_se(dhcp_option_parse(message, sizeof(DHCPMessage) + desc->len, NULL, NULL, NULL) < 0);
+}
+
+static uint8_t the_options[64] = {
         'A', 'B', 'C', 'D',
         160, 2, 0x11, 0x12,
         0,
@@ -281,7 +294,6 @@ static uint8_t options[64] = {
 static void test_option_set(void) {
         _cleanup_free_ DHCPMessage *result = NULL;
         size_t offset = 0, len, pos;
-        unsigned i;
 
         result = malloc0(sizeof(DHCPMessage) + 11);
         assert_se(result);
@@ -305,45 +317,45 @@ static void test_option_set(void) {
 
         offset = pos = 4;
         len = 11;
-        while (pos < len && options[pos] != SD_DHCP_OPTION_END) {
+        while (pos < len && the_options[pos] != SD_DHCP_OPTION_END) {
                 assert_se(dhcp_option_append(result, len, &offset, DHCP_OVERLOAD_SNAME,
-                                             options[pos],
-                                             options[pos + 1],
-                                             &options[pos + 2]) >= 0);
+                                             the_options[pos],
+                                             the_options[pos + 1],
+                                             &the_options[pos + 2]) >= 0);
 
-                if (options[pos] == SD_DHCP_OPTION_PAD)
+                if (the_options[pos] == SD_DHCP_OPTION_PAD)
                         pos++;
                 else
-                        pos += 2 + options[pos + 1];
+                        pos += 2 + the_options[pos + 1];
 
                 if (pos < len)
                         assert_se(offset == pos);
         }
 
-        for (i = 0; i < 9; i++) {
+        for (unsigned i = 0; i < 9; i++) {
                 if (verbose)
                         printf("%2u: 0x%02x(0x%02x) (options)\n", i, result->options[i],
-                               options[i]);
-                assert_se(result->options[i] == options[i]);
+                               the_options[i]);
+                assert_se(result->options[i] == the_options[i]);
         }
 
         if (verbose)
                 printf("%2d: 0x%02x(0x%02x) (options)\n", 9, result->options[9],
-                       SD_DHCP_OPTION_END);
+                       (unsigned) SD_DHCP_OPTION_END);
 
         assert_se(result->options[9] == SD_DHCP_OPTION_END);
 
         if (verbose)
                 printf("%2d: 0x%02x(0x%02x) (options)\n", 10, result->options[10],
-                       SD_DHCP_OPTION_PAD);
+                       (unsigned) SD_DHCP_OPTION_PAD);
 
         assert_se(result->options[10] == SD_DHCP_OPTION_PAD);
 
-        for (i = 0; i < pos - 8; i++) {
+        for (unsigned i = 0; i < pos - 8; i++) {
                 if (verbose)
                         printf("%2u: 0x%02x(0x%02x) (sname)\n", i, result->sname[i],
-                               options[i + 9]);
-                assert_se(result->sname[i] == options[i + 9]);
+                               the_options[i + 9]);
+                assert_se(result->sname[i] == the_options[i + 9]);
         }
 
         if (verbose)
@@ -351,17 +363,23 @@ static void test_option_set(void) {
 }
 
 int main(int argc, char *argv[]) {
-        unsigned i;
+        test_setup_logging(LOG_DEBUG);
 
         test_invalid_buffer_length();
         test_message_init();
 
         test_options(NULL);
 
-        for (i = 0; i < ELEMENTSOF(option_tests); i++)
-                test_options(&option_tests[i]);
+        FOREACH_ELEMENT(desc, option_tests)
+                test_options(desc);
 
         test_option_set();
+
+        FOREACH_ELEMENT(desc, option_tests) {
+                if (!desc->success || desc->snamelen > 0 || desc->filelen > 0)
+                        continue;
+                test_option_removal(desc);
+        }
 
         return 0;
 }

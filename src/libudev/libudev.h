@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #ifndef _LIBUDEV_H_
 #define _LIBUDEV_H_
@@ -38,8 +38,8 @@ void udev_set_userdata(struct udev *udev, void *userdata);
 struct udev_list_entry;
 struct udev_list_entry *udev_list_entry_get_next(struct udev_list_entry *list_entry);
 struct udev_list_entry *udev_list_entry_get_by_name(struct udev_list_entry *list_entry, const char *name);
-const char *udev_list_entry_get_name(struct udev_list_entry *list_entry);
-const char *udev_list_entry_get_value(struct udev_list_entry *list_entry);
+const char* udev_list_entry_get_name(struct udev_list_entry *list_entry);
+const char* udev_list_entry_get_value(struct udev_list_entry *list_entry);
 /**
  * udev_list_entry_foreach:
  * @list_entry: entry to store the current position
@@ -71,27 +71,29 @@ struct udev_device *udev_device_get_parent(struct udev_device *udev_device);
 struct udev_device *udev_device_get_parent_with_subsystem_devtype(struct udev_device *udev_device,
                                                                   const char *subsystem, const char *devtype);
 /* retrieve device properties */
-const char *udev_device_get_devpath(struct udev_device *udev_device);
-const char *udev_device_get_subsystem(struct udev_device *udev_device);
-const char *udev_device_get_devtype(struct udev_device *udev_device);
-const char *udev_device_get_syspath(struct udev_device *udev_device);
-const char *udev_device_get_sysname(struct udev_device *udev_device);
-const char *udev_device_get_sysnum(struct udev_device *udev_device);
-const char *udev_device_get_devnode(struct udev_device *udev_device);
+const char* udev_device_get_devpath(struct udev_device *udev_device);
+const char* udev_device_get_subsystem(struct udev_device *udev_device);
+const char* udev_device_get_devtype(struct udev_device *udev_device);
+const char* udev_device_get_syspath(struct udev_device *udev_device);
+const char* udev_device_get_sysname(struct udev_device *udev_device);
+const char* udev_device_get_sysnum(struct udev_device *udev_device);
+const char* udev_device_get_devnode(struct udev_device *udev_device);
 int udev_device_get_is_initialized(struct udev_device *udev_device);
 struct udev_list_entry *udev_device_get_devlinks_list_entry(struct udev_device *udev_device);
 struct udev_list_entry *udev_device_get_properties_list_entry(struct udev_device *udev_device);
 struct udev_list_entry *udev_device_get_tags_list_entry(struct udev_device *udev_device);
+struct udev_list_entry *udev_device_get_current_tags_list_entry(struct udev_device *udev_device);
 struct udev_list_entry *udev_device_get_sysattr_list_entry(struct udev_device *udev_device);
-const char *udev_device_get_property_value(struct udev_device *udev_device, const char *key);
-const char *udev_device_get_driver(struct udev_device *udev_device);
+const char* udev_device_get_property_value(struct udev_device *udev_device, const char *key);
+const char* udev_device_get_driver(struct udev_device *udev_device);
 dev_t udev_device_get_devnum(struct udev_device *udev_device);
-const char *udev_device_get_action(struct udev_device *udev_device);
+const char* udev_device_get_action(struct udev_device *udev_device);
 unsigned long long int udev_device_get_seqnum(struct udev_device *udev_device);
 unsigned long long int udev_device_get_usec_since_initialized(struct udev_device *udev_device);
-const char *udev_device_get_sysattr_value(struct udev_device *udev_device, const char *sysattr);
+const char* udev_device_get_sysattr_value(struct udev_device *udev_device, const char *sysattr);
 int udev_device_set_sysattr_value(struct udev_device *udev_device, const char *sysattr, const char *value);
 int udev_device_has_tag(struct udev_device *udev_device, const char *tag);
+int udev_device_has_current_tag(struct udev_device *udev_device, const char *tag);
 
 /*
  * udev_monitor
@@ -154,7 +156,7 @@ struct udev_queue *udev_queue_unref(struct udev_queue *udev_queue);
 struct udev *udev_queue_get_udev(struct udev_queue *udev_queue);
 struct udev_queue *udev_queue_new(struct udev *udev);
 unsigned long long int udev_queue_get_kernel_seqnum(struct udev_queue *udev_queue) __attribute__((__deprecated__));
-        unsigned long long int udev_queue_get_udev_seqnum(struct udev_queue *udev_queue) __attribute__((__deprecated__));
+unsigned long long int udev_queue_get_udev_seqnum(struct udev_queue *udev_queue) __attribute__((__deprecated__));
 int udev_queue_get_udev_is_active(struct udev_queue *udev_queue);
 int udev_queue_get_queue_is_empty(struct udev_queue *udev_queue);
 int udev_queue_get_seqnum_is_finished(struct udev_queue *udev_queue, unsigned long long int seqnum) __attribute__((__deprecated__));

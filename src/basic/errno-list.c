@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <string.h>
@@ -12,7 +12,7 @@ static const struct errno_name* lookup_errno(register const char *str,
 #include "errno-from-name.h"
 #include "errno-to-name.h"
 
-const char *errno_to_name(int id) {
+const char* errno_to_name(int id) {
 
         if (id < 0)
                 id = -id;

@@ -1,35 +1,57 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include <sched.h>
 
 #include "macro.h"
+#include "missing_syscall.h"
 
-#ifdef __NCPUBITS
-#define CPU_SIZE_TO_NUM(n) ((n) * __NCPUBITS)
-#else
-#define CPU_SIZE_TO_NUM(n) ((n) * sizeof(cpu_set_t) * 8)
-#endif
+/* This wraps the libc interface with a variable to keep the allocated size. */
+typedef struct CPUSet {
+        cpu_set_t *set;
+        size_t allocated; /* in bytes */
+} CPUSet;
 
-DEFINE_TRIVIAL_CLEANUP_FUNC(cpu_set_t*, CPU_FREE);
-#define _cleanup_cpu_free_ _cleanup_(CPU_FREEp)
-
-static inline cpu_set_t* cpu_set_mfree(cpu_set_t *p) {
-        if (p)
-                CPU_FREE(p);
-        return NULL;
+static inline void cpu_set_reset(CPUSet *a) {
+        assert((a->allocated > 0) == !!a->set);
+        if (a->set)
+                CPU_FREE(a->set);
+        *a = (CPUSet) {};
 }
 
-cpu_set_t* cpu_set_malloc(unsigned *ncpus);
+CPUSet* cpu_set_free(CPUSet *c);
+DEFINE_TRIVIAL_CLEANUP_FUNC(CPUSet*, cpu_set_free);
 
-int parse_cpu_set_internal(const char *rvalue, cpu_set_t **cpu_set, bool warn, const char *unit, const char *filename, unsigned line, const char *lvalue);
+int cpu_set_add_all(CPUSet *a, const CPUSet *b);
+int cpu_set_add(CPUSet *a, unsigned cpu);
 
-static inline int parse_cpu_set_and_warn(const char *rvalue, cpu_set_t **cpu_set, const char *unit, const char *filename, unsigned line, const char *lvalue) {
-        assert(lvalue);
+char* cpu_set_to_string(const CPUSet *a);
+char* cpu_set_to_range_string(const CPUSet *a);
+char* cpu_set_to_mask_string(const CPUSet *a);
+int cpu_set_realloc(CPUSet *cpu_set, unsigned ncpus);
 
-        return parse_cpu_set_internal(rvalue, cpu_set, true, unit, filename, line, lvalue);
+int parse_cpu_set_full(
+                const char *rvalue,
+                CPUSet *cpu_set,
+                bool warn,
+                const char *unit,
+                const char *filename, unsigned line,
+                const char *lvalue);
+int parse_cpu_set_extend(
+                const char *rvalue,
+                CPUSet *old,
+                bool warn,
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *lvalue);
+
+static inline int parse_cpu_set(const char *rvalue, CPUSet *cpu_set){
+        return parse_cpu_set_full(rvalue, cpu_set, false, NULL, NULL, 0, NULL);
 }
 
-static inline int parse_cpu_set(const char *rvalue, cpu_set_t **cpu_set){
-        return parse_cpu_set_internal(rvalue, cpu_set, false, NULL, NULL, 0, NULL);
-}
+int cpu_set_to_dbus(const CPUSet *set, uint8_t **ret, size_t *allocated);
+int cpu_set_from_dbus(const uint8_t *bits, size_t size, CPUSet *set);
+
+int cpus_in_affinity_mask(void);
+int cpu_mask_add_all(CPUSet *mask);

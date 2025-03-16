@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include "journald-server.h"
@@ -12,7 +12,7 @@ void server_process_native_message(
                 const char *label,
                 size_t label_len);
 
-void server_process_native_file(
+int server_process_native_file(
                 Server *s,
                 int fd,
                 const struct ucred *ucred,
@@ -20,4 +20,4 @@ void server_process_native_file(
                 const char *label,
                 size_t label_len);
 
-int server_open_native_socket(Server *s);
+int server_open_native_socket(Server *s, const char *native_socket);

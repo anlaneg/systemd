@@ -1,110 +1,43 @@
-#!/bin/bash
-# -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
-# ex: ts=8 sw=4 sts=4 et filetype=sh
+#!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
 set -e
+
 TEST_DESCRIPTION="SELinux tests"
+IMAGE_NAME="selinux"
 TEST_NO_NSPAWN=1
 
-# Requirements:
-# Fedora 23
-# selinux-policy-targeted
-# selinux-policy-devel
+if [[ -e /etc/selinux/config ]]; then
+    SEPOLICY="$(awk -F= '/^SELINUXTYPE=/ {print $2; exit}' /etc/selinux/config)"
 
-# Check if selinux-policy-devel is installed, and if it isn't bail out early instead of failing
-test -f /usr/share/selinux/devel/include/system/systemd.if || exit 0
+    # C8S doesn't set SELINUXTYPE in /etc/selinux/config, so default to 'targeted'
+    if [[ -z "$SEPOLICY" ]]; then
+        echo "Failed to parse SELinux policy from /etc/selinux/config, falling back to 'targeted'"
+        SEPOLICY="targeted"
+    fi
 
-. $TEST_BASE_DIR/test-functions
+    if [[ ! -d "/etc/selinux/$SEPOLICY" ]]; then
+        echo "Missing policy directory /etc/selinux/$SEPOLICY, skipping the test"
+        exit 0
+    fi
+
+    echo "Using SELinux policy '$SEPOLICY'"
+else
+    echo "/etc/selinux/config is missing, skipping the test"
+    exit 0
+fi
+
+# shellcheck source=test/test-functions
+. "${TEST_BASE_DIR:?}/test-functions"
+
 SETUP_SELINUX=yes
-KERNEL_APPEND="$KERNEL_APPEND selinux=1 security=selinux"
+KERNEL_APPEND="${KERNEL_APPEND:-} selinux=1 enforcing=0 lsm=selinux"
 
-test_setup() {
-    create_empty_image
-    mkdir -p $TESTDIR/root
-    mount ${LOOPDEV}p1 $TESTDIR/root
+test_append_files() {
+    local workspace="${1:?}"
 
-    # Create what will eventually be our root filesystem onto an overlay
-    (
-        LOG_LEVEL=5
-        eval $(udevadm info --export --query=env --name=${LOOPDEV}p2)
-
-        setup_basic_environment
-
-        # setup the testsuite service
-        cat <<EOF >$initdir/etc/systemd/system/testsuite.service
-[Unit]
-Description=Testsuite service
-
-[Service]
-ExecStart=/test-selinux-checks.sh
-Type=oneshot
-EOF
-
-        cat <<EOF >$initdir/etc/systemd/system/hola.service
-[Service]
-Type=oneshot
-ExecStart=/bin/echo Start Hola
-ExecReload=/bin/echo Reload Hola
-ExecStop=/bin/echo Stop Hola
-RemainAfterExit=yes
-EOF
-
-        setup_testsuite
-
-        cat <<EOF >$initdir/etc/systemd/system/load-systemd-test-module.service
-[Unit]
-Description=Load systemd-test module
-DefaultDependencies=no
-Requires=local-fs.target
-Conflicts=shutdown.target
-After=local-fs.target
-Before=sysinit.target shutdown.target autorelabel.service
-ConditionSecurity=selinux
-ConditionPathExists=|/.load-systemd-test-module
-
-[Service]
-ExecStart=/bin/sh -x -c 'echo 0 >/sys/fs/selinux/enforce && cd /systemd-test-module && make -f /usr/share/selinux/devel/Makefile load  && rm /.load-systemd-test-module'
-Type=oneshot
-TimeoutSec=0
-RemainAfterExit=yes
-EOF
-
-        touch $initdir/.load-systemd-test-module
-        mkdir -p $initdir/etc/systemd/system/basic.target.wants
-        ln -fs load-systemd-test-module.service $initdir/etc/systemd/system/basic.target.wants/load-systemd-test-module.service
-
-        local _modules_dir=/var/lib/selinux
-        rm -rf $initdir/$_modules_dir
-        if ! cp -ar $_modules_dir $initdir/$_modules_dir; then
-            dfatal "Failed to copy $_modules_dir"
-            exit 1
-        fi
-
-        local _policy_headers_dir=/usr/share/selinux/devel
-        rm -rf $initdir/$_policy_headers_dir
-        inst_dir /usr/share/selinux
-        if ! cp -ar $_policy_headers_dir $initdir/$_policy_headers_dir; then
-            dfatal "Failed to copy $_policy_headers_dir"
-            exit 1
-        fi
-
-        mkdir $initdir/systemd-test-module
-        cp systemd_test.te $initdir/systemd-test-module
-        cp systemd_test.if $initdir/systemd-test-module
-        cp test-selinux-checks.sh $initdir
-        dracut_install -o sesearch
-        dracut_install runcon
-        dracut_install checkmodule semodule semodule_package m4 make /usr/libexec/selinux/hll/pp load_policy sefcontext_compile
-    ) || return 1
-
-    # mask some services that we do not want to run in these tests
-    ln -s /dev/null $initdir/etc/systemd/system/systemd-hwdb-update.service
-    ln -s /dev/null $initdir/etc/systemd/system/systemd-journal-catalog-update.service
-    ln -s /dev/null $initdir/etc/systemd/system/systemd-networkd.service
-    ln -s /dev/null $initdir/etc/systemd/system/systemd-networkd.socket
-    ln -s /dev/null $initdir/etc/systemd/system/systemd-resolved.service
-
-    ddebug "umount $TESTDIR/root"
-    umount $TESTDIR/root
+    setup_selinux
+    # Config file has (unfortunately) always precedence, so let's switch it there as well
+    sed -i '/^SELINUX=disabled$/s/disabled/permissive/' "$workspace/etc/selinux/config"
 }
 
 do_test "$@"

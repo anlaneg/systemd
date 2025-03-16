@@ -1,10 +1,21 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-#include "install.h"
-#include "output-mode.h"
 #include "sd-bus.h"
+
+#include "install.h"
+#include "pidref.h"
 #include "unit-def.h"
+
+typedef enum ExecDirectoryFlags {
+        EXEC_DIRECTORY_READ_ONLY      = 1 << 0, /* Public API via DBUS, do not change */
+        EXEC_DIRECTORY_ONLY_CREATE    = 1 << 1, /* Only the private directory will be created, not the symlink to it */
+        _EXEC_DIRECTORY_FLAGS_MAX,
+        _EXEC_DIRECTORY_FLAGS_PUBLIC  = EXEC_DIRECTORY_READ_ONLY,
+        _EXEC_DIRECTORY_FLAGS_INVALID = -EINVAL,
+} ExecDirectoryFlags;
+
+ExecDirectoryFlags exec_directory_flags_from_string(const char *s) _pure_;
 
 typedef struct UnitInfo {
         const char *machine;
@@ -25,18 +36,22 @@ int bus_parse_unit_info(sd_bus_message *message, UnitInfo *u);
 int bus_append_unit_property_assignment(sd_bus_message *m, UnitType t, const char *assignment);
 int bus_append_unit_property_assignment_many(sd_bus_message *m, UnitType t, char **l);
 
-typedef struct BusWaitForJobs BusWaitForJobs;
+int bus_append_scope_pidref(sd_bus_message *m, const PidRef *pidref, bool allow_pidfd);
 
-int bus_wait_for_jobs_new(sd_bus *bus, BusWaitForJobs **ret);
-void bus_wait_for_jobs_free(BusWaitForJobs *d);
-int bus_wait_for_jobs_add(BusWaitForJobs *d, const char *path);
-int bus_wait_for_jobs(BusWaitForJobs *d, bool quiet, const char* const* extra_args);
-int bus_wait_for_jobs_one(BusWaitForJobs *d, const char *path, bool quiet);
-
-DEFINE_TRIVIAL_CLEANUP_FUNC(BusWaitForJobs*, bus_wait_for_jobs_free);
-
-int bus_deserialize_and_dump_unit_file_changes(sd_bus_message *m, bool quiet, UnitFileChange **changes, size_t *n_changes);
-
-int unit_show_processes(sd_bus *bus, const char *unit, const char *cgroup_path, const char *prefix, unsigned n_columns, OutputFlags flags, sd_bus_error *error);
+int bus_deserialize_and_dump_unit_file_changes(sd_bus_message *m, bool quiet);
 
 int unit_load_state(sd_bus *bus, const char *name, char **load_state);
+
+int unit_info_compare(const UnitInfo *a, const UnitInfo *b);
+
+int bus_service_manager_reload(sd_bus *bus);
+
+typedef struct UnitFreezer UnitFreezer;
+
+UnitFreezer* unit_freezer_free(UnitFreezer *f);
+DEFINE_TRIVIAL_CLEANUP_FUNC(UnitFreezer*, unit_freezer_free);
+
+int unit_freezer_new(const char *name, UnitFreezer **ret);
+
+int unit_freezer_freeze(UnitFreezer *f);
+int unit_freezer_thaw(UnitFreezer *f);

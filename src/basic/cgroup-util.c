@@ -1,16 +1,10 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <dirent.h>
 #include <errno.h>
-#include <ftw.h>
 #include <limits.h>
 #include <signal.h>
 #include <stddef.h>
-#include <stdio_ext.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/statfs.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
 #include <sys/xattr.h>
@@ -18,7 +12,7 @@
 
 #include "alloc-util.h"
 #include "cgroup-util.h"
-#include "def.h"
+#include "constants.h"
 #include "dirent-util.h"
 #include "extract-word.h"
 #include "fd-util.h"
@@ -28,11 +22,12 @@
 #include "log.h"
 #include "login-util.h"
 #include "macro.h"
-#include "missing.h"
+#include "missing_fs.h"
+#include "missing_magic.h"
+#include "missing_threads.h"
 #include "mkdir.h"
 #include "parse-util.h"
 #include "path-util.h"
-#include "proc-cmdline.h"
 #include "process-util.h"
 #include "set.h"
 #include "special.h"
@@ -43,15 +38,44 @@
 #include "strv.h"
 #include "unit-name.h"
 #include "user-util.h"
+#include "xattr-util.h"
 
-int cg_enumerate_processes(const char *controller, const char *path, FILE **_f) {
+int cg_path_open(const char *controller, const char *path) {
+        _cleanup_free_ char *fs = NULL;
+        int r;
+
+        r = cg_get_path(controller, path, /* item=*/ NULL, &fs);
+        if (r < 0)
+                return r;
+
+        return RET_NERRNO(open(fs, O_DIRECTORY|O_CLOEXEC));
+}
+
+int cg_cgroupid_open(int cgroupfs_fd, uint64_t id) {
+        _cleanup_close_ int fsfd = -EBADF;
+
+        if (cgroupfs_fd < 0) {
+                fsfd = open("/sys/fs/cgroup", O_CLOEXEC|O_DIRECTORY);
+                if (fsfd < 0)
+                        return -errno;
+
+                cgroupfs_fd = fsfd;
+        }
+
+        cg_file_handle fh = CG_FILE_HANDLE_INIT;
+        CG_FILE_HANDLE_CGROUPID(fh) = id;
+
+        return RET_NERRNO(open_by_handle_at(cgroupfs_fd, &fh.file_handle, O_DIRECTORY|O_CLOEXEC));
+}
+
+static int cg_enumerate_items(const char *controller, const char *path, FILE **ret, const char *item) {
         _cleanup_free_ char *fs = NULL;
         FILE *f;
         int r;
 
-        assert(_f);
+        assert(ret);
 
-        r = cg_get_path(controller, path, "cgroup.procs", &fs);
+        r = cg_get_path(controller, path, item, &fs);
         if (r < 0)
                 return r;
 
@@ -59,93 +83,175 @@ int cg_enumerate_processes(const char *controller, const char *path, FILE **_f) 
         if (!f)
                 return -errno;
 
-        *_f = f;
+        *ret = f;
         return 0;
 }
 
-int cg_read_pid(FILE *f, pid_t *_pid) {
+int cg_enumerate_processes(const char *controller, const char *path, FILE **ret) {
+        return cg_enumerate_items(controller, path, ret, "cgroup.procs");
+}
+
+int cg_read_pid(FILE *f, pid_t *ret, CGroupFlags flags) {
         unsigned long ul;
 
-        /* Note that the cgroup.procs might contain duplicates! See
-         * cgroups.txt for details. */
+        /* Note that the cgroup.procs might contain duplicates! See cgroups.txt for details. */
 
         assert(f);
-        assert(_pid);
+        assert(ret);
 
-        errno = 0;
-        if (fscanf(f, "%lu", &ul) != 1) {
+        for (;;) {
+                errno = 0;
+                if (fscanf(f, "%lu", &ul) != 1) {
 
-                if (feof(f))
-                        return 0;
+                        if (feof(f)) {
+                                *ret = 0;
+                                return 0;
+                        }
 
-                return errno > 0 ? -errno : -EIO;
+                        return errno_or_else(EIO);
+                }
+
+                if (ul > PID_T_MAX)
+                        return -EIO;
+
+                /* In some circumstances (e.g. WSL), cgroups might contain unmappable PIDs from other
+                 * contexts. These show up as zeros, and depending on the caller, can either be plain
+                 * skipped over, or returned as-is. */
+                if (ul == 0 && !FLAGS_SET(flags, CGROUP_DONT_SKIP_UNMAPPED))
+                        continue;
+
+                *ret = (pid_t) ul;
+                return 1;
         }
+}
 
-        if (ul <= 0)
-                return -EIO;
+int cg_read_pidref(FILE *f, PidRef *ret, CGroupFlags flags) {
+        int r;
 
-        *_pid = (pid_t) ul;
-        return 1;
+        assert(f);
+        assert(ret);
+
+        for (;;) {
+                pid_t pid;
+
+                r = cg_read_pid(f, &pid, flags);
+                if (r < 0)
+                        return log_debug_errno(r, "Failed to read pid from cgroup item: %m");
+                if (r == 0) {
+                        *ret = PIDREF_NULL;
+                        return 0;
+                }
+
+                if (pid == 0)
+                        return -EREMOTE;
+
+                if (FLAGS_SET(flags, CGROUP_NO_PIDFD)) {
+                        *ret = PIDREF_MAKE_FROM_PID(pid);
+                        return 1;
+                }
+
+                r = pidref_set_pid(ret, pid);
+                if (r >= 0)
+                        return 1;
+                if (r != -ESRCH)
+                        return r;
+
+                /* ESRCH → gone by now? just skip over it, read the next */
+        }
 }
 
 int cg_read_event(
                 const char *controller,
                 const char *path,
                 const char *event,
-                char **val) {
+                char **ret) {
 
         _cleanup_free_ char *events = NULL, *content = NULL;
-        char *p, *line;
         int r;
 
         r = cg_get_path(controller, path, "cgroup.events", &events);
         if (r < 0)
                 return r;
 
-        r = read_full_file(events, &content, NULL);
+        r = read_full_virtual_file(events, &content, NULL);
         if (r < 0)
                 return r;
 
-        p = content;
-        while ((line = strsep(&p, "\n"))) {
-                char *key;
+        for (const char *p = content;;) {
+                _cleanup_free_ char *line = NULL, *key = NULL;
+                const char *q;
 
-                key = strsep(&line, " ");
-                if (!key || !line)
+                r = extract_first_word(&p, &line, "\n", 0);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        return -ENOENT;
+
+                q = line;
+                r = extract_first_word(&q, &key, " ", 0);
+                if (r < 0)
+                        return r;
+                if (r == 0)
                         return -EINVAL;
 
-                if (strcmp(key, event))
+                if (!streq(key, event))
                         continue;
 
-                *val = strdup(line);
-                return 0;
+                return strdup_to(ret, q);
         }
-
-        return -ENOENT;
 }
 
 bool cg_ns_supported(void) {
-        static thread_local int enabled = -1;
+        static thread_local int supported = -1;
 
-        if (enabled >= 0)
-                return enabled;
+        if (supported >= 0)
+                return supported;
 
-        if (access("/proc/self/ns/cgroup", F_OK) < 0) {
-                if (errno != ENOENT)
-                        log_debug_errno(errno, "Failed to check whether /proc/self/ns/cgroup is available, assuming not: %m");
-                enabled = false;
-        } else
-                enabled = true;
-
-        return enabled;
+        if (access("/proc/self/ns/cgroup", F_OK) >= 0)
+                return (supported = true);
+        if (errno != ENOENT)
+                log_debug_errno(errno, "Failed to check whether /proc/self/ns/cgroup is available, assuming not: %m");
+        return (supported = false);
 }
 
-int cg_enumerate_subgroups(const char *controller, const char *path, DIR **_d) {
-        _cleanup_free_ char *fs = NULL;
-        int r;
-        DIR *d;
+bool cg_freezer_supported(void) {
+        static thread_local int supported = -1;
 
-        assert(_d);
+        if (supported >= 0)
+                return supported;
+
+        if (cg_all_unified() <= 0)
+                return (supported = false);
+
+        if (access("/sys/fs/cgroup/init.scope/cgroup.freeze", F_OK) >= 0)
+                return (supported = true);
+        if (errno != ENOENT)
+                log_debug_errno(errno, "Failed to check whether cgroup freezer is available, assuming not: %m");
+        return (supported = false);
+}
+
+bool cg_kill_supported(void) {
+        static thread_local int supported = -1;
+
+        if (supported >= 0)
+                return supported;
+
+        if (cg_all_unified() <= 0)
+                return (supported = false);
+
+        if (access("/sys/fs/cgroup/init.scope/cgroup.kill", F_OK) >= 0)
+                return (supported = true);
+        if (errno != ENOENT)
+                log_debug_errno(errno, "Failed to check whether cgroup.kill is available, assuming not: %m");
+        return (supported = false);
+}
+
+int cg_enumerate_subgroups(const char *controller, const char *path, DIR **ret) {
+        _cleanup_free_ char *fs = NULL;
+        DIR *d;
+        int r;
+
+        assert(ret);
 
         /* This is not recursive! */
 
@@ -157,64 +263,31 @@ int cg_enumerate_subgroups(const char *controller, const char *path, DIR **_d) {
         if (!d)
                 return -errno;
 
-        *_d = d;
+        *ret = d;
         return 0;
 }
 
-int cg_read_subgroup(DIR *d, char **fn) {
-        struct dirent *de;
-
+int cg_read_subgroup(DIR *d, char **ret) {
         assert(d);
-        assert(fn);
+        assert(ret);
 
         FOREACH_DIRENT_ALL(de, d, return -errno) {
-                char *b;
-
                 if (de->d_type != DT_DIR)
                         continue;
 
                 if (dot_or_dot_dot(de->d_name))
                         continue;
 
-                b = strdup(de->d_name);
-                if (!b)
-                        return -ENOMEM;
-
-                *fn = b;
-                return 1;
+                return strdup_to_full(ret, de->d_name);
         }
 
+        *ret = NULL;
         return 0;
 }
 
-int cg_rmdir(const char *controller, const char *path) {
-        _cleanup_free_ char *p = NULL;
-        int r;
-
-        r = cg_get_path(controller, path, NULL, &p);
-        if (r < 0)
-                return r;
-
-        r = rmdir(p);
-        if (r < 0 && errno != ENOENT)
-                return -errno;
-
-        r = cg_hybrid_unified();
-        if (r <= 0)
-                return r;
-
-        if (streq(controller, SYSTEMD_CGROUP_CONTROLLER)) {
-                r = cg_rmdir(SYSTEMD_CGROUP_CONTROLLER_LEGACY, path);
-                if (r < 0)
-                        log_warning_errno(r, "Failed to remove compat systemd cgroup %s: %m", path);
-        }
-
-        return 0;
-}
-
-int cg_kill(
-                const char *controller,
+static int cg_kill_items(
                 const char *path,
+                const char *item,
                 int sig,
                 CGroupFlags flags,
                 Set *s,
@@ -222,20 +295,21 @@ int cg_kill(
                 void *userdata) {
 
         _cleanup_set_free_ Set *allocated_set = NULL;
-        bool done = false;
-        int r, ret = 0, ret_log_kill = 0;
-        pid_t my_pid;
+        int r, ret = 0;
 
+        assert(path);
+        assert(item);
         assert(sig >= 0);
 
-         /* Don't send SIGCONT twice. Also, SIGKILL always works even when process is suspended, hence don't send
-          * SIGCONT on SIGKILL. */
+         /* Don't send SIGCONT twice. Also, SIGKILL always works even when process is suspended, hence
+          * don't send SIGCONT on SIGKILL. */
         if (IN_SET(sig, SIGCONT, SIGKILL))
                 flags &= ~CGROUP_SIGCONT;
 
-        /* This goes through the tasks list and kills them all. This
-         * is repeated until no further processes are added to the
-         * tasks list, to properly handle forking processes */
+        /* This goes through the tasks list and kills them all. This is repeated until no further processes
+         * are added to the tasks list, to properly handle forking processes.
+         *
+         * When sending SIGKILL, prefer cg_kill_kernel_sigkill(), which is fully atomic. */
 
         if (!s) {
                 s = allocated_set = set_new(NULL);
@@ -243,40 +317,50 @@ int cg_kill(
                         return -ENOMEM;
         }
 
-        my_pid = getpid_cached();
-
+        bool done;
         do {
                 _cleanup_fclose_ FILE *f = NULL;
-                pid_t pid = 0;
+                int ret_log_kill;
+
                 done = true;
 
-                r = cg_enumerate_processes(controller, path, &f);
-                if (r < 0) {
-                        if (ret >= 0 && r != -ENOENT)
-                                return r;
+                r = cg_enumerate_items(SYSTEMD_CGROUP_CONTROLLER, path, &f, item);
+                if (r == -ENOENT)
+                        break;
+                if (r < 0)
+                        return RET_GATHER(ret, log_debug_errno(r, "Failed to enumerate cgroup items: %m"));
 
-                        return ret;
-                }
+                for (;;) {
+                        _cleanup_(pidref_done) PidRef pidref = PIDREF_NULL;
 
-                while ((r = cg_read_pid(f, &pid)) > 0) {
+                        r = cg_read_pidref(f, &pidref, flags);
+                        if (r < 0)
+                                return RET_GATHER(ret, log_debug_errno(r, "Failed to read pidref from cgroup '%s': %m", path));
+                        if (r == 0)
+                                break;
 
-                        if ((flags & CGROUP_IGNORE_SELF) && pid == my_pid)
+                        if ((flags & CGROUP_IGNORE_SELF) && pidref_is_self(&pidref))
                                 continue;
 
-                        if (set_get(s, PID_TO_PTR(pid)) == PID_TO_PTR(pid))
+                        if (set_contains(s, PID_TO_PTR(pidref.pid)))
                                 continue;
+
+                        /* Ignore kernel threads to mimic the behavior of cgroup.kill. */
+                        if (pidref_is_kernel_thread(&pidref) > 0) {
+                                log_debug("Ignoring kernel thread with pid " PID_FMT " in cgroup '%s'", pidref.pid, path);
+                                continue;
+                        }
 
                         if (log_kill)
-                                ret_log_kill = log_kill(pid, sig, userdata);
+                                ret_log_kill = log_kill(&pidref, sig, userdata);
 
-                        /* If we haven't killed this process yet, kill
-                         * it */
-                        if (kill(pid, sig) < 0) {
-                                if (ret >= 0 && errno != ESRCH)
-                                        ret = -errno;
-                        } else {
+                        /* If we haven't killed this process yet, kill it */
+                        r = pidref_kill(&pidref, sig);
+                        if (r < 0 && r != -ESRCH)
+                                RET_GATHER(ret, log_debug_errno(r, "Failed to kill process with pid " PID_FMT " from cgroup '%s': %m", pidref.pid, path));
+                        if (r >= 0) {
                                 if (flags & CGROUP_SIGCONT)
-                                        (void) kill(pid, SIGCONT);
+                                        (void) pidref_kill(&pidref, SIGCONT);
 
                                 if (ret == 0) {
                                         if (log_kill)
@@ -288,33 +372,58 @@ int cg_kill(
 
                         done = false;
 
-                        r = set_put(s, PID_TO_PTR(pid));
-                        if (r < 0) {
-                                if (ret >= 0)
-                                        return r;
-
-                                return ret;
-                        }
+                        r = set_put(s, PID_TO_PTR(pidref.pid));
+                        if (r < 0)
+                                return RET_GATHER(ret, r);
                 }
 
-                if (r < 0) {
-                        if (ret >= 0)
-                                return r;
-
-                        return ret;
-                }
-
-                /* To avoid racing against processes which fork
-                 * quicker than we can kill them we repeat this until
-                 * no new pids need to be killed. */
+                /* To avoid racing against processes which fork quicker than we can kill them, we repeat this
+                 * until no new pids need to be killed. */
 
         } while (!done);
 
         return ret;
 }
 
+int cg_kill(
+                const char *path,
+                int sig,
+                CGroupFlags flags,
+                Set *s,
+                cg_kill_log_func_t log_kill,
+                void *userdata) {
+
+        int r, ret;
+
+        assert(path);
+
+        ret = cg_kill_items(path, "cgroup.procs", sig, flags, s, log_kill, userdata);
+        if (ret < 0)
+                return log_debug_errno(ret, "Failed to kill processes in cgroup '%s' item cgroup.procs: %m", path);
+        if (sig != SIGKILL)
+                return ret;
+
+        /* Only in case of killing with SIGKILL and when using cgroupsv2, kill remaining threads manually as
+           a workaround for kernel bug. It was fixed in 5.2-rc5 (c03cd7738a83), backported to 4.19.66
+           (4340d175b898) and 4.14.138 (feb6b123b7dd). */
+        r = cg_unified_controller(SYSTEMD_CGROUP_CONTROLLER);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return ret;
+
+        /* Opening pidfds for non thread group leaders only works from 6.9 onwards with PIDFD_THREAD. On
+         * older kernels or without PIDFD_THREAD pidfd_open() fails with EINVAL. Since we might read non
+         * thread group leader IDs from cgroup.threads, we set CGROUP_NO_PIDFD to avoid trying open pidfd's
+         * for them and instead use the regular pid. */
+        r = cg_kill_items(path, "cgroup.threads", sig, flags|CGROUP_NO_PIDFD, s, log_kill, userdata);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to kill processes in cgroup '%s' item cgroup.threads: %m", path);
+
+        return r > 0 || ret > 0;
+}
+
 int cg_kill_recursive(
-                const char *controller,
                 const char *path,
                 int sig,
                 CGroupFlags flags,
@@ -325,7 +434,6 @@ int cg_kill_recursive(
         _cleanup_set_free_ Set *allocated_set = NULL;
         _cleanup_closedir_ DIR *d = NULL;
         int r, ret;
-        char *fn;
 
         assert(path);
         assert(sig >= 0);
@@ -336,216 +444,70 @@ int cg_kill_recursive(
                         return -ENOMEM;
         }
 
-        ret = cg_kill(controller, path, sig, flags, s, log_kill, userdata);
+        ret = cg_kill(path, sig, flags, s, log_kill, userdata);
 
-        r = cg_enumerate_subgroups(controller, path, &d);
+        r = cg_enumerate_subgroups(SYSTEMD_CGROUP_CONTROLLER, path, &d);
         if (r < 0) {
-                if (ret >= 0 && r != -ENOENT)
-                        return r;
+                if (r != -ENOENT)
+                        RET_GATHER(ret, log_debug_errno(r, "Failed to enumerate cgroup '%s' subgroups: %m", path));
 
                 return ret;
         }
 
-        while ((r = cg_read_subgroup(d, &fn)) > 0) {
-                _cleanup_free_ char *p = NULL;
+        for (;;) {
+                _cleanup_free_ char *fn = NULL, *p = NULL;
 
-                p = strjoin(path, "/", fn);
-                free(fn);
+                r = cg_read_subgroup(d, &fn);
+                if (r < 0) {
+                        RET_GATHER(ret, log_debug_errno(r, "Failed to read subgroup from cgroup '%s': %m", path));
+                        break;
+                }
+                if (r == 0)
+                        break;
+
+                p = path_join(empty_to_root(path), fn);
                 if (!p)
                         return -ENOMEM;
 
-                r = cg_kill_recursive(controller, p, sig, flags, s, log_kill, userdata);
-                if (r != 0 && ret >= 0)
-                        ret = r;
-        }
-        if (ret >= 0 && r < 0)
-                ret = r;
-
-        if (flags & CGROUP_REMOVE) {
-                r = cg_rmdir(controller, path);
-                if (r < 0 && ret >= 0 && !IN_SET(r, -ENOENT, -EBUSY))
-                        return r;
-        }
-
-        return ret;
-}
-
-int cg_migrate(
-                const char *cfrom,
-                const char *pfrom,
-                const char *cto,
-                const char *pto,
-                CGroupFlags flags) {
-
-        bool done = false;
-        _cleanup_set_free_ Set *s = NULL;
-        int r, ret = 0;
-        pid_t my_pid;
-
-        assert(cfrom);
-        assert(pfrom);
-        assert(cto);
-        assert(pto);
-
-        s = set_new(NULL);
-        if (!s)
-                return -ENOMEM;
-
-        my_pid = getpid_cached();
-
-        do {
-                _cleanup_fclose_ FILE *f = NULL;
-                pid_t pid = 0;
-                done = true;
-
-                r = cg_enumerate_processes(cfrom, pfrom, &f);
-                if (r < 0) {
-                        if (ret >= 0 && r != -ENOENT)
-                                return r;
-
-                        return ret;
-                }
-
-                while ((r = cg_read_pid(f, &pid)) > 0) {
-
-                        /* This might do weird stuff if we aren't a
-                         * single-threaded program. However, we
-                         * luckily know we are not */
-                        if ((flags & CGROUP_IGNORE_SELF) && pid == my_pid)
-                                continue;
-
-                        if (set_get(s, PID_TO_PTR(pid)) == PID_TO_PTR(pid))
-                                continue;
-
-                        /* Ignore kernel threads. Since they can only
-                         * exist in the root cgroup, we only check for
-                         * them there. */
-                        if (cfrom &&
-                            empty_or_root(pfrom) &&
-                            is_kernel_thread(pid) > 0)
-                                continue;
-
-                        r = cg_attach(cto, pto, pid);
-                        if (r < 0) {
-                                if (ret >= 0 && r != -ESRCH)
-                                        ret = r;
-                        } else if (ret == 0)
-                                ret = 1;
-
-                        done = false;
-
-                        r = set_put(s, PID_TO_PTR(pid));
-                        if (r < 0) {
-                                if (ret >= 0)
-                                        return r;
-
-                                return ret;
-                        }
-                }
-
-                if (r < 0) {
-                        if (ret >= 0)
-                                return r;
-
-                        return ret;
-                }
-        } while (!done);
-
-        return ret;
-}
-
-int cg_migrate_recursive(
-                const char *cfrom,
-                const char *pfrom,
-                const char *cto,
-                const char *pto,
-                CGroupFlags flags) {
-
-        _cleanup_closedir_ DIR *d = NULL;
-        int r, ret = 0;
-        char *fn;
-
-        assert(cfrom);
-        assert(pfrom);
-        assert(cto);
-        assert(pto);
-
-        ret = cg_migrate(cfrom, pfrom, cto, pto, flags);
-
-        r = cg_enumerate_subgroups(cfrom, pfrom, &d);
-        if (r < 0) {
-                if (ret >= 0 && r != -ENOENT)
-                        return r;
-
-                return ret;
-        }
-
-        while ((r = cg_read_subgroup(d, &fn)) > 0) {
-                _cleanup_free_ char *p = NULL;
-
-                p = strjoin(pfrom, "/", fn);
-                free(fn);
-                if (!p)
-                        return -ENOMEM;
-
-                r = cg_migrate_recursive(cfrom, p, cto, pto, flags);
+                r = cg_kill_recursive(p, sig, flags, s, log_kill, userdata);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to recursively kill processes in cgroup '%s': %m", p);
                 if (r != 0 && ret >= 0)
                         ret = r;
         }
 
-        if (r < 0 && ret >= 0)
-                ret = r;
-
-        if (flags & CGROUP_REMOVE) {
-                r = cg_rmdir(cfrom, pfrom);
-                if (r < 0 && ret >= 0 && !IN_SET(r, -ENOENT, -EBUSY))
-                        return r;
-        }
-
         return ret;
 }
 
-int cg_migrate_recursive_fallback(
-                const char *cfrom,
-                const char *pfrom,
-                const char *cto,
-                const char *pto,
-                CGroupFlags flags) {
-
+int cg_kill_kernel_sigkill(const char *path) {
+        _cleanup_free_ char *killfile = NULL;
         int r;
 
-        assert(cfrom);
-        assert(pfrom);
-        assert(cto);
-        assert(pto);
+        /* Kills the cgroup at `path` directly by writing to its cgroup.kill file.  This sends SIGKILL to all
+         * processes in the cgroup and has the advantage of being completely atomic, unlike cg_kill_items(). */
 
-        r = cg_migrate_recursive(cfrom, pfrom, cto, pto, flags);
-        if (r < 0) {
-                char prefix[strlen(pto) + 1];
+        assert(path);
 
-                /* This didn't work? Then let's try all prefixes of the destination */
+        if (!cg_kill_supported())
+                return -EOPNOTSUPP;
 
-                PATH_FOREACH_PREFIX(prefix, pto) {
-                        int q;
+        r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, path, "cgroup.kill", &killfile);
+        if (r < 0)
+                return r;
 
-                        q = cg_migrate_recursive(cfrom, pfrom, cto, prefix, flags);
-                        if (q >= 0)
-                                return q;
-                }
-        }
+        r = write_string_file(killfile, "1", WRITE_STRING_FILE_DISABLE_BUFFER);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to write to cgroup.kill for cgroup '%s': %m", path);
 
-        return r;
+        return 0;
 }
 
 static const char *controller_to_dirname(const char *controller) {
-        const char *e;
-
         assert(controller);
 
-        /* Converts a controller name to the directory name below
-         * /sys/fs/cgroup/ we want to mount it to. Effectively, this
-         * just cuts off the name= prefixed used for named
-         * hierarchies, if it is specified. */
+        /* Converts a controller name to the directory name below /sys/fs/cgroup/ we want to mount it
+         * to. Effectively, this just cuts off the name= prefixed used for named hierarchies, if it is
+         * specified. */
 
         if (streq(controller, SYSTEMD_CGROUP_CONTROLLER)) {
                 if (cg_hybrid_unified() > 0)
@@ -554,81 +516,77 @@ static const char *controller_to_dirname(const char *controller) {
                         controller = SYSTEMD_CGROUP_CONTROLLER_LEGACY;
         }
 
-        e = startswith(controller, "name=");
-        if (e)
-                return e;
-
-        return controller;
+        return startswith(controller, "name=") ?: controller;
 }
 
-static int join_path_legacy(const char *controller, const char *path, const char *suffix, char **fs) {
+static int join_path_legacy(const char *controller, const char *path, const char *suffix, char **ret) {
         const char *dn;
         char *t = NULL;
 
-        assert(fs);
+        assert(ret);
         assert(controller);
 
         dn = controller_to_dirname(controller);
 
         if (isempty(path) && isempty(suffix))
-                t = strappend("/sys/fs/cgroup/", dn);
+                t = path_join("/sys/fs/cgroup", dn);
         else if (isempty(path))
-                t = strjoin("/sys/fs/cgroup/", dn, "/", suffix);
+                t = path_join("/sys/fs/cgroup", dn, suffix);
         else if (isempty(suffix))
-                t = strjoin("/sys/fs/cgroup/", dn, "/", path);
+                t = path_join("/sys/fs/cgroup", dn, path);
         else
-                t = strjoin("/sys/fs/cgroup/", dn, "/", path, "/", suffix);
+                t = path_join("/sys/fs/cgroup", dn, path, suffix);
         if (!t)
                 return -ENOMEM;
 
-        *fs = t;
+        *ret = t;
         return 0;
 }
 
-static int join_path_unified(const char *path, const char *suffix, char **fs) {
+static int join_path_unified(const char *path, const char *suffix, char **ret) {
         char *t;
 
-        assert(fs);
+        assert(ret);
 
         if (isempty(path) && isempty(suffix))
                 t = strdup("/sys/fs/cgroup");
         else if (isempty(path))
-                t = strappend("/sys/fs/cgroup/", suffix);
+                t = path_join("/sys/fs/cgroup", suffix);
         else if (isempty(suffix))
-                t = strappend("/sys/fs/cgroup/", path);
+                t = path_join("/sys/fs/cgroup", path);
         else
-                t = strjoin("/sys/fs/cgroup/", path, "/", suffix);
+                t = path_join("/sys/fs/cgroup", path, suffix);
         if (!t)
                 return -ENOMEM;
 
-        *fs = t;
+        *ret = t;
         return 0;
 }
 
-int cg_get_path(const char *controller, const char *path, const char *suffix, char **fs) {
+int cg_get_path(const char *controller, const char *path, const char *suffix, char **ret) {
         int r;
 
-        assert(fs);
+        assert(ret);
 
         if (!controller) {
                 char *t;
 
-                /* If no controller is specified, we return the path
-                 * *below* the controllers, without any prefix. */
+                /* If no controller is specified, we return the path *below* the controllers, without any
+                 * prefix. */
 
-                if (!path && !suffix)
+                if (isempty(path) && isempty(suffix))
                         return -EINVAL;
 
-                if (!suffix)
+                if (isempty(suffix))
                         t = strdup(path);
-                else if (!path)
+                else if (isempty(path))
                         t = strdup(suffix);
                 else
-                        t = strjoin(path, "/", suffix);
+                        t = path_join(path, suffix);
                 if (!t)
                         return -ENOMEM;
 
-                *fs = path_simplify(t, false);
+                *ret = path_simplify(t);
                 return 0;
         }
 
@@ -639,25 +597,36 @@ int cg_get_path(const char *controller, const char *path, const char *suffix, ch
         if (r < 0)
                 return r;
         if (r > 0)
-                r = join_path_unified(path, suffix, fs);
+                r = join_path_unified(path, suffix, ret);
         else
-                r = join_path_legacy(controller, path, suffix, fs);
+                r = join_path_legacy(controller, path, suffix, ret);
         if (r < 0)
                 return r;
 
-        path_simplify(*fs, false);
+        path_simplify(*ret);
         return 0;
 }
 
-static int controller_is_accessible(const char *controller) {
-        int r;
+static int controller_is_v1_accessible(const char *root, const char *controller) {
+        const char *cpath, *dn;
 
         assert(controller);
 
-        /* Checks whether a specific controller is accessible,
-         * i.e. its hierarchy mounted. In the unified hierarchy all
-         * controllers are considered accessible, except for the named
-         * hierarchies */
+        dn = controller_to_dirname(controller);
+
+        /* If root if specified, we check that:
+         * - possible subcgroup is created at root,
+         * - we can modify the hierarchy. */
+
+        cpath = strjoina("/sys/fs/cgroup/", dn, root, root ? "/cgroup.procs" : NULL);
+        return access_nofollow(cpath, root ? W_OK : F_OK);
+}
+
+int cg_get_path_and_check(const char *controller, const char *path, const char *suffix, char **ret) {
+        int r;
+
+        assert(controller);
+        assert(ret);
 
         if (!cg_controller_is_valid(controller))
                 return -EINVAL;
@@ -666,292 +635,21 @@ static int controller_is_accessible(const char *controller) {
         if (r < 0)
                 return r;
         if (r > 0) {
-                /* We don't support named hierarchies if we are using
-                 * the unified hierarchy. */
-
-                if (streq(controller, SYSTEMD_CGROUP_CONTROLLER))
-                        return 0;
-
+                /* In the unified hierarchy all controllers are considered accessible,
+                 * except for the named hierarchies */
                 if (startswith(controller, "name="))
                         return -EOPNOTSUPP;
-
         } else {
-                const char *cc, *dn;
-
-                dn = controller_to_dirname(controller);
-                cc = strjoina("/sys/fs/cgroup/", dn);
-
-                if (laccess(cc, F_OK) < 0)
-                        return -errno;
-        }
-
-        return 0;
-}
-
-int cg_get_path_and_check(const char *controller, const char *path, const char *suffix, char **fs) {
-        int r;
-
-        assert(controller);
-        assert(fs);
-
-        /* Check if the specified controller is actually accessible */
-        r = controller_is_accessible(controller);
-        if (r < 0)
-                return r;
-
-        return cg_get_path(controller, path, suffix, fs);
-}
-
-static int trim_cb(const char *path, const struct stat *sb, int typeflag, struct FTW *ftwbuf) {
-        assert(path);
-        assert(sb);
-        assert(ftwbuf);
-
-        if (typeflag != FTW_DP)
-                return 0;
-
-        if (ftwbuf->level < 1)
-                return 0;
-
-        (void) rmdir(path);
-        return 0;
-}
-
-int cg_trim(const char *controller, const char *path, bool delete_root) {
-        _cleanup_free_ char *fs = NULL;
-        int r = 0, q;
-
-        assert(path);
-
-        r = cg_get_path(controller, path, NULL, &fs);
-        if (r < 0)
-                return r;
-
-        errno = 0;
-        if (nftw(fs, trim_cb, 64, FTW_DEPTH|FTW_MOUNT|FTW_PHYS) != 0) {
-                if (errno == ENOENT)
-                        r = 0;
-                else if (errno > 0)
-                        r = -errno;
-                else
-                        r = -EIO;
-        }
-
-        if (delete_root) {
-                if (rmdir(fs) < 0 && errno != ENOENT)
-                        return -errno;
-        }
-
-        q = cg_hybrid_unified();
-        if (q < 0)
-                return q;
-        if (q > 0 && streq(controller, SYSTEMD_CGROUP_CONTROLLER)) {
-                q = cg_trim(SYSTEMD_CGROUP_CONTROLLER_LEGACY, path, delete_root);
-                if (q < 0)
-                        log_warning_errno(q, "Failed to trim compat systemd cgroup %s: %m", path);
-        }
-
-        return r;
-}
-
-/* Create a cgroup in the hierarchy of controller.
- * Returns 0 if the group already existed, 1 on success, negative otherwise.
- */
-int cg_create(const char *controller, const char *path) {
-        _cleanup_free_ char *fs = NULL;
-        int r;
-
-        r = cg_get_path_and_check(controller, path, NULL, &fs);
-        if (r < 0)
-                return r;
-
-        r = mkdir_parents(fs, 0755);
-        if (r < 0)
-                return r;
-
-        r = mkdir_errno_wrapper(fs, 0755);
-        if (r == -EEXIST)
-                return 0;
-        if (r < 0)
-                return r;
-
-        r = cg_hybrid_unified();
-        if (r < 0)
-                return r;
-
-        if (r > 0 && streq(controller, SYSTEMD_CGROUP_CONTROLLER)) {
-                r = cg_create(SYSTEMD_CGROUP_CONTROLLER_LEGACY, path);
-                if (r < 0)
-                        log_warning_errno(r, "Failed to create compat systemd cgroup %s: %m", path);
-        }
-
-        return 1;
-}
-
-int cg_create_and_attach(const char *controller, const char *path, pid_t pid) {
-        int r, q;
-
-        assert(pid >= 0);
-
-        r = cg_create(controller, path);
-        if (r < 0)
-                return r;
-
-        q = cg_attach(controller, path, pid);
-        if (q < 0)
-                return q;
-
-        /* This does not remove the cgroup on failure */
-        return r;
-}
-
-int cg_attach(const char *controller, const char *path, pid_t pid) {
-        _cleanup_free_ char *fs = NULL;
-        char c[DECIMAL_STR_MAX(pid_t) + 2];
-        int r;
-
-        assert(path);
-        assert(pid >= 0);
-
-        r = cg_get_path_and_check(controller, path, "cgroup.procs", &fs);
-        if (r < 0)
-                return r;
-
-        if (pid == 0)
-                pid = getpid_cached();
-
-        xsprintf(c, PID_FMT "\n", pid);
-
-        r = write_string_file(fs, c, WRITE_STRING_FILE_DISABLE_BUFFER);
-        if (r < 0)
-                return r;
-
-        r = cg_hybrid_unified();
-        if (r < 0)
-                return r;
-
-        if (r > 0 && streq(controller, SYSTEMD_CGROUP_CONTROLLER)) {
-                r = cg_attach(SYSTEMD_CGROUP_CONTROLLER_LEGACY, path, pid);
-                if (r < 0)
-                        log_warning_errno(r, "Failed to attach "PID_FMT" to compat systemd cgroup %s: %m", pid, path);
-        }
-
-        return 0;
-}
-
-int cg_attach_fallback(const char *controller, const char *path, pid_t pid) {
-        int r;
-
-        assert(controller);
-        assert(path);
-        assert(pid >= 0);
-
-        r = cg_attach(controller, path, pid);
-        if (r < 0) {
-                char prefix[strlen(path) + 1];
-
-                /* This didn't work? Then let's try all prefixes of
-                 * the destination */
-
-                PATH_FOREACH_PREFIX(prefix, path) {
-                        int q;
-
-                        q = cg_attach(controller, prefix, pid);
-                        if (q >= 0)
-                                return q;
-                }
-        }
-
-        return r;
-}
-
-int cg_set_access(
-                const char *controller,
-                const char *path,
-                uid_t uid,
-                gid_t gid) {
-
-        struct Attribute {
-                const char *name;
-                bool fatal;
-        };
-
-        /* cgroup v1, aka legacy/non-unified */
-        static const struct Attribute legacy_attributes[] = {
-                { "cgroup.procs",           true  },
-                { "tasks",                  false },
-                { "cgroup.clone_children",  false },
-                {},
-        };
-
-        /* cgroup v2, aka unified */
-        static const struct Attribute unified_attributes[] = {
-                { "cgroup.procs",           true  },
-                { "cgroup.subtree_control", true  },
-                { "cgroup.threads",         false },
-                {},
-        };
-
-        static const struct Attribute* const attributes[] = {
-                [false] = legacy_attributes,
-                [true]  = unified_attributes,
-        };
-
-        _cleanup_free_ char *fs = NULL;
-        const struct Attribute *i;
-        int r, unified;
-
-        assert(path);
-
-        if (uid == UID_INVALID && gid == GID_INVALID)
-                return 0;
-
-        unified = cg_unified_controller(controller);
-        if (unified < 0)
-                return unified;
-
-        /* Configure access to the cgroup itself */
-        r = cg_get_path(controller, path, NULL, &fs);
-        if (r < 0)
-                return r;
-
-        r = chmod_and_chown(fs, 0755, uid, gid);
-        if (r < 0)
-                return r;
-
-        /* Configure access to the cgroup's attributes */
-        for (i = attributes[unified]; i->name; i++) {
-                fs = mfree(fs);
-
-                r = cg_get_path(controller, path, i->name, &fs);
+                /* Check if the specified controller is actually accessible */
+                r = controller_is_v1_accessible(NULL, controller);
                 if (r < 0)
                         return r;
-
-                r = chmod_and_chown(fs, 0644, uid, gid);
-                if (r < 0) {
-                        if (i->fatal)
-                                return r;
-
-                        log_debug_errno(r, "Failed to set access on cgroup %s, ignoring: %m", fs);
-                }
         }
 
-        if (streq(controller, SYSTEMD_CGROUP_CONTROLLER)) {
-                r = cg_hybrid_unified();
-                if (r < 0)
-                        return r;
-                if (r > 0) {
-                        /* Always propagate access mode from unified to legacy controller */
-                        r = cg_set_access(SYSTEMD_CGROUP_CONTROLLER_LEGACY, path, uid, gid);
-                        if (r < 0)
-                                log_debug_errno(r, "Failed to set access on compatibility systemd cgroup %s, ignoring: %m", path);
-                }
-        }
-
-        return 0;
+        return cg_get_path(controller, path, suffix, ret);
 }
 
-int cg_set_xattr(const char *controller, const char *path, const char *name, const void *value, size_t size, int flags) {
+int cg_set_xattr(const char *path, const char *name, const void *value, size_t size, int flags) {
         _cleanup_free_ char *fs = NULL;
         int r;
 
@@ -959,17 +657,14 @@ int cg_set_xattr(const char *controller, const char *path, const char *name, con
         assert(name);
         assert(value || size <= 0);
 
-        r = cg_get_path(controller, path, NULL, &fs);
+        r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, path, NULL, &fs);
         if (r < 0)
                 return r;
 
-        if (setxattr(fs, name, value, size, flags) < 0)
-                return -errno;
-
-        return 0;
+        return RET_NERRNO(setxattr(fs, name, value, size, flags));
 }
 
-int cg_get_xattr(const char *controller, const char *path, const char *name, void *value, size_t size) {
+int cg_get_xattr(const char *path, const char *name, void *value, size_t size) {
         _cleanup_free_ char *fs = NULL;
         ssize_t n;
         int r;
@@ -977,7 +672,7 @@ int cg_get_xattr(const char *controller, const char *path, const char *name, voi
         assert(path);
         assert(name);
 
-        r = cg_get_path(controller, path, NULL, &fs);
+        r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, path, NULL, &fs);
         if (r < 0)
                 return r;
 
@@ -988,14 +683,55 @@ int cg_get_xattr(const char *controller, const char *path, const char *name, voi
         return (int) n;
 }
 
-int cg_pid_get_path(const char *controller, pid_t pid, char **path) {
-        _cleanup_fclose_ FILE *f = NULL;
-        const char *fs, *controller_str;
-        int unified, r;
-        size_t cs = 0;
+int cg_get_xattr_malloc(const char *path, const char *name, char **ret) {
+        _cleanup_free_ char *fs = NULL;
+        int r;
 
         assert(path);
+        assert(name);
+
+        r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, path, NULL, &fs);
+        if (r < 0)
+                return r;
+
+        return lgetxattr_malloc(fs, name, ret);
+}
+
+int cg_get_xattr_bool(const char *path, const char *name) {
+        _cleanup_free_ char *fs = NULL;
+        int r;
+
+        assert(path);
+        assert(name);
+
+        r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, path, NULL, &fs);
+        if (r < 0)
+                return r;
+
+        return getxattr_at_bool(AT_FDCWD, fs, name, /* flags= */ 0);
+}
+
+int cg_remove_xattr(const char *path, const char *name) {
+        _cleanup_free_ char *fs = NULL;
+        int r;
+
+        assert(path);
+        assert(name);
+
+        r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, path, NULL, &fs);
+        if (r < 0)
+                return r;
+
+        return RET_NERRNO(removexattr(fs, name));
+}
+
+int cg_pid_get_path(const char *controller, pid_t pid, char **ret_path) {
+        _cleanup_fclose_ FILE *f = NULL;
+        const char *fs, *controller_str = NULL;  /* avoid false maybe-uninitialized warning */
+        int unified, r;
+
         assert(pid >= 0);
+        assert(ret_path);
 
         if (controller) {
                 if (!cg_controller_is_valid(controller))
@@ -1011,26 +747,24 @@ int cg_pid_get_path(const char *controller, pid_t pid, char **path) {
                         controller_str = SYSTEMD_CGROUP_CONTROLLER_LEGACY;
                 else
                         controller_str = controller;
-
-                cs = strlen(controller_str);
         }
 
         fs = procfs_file_alloca(pid, "cgroup");
-        f = fopen(fs, "re");
-        if (!f)
-                return errno == ENOENT ? -ESRCH : -errno;
-
-        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
+        r = fopen_unlocked(fs, "re", &f);
+        if (r == -ENOENT)
+                return -ESRCH;
+        if (r < 0)
+                return r;
 
         for (;;) {
                 _cleanup_free_ char *line = NULL;
-                char *e, *p;
+                char *e;
 
                 r = read_line(f, LONG_LINE_MAX, &line);
                 if (r < 0)
                         return r;
                 if (r == 0)
-                        break;
+                        return -ENODATA;
 
                 if (unified) {
                         e = startswith(line, "0:");
@@ -1042,9 +776,6 @@ int cg_pid_get_path(const char *controller, pid_t pid, char **path) {
                                 continue;
                 } else {
                         char *l;
-                        size_t k;
-                        const char *word, *state;
-                        bool found = false;
 
                         l = strchr(line, ':');
                         if (!l)
@@ -1054,115 +785,53 @@ int cg_pid_get_path(const char *controller, pid_t pid, char **path) {
                         e = strchr(l, ':');
                         if (!e)
                                 continue;
-
                         *e = 0;
-                        FOREACH_WORD_SEPARATOR(word, k, l, ",", state)
-                                if (k == cs && memcmp(word, controller_str, cs) == 0) {
-                                        found = true;
-                                        break;
-                                }
-                        if (!found)
+
+                        assert(controller_str);
+                        r = string_contains_word(l, ",", controller_str);
+                        if (r < 0)
+                                return r;
+                        if (r == 0)
                                 continue;
                 }
 
-                p = strdup(e + 1);
-                if (!p)
+                _cleanup_free_ char *path = strdup(e + 1);
+                if (!path)
                         return -ENOMEM;
 
+                /* Refuse cgroup paths from outside our cgroup namespace */
+                if (startswith(path, "/../"))
+                        return -EUNATCH;
+
                 /* Truncate suffix indicating the process is a zombie */
-                e = endswith(p, " (deleted)");
+                e = endswith(path, " (deleted)");
                 if (e)
                         *e = 0;
 
-                *path = p;
+                *ret_path = TAKE_PTR(path);
                 return 0;
         }
-
-        return -ENODATA;
 }
 
-int cg_install_release_agent(const char *controller, const char *agent) {
-        _cleanup_free_ char *fs = NULL, *contents = NULL;
-        const char *sc;
+int cg_pidref_get_path(const char *controller, const PidRef *pidref, char **ret_path) {
+        _cleanup_free_ char *path = NULL;
         int r;
 
-        assert(agent);
+        assert(ret_path);
 
-        r = cg_unified_controller(controller);
-        if (r < 0)
-                return r;
-        if (r > 0) /* doesn't apply to unified hierarchy */
-                return -EOPNOTSUPP;
+        if (!pidref_is_set(pidref))
+                return -ESRCH;
 
-        r = cg_get_path(controller, NULL, "release_agent", &fs);
+        r = cg_pid_get_path(controller, pidref->pid, &path);
         if (r < 0)
                 return r;
 
-        r = read_one_line_file(fs, &contents);
+        /* Before we return the path, make sure the procfs entry for this pid still matches the pidref */
+        r = pidref_verify(pidref);
         if (r < 0)
                 return r;
 
-        sc = strstrip(contents);
-        if (isempty(sc)) {
-                r = write_string_file(fs, agent, WRITE_STRING_FILE_DISABLE_BUFFER);
-                if (r < 0)
-                        return r;
-        } else if (!path_equal(sc, agent))
-                return -EEXIST;
-
-        fs = mfree(fs);
-        r = cg_get_path(controller, NULL, "notify_on_release", &fs);
-        if (r < 0)
-                return r;
-
-        contents = mfree(contents);
-        r = read_one_line_file(fs, &contents);
-        if (r < 0)
-                return r;
-
-        sc = strstrip(contents);
-        if (streq(sc, "0")) {
-                r = write_string_file(fs, "1", WRITE_STRING_FILE_DISABLE_BUFFER);
-                if (r < 0)
-                        return r;
-
-                return 1;
-        }
-
-        if (!streq(sc, "1"))
-                return -EIO;
-
-        return 0;
-}
-
-int cg_uninstall_release_agent(const char *controller) {
-        _cleanup_free_ char *fs = NULL;
-        int r;
-
-        r = cg_unified_controller(controller);
-        if (r < 0)
-                return r;
-        if (r > 0) /* Doesn't apply to unified hierarchy */
-                return -EOPNOTSUPP;
-
-        r = cg_get_path(controller, NULL, "notify_on_release", &fs);
-        if (r < 0)
-                return r;
-
-        r = write_string_file(fs, "0", WRITE_STRING_FILE_DISABLE_BUFFER);
-        if (r < 0)
-                return r;
-
-        fs = mfree(fs);
-
-        r = cg_get_path(controller, NULL, "release_agent", &fs);
-        if (r < 0)
-                return r;
-
-        r = write_string_file(fs, "", WRITE_STRING_FILE_DISABLE_BUFFER);
-        if (r < 0)
-                return r;
-
+        *ret_path = TAKE_PTR(path);
         return 0;
 }
 
@@ -1179,7 +848,7 @@ int cg_is_empty(const char *controller, const char *path) {
         if (r < 0)
                 return r;
 
-        r = cg_read_pid(f, &pid);
+        r = cg_read_pid(f, &pid, CGROUP_DONT_SKIP_UNMAPPED);
         if (r < 0)
                 return r;
 
@@ -1228,7 +897,7 @@ int cg_is_empty_recursive(const char *controller, const char *path) {
                 while ((r = cg_read_subgroup(d, &fn)) > 0) {
                         _cleanup_free_ char *p = NULL;
 
-                        p = strjoin(path, "/", fn);
+                        p = path_join(path, fn);
                         free(fn);
                         if (!p)
                                 return -ENOMEM;
@@ -1244,9 +913,9 @@ int cg_is_empty_recursive(const char *controller, const char *path) {
         }
 }
 
-int cg_split_spec(const char *spec, char **controller, char **path) {
-        char *t = NULL, *u = NULL;
-        const char *e;
+int cg_split_spec(const char *spec, char **ret_controller, char **ret_path) {
+        _cleanup_free_ char *controller = NULL, *path = NULL;
+        int r;
 
         assert(spec);
 
@@ -1254,111 +923,78 @@ int cg_split_spec(const char *spec, char **controller, char **path) {
                 if (!path_is_normalized(spec))
                         return -EINVAL;
 
-                if (path) {
-                        t = strdup(spec);
-                        if (!t)
+                if (ret_path) {
+                        r = path_simplify_alloc(spec, &path);
+                        if (r < 0)
+                                return r;
+                }
+
+        } else {
+                const char *e;
+
+                e = strchr(spec, ':');
+                if (e) {
+                        controller = strndup(spec, e-spec);
+                        if (!controller)
                                 return -ENOMEM;
+                        if (!cg_controller_is_valid(controller))
+                                return -EINVAL;
 
-                        *path = path_simplify(t, false);
+                        if (!isempty(e + 1)) {
+                                path = strdup(e+1);
+                                if (!path)
+                                        return -ENOMEM;
+
+                                if (!path_is_normalized(path) ||
+                                    !path_is_absolute(path))
+                                        return -EINVAL;
+
+                                path_simplify(path);
+                        }
+
+                } else {
+                        if (!cg_controller_is_valid(spec))
+                                return -EINVAL;
+
+                        if (ret_controller) {
+                                controller = strdup(spec);
+                                if (!controller)
+                                        return -ENOMEM;
+                        }
                 }
-
-                if (controller)
-                        *controller = NULL;
-
-                return 0;
         }
 
-        e = strchr(spec, ':');
-        if (!e) {
-                if (!cg_controller_is_valid(spec))
-                        return -EINVAL;
-
-                if (controller) {
-                        t = strdup(spec);
-                        if (!t)
-                                return -ENOMEM;
-
-                        *controller = t;
-                }
-
-                if (path)
-                        *path = NULL;
-
-                return 0;
-        }
-
-        t = strndup(spec, e-spec);
-        if (!t)
-                return -ENOMEM;
-        if (!cg_controller_is_valid(t)) {
-                free(t);
-                return -EINVAL;
-        }
-
-        if (isempty(e+1))
-                u = NULL;
-        else {
-                u = strdup(e+1);
-                if (!u) {
-                        free(t);
-                        return -ENOMEM;
-                }
-
-                if (!path_is_normalized(u) ||
-                    !path_is_absolute(u)) {
-                        free(t);
-                        free(u);
-                        return -EINVAL;
-                }
-
-                path_simplify(u, false);
-        }
-
-        if (controller)
-                *controller = t;
-        else
-                free(t);
-
-        if (path)
-                *path = u;
-        else
-                free(u);
-
+        if (ret_controller)
+                *ret_controller = TAKE_PTR(controller);
+        if (ret_path)
+                *ret_path = TAKE_PTR(path);
         return 0;
 }
 
-int cg_mangle_path(const char *path, char **result) {
+int cg_mangle_path(const char *path, char **ret) {
         _cleanup_free_ char *c = NULL, *p = NULL;
-        char *t;
         int r;
 
         assert(path);
-        assert(result);
+        assert(ret);
 
         /* First, check if it already is a filesystem path */
-        if (path_startswith(path, "/sys/fs/cgroup")) {
-
-                t = strdup(path);
-                if (!t)
-                        return -ENOMEM;
-
-                *result = path_simplify(t, false);
-                return 0;
-        }
+        if (path_startswith(path, "/sys/fs/cgroup"))
+                return path_simplify_alloc(path, ret);
 
         /* Otherwise, treat it as cg spec */
         r = cg_split_spec(path, &c, &p);
         if (r < 0)
                 return r;
 
-        return cg_get_path(c ?: SYSTEMD_CGROUP_CONTROLLER, p ?: "/", NULL, result);
+        return cg_get_path(c ?: SYSTEMD_CGROUP_CONTROLLER, p ?: "/", NULL, ret);
 }
 
-int cg_get_root_path(char **path) {
+int cg_get_root_path(char **ret_path) {
         char *p, *e;
         int r;
 
-        assert(path);
+        assert(ret_path);
 
         r = cg_pid_get_path(SYSTEMD_CGROUP_CONTROLLER, 1, &p);
         if (r < 0)
@@ -1372,17 +1008,17 @@ int cg_get_root_path(char **path) {
         if (e)
                 *e = 0;
 
-        *path = p;
+        *ret_path = p;
         return 0;
 }
 
-int cg_shift_path(const char *cgroup, const char *root, const char **shifted) {
+int cg_shift_path(const char *cgroup, const char *root, const char **ret_shifted) {
         _cleanup_free_ char *rt = NULL;
         char *p;
         int r;
 
         assert(cgroup);
-        assert(shifted);
+        assert(ret_shifted);
 
         if (!root) {
                 /* If the root was specified let's use that, otherwise
@@ -1397,20 +1033,20 @@ int cg_shift_path(const char *cgroup, const char *root, const char **shifted) {
 
         p = path_startswith(cgroup, root);
         if (p && p > cgroup)
-                *shifted = p - 1;
+                *ret_shifted = p - 1;
         else
-                *shifted = cgroup;
+                *ret_shifted = cgroup;
 
         return 0;
 }
 
-int cg_pid_get_path_shifted(pid_t pid, const char *root, char **cgroup) {
+int cg_pid_get_path_shifted(pid_t pid, const char *root, char **ret_cgroup) {
         _cleanup_free_ char *raw = NULL;
         const char *c;
         int r;
 
         assert(pid >= 0);
-        assert(cgroup);
+        assert(ret_cgroup);
 
         r = cg_pid_get_path(SYSTEMD_CGROUP_CONTROLLER, pid, &raw);
         if (r < 0)
@@ -1420,44 +1056,29 @@ int cg_pid_get_path_shifted(pid_t pid, const char *root, char **cgroup) {
         if (r < 0)
                 return r;
 
-        if (c == raw)
-                *cgroup = TAKE_PTR(raw);
-        else {
-                char *n;
-
-                n = strdup(c);
-                if (!n)
-                        return -ENOMEM;
-
-                *cgroup = n;
+        if (c == raw) {
+                *ret_cgroup = TAKE_PTR(raw);
+                return 0;
         }
 
-        return 0;
+        return strdup_to(ret_cgroup, c);
 }
 
-int cg_path_decode_unit(const char *cgroup, char **unit) {
-        char *c, *s;
-        size_t n;
-
+int cg_path_decode_unit(const char *cgroup, char **ret_unit) {
         assert(cgroup);
-        assert(unit);
+        assert(ret_unit);
 
-        n = strcspn(cgroup, "/");
+        size_t n = strcspn(cgroup, "/");
         if (n < 3)
                 return -ENXIO;
 
-        c = strndupa(cgroup, n);
+        char *c = strndupa_safe(cgroup, n);
         c = cg_unescape(c);
 
         if (!unit_name_is_valid(c, UNIT_NAME_PLAIN|UNIT_NAME_INSTANCE))
                 return -ENXIO;
 
-        s = strdup(c);
-        if (!s)
-                return -ENOMEM;
-
-        *unit = s;
-        return 0;
+        return strdup_to(ret_unit, c);
 }
 
 static bool valid_slice_name(const char *p, size_t n) {
@@ -1501,8 +1122,8 @@ static const char *skip_slices(const char *p) {
 }
 
 int cg_path_get_unit(const char *path, char **ret) {
+        _cleanup_free_ char *unit = NULL;
         const char *e;
-        char *unit;
         int r;
 
         assert(path);
@@ -1515,26 +1136,67 @@ int cg_path_get_unit(const char *path, char **ret) {
                 return r;
 
         /* We skipped over the slices, don't accept any now */
-        if (endswith(unit, ".slice")) {
-                free(unit);
+        if (endswith(unit, ".slice"))
                 return -ENXIO;
-        }
 
-        *ret = unit;
+        *ret = TAKE_PTR(unit);
         return 0;
 }
 
-int cg_pid_get_unit(pid_t pid, char **unit) {
+int cg_path_get_unit_path(const char *path, char **ret) {
+        _cleanup_free_ char *path_copy = NULL;
+        char *unit_name;
+
+        assert(path);
+        assert(ret);
+
+        path_copy = strdup(path);
+        if (!path_copy)
+                return -ENOMEM;
+
+        unit_name = (char *)skip_slices(path_copy);
+        unit_name[strcspn(unit_name, "/")] = 0;
+
+        if (!unit_name_is_valid(cg_unescape(unit_name), UNIT_NAME_PLAIN|UNIT_NAME_INSTANCE))
+                return -ENXIO;
+
+        *ret = TAKE_PTR(path_copy);
+
+        return 0;
+}
+
+int cg_pid_get_unit(pid_t pid, char **ret_unit) {
         _cleanup_free_ char *cgroup = NULL;
         int r;
 
-        assert(unit);
+        assert(ret_unit);
 
         r = cg_pid_get_path_shifted(pid, NULL, &cgroup);
         if (r < 0)
                 return r;
 
-        return cg_path_get_unit(cgroup, unit);
+        return cg_path_get_unit(cgroup, ret_unit);
+}
+
+int cg_pidref_get_unit(const PidRef *pidref, char **ret) {
+        _cleanup_free_ char *unit = NULL;
+        int r;
+
+        assert(ret);
+
+        if (!pidref_is_set(pidref))
+                return -ESRCH;
+
+        r = cg_pid_get_unit(pidref->pid, &unit);
+        if (r < 0)
+                return r;
+
+        r = pidref_verify(pidref);
+        if (r < 0)
+                return r;
+
+        *ret = TAKE_PTR(unit);
+        return 0;
 }
 
 /**
@@ -1564,7 +1226,7 @@ static const char *skip_session(const char *p) {
                  * here. */
 
                 if (!session_id_valid(buf))
-                        return false;
+                        return NULL;
 
                 p += n;
                 p += strspn(p, "/");
@@ -1639,26 +1301,25 @@ int cg_path_get_user_unit(const char *path, char **ret) {
         if (!t)
                 return -ENXIO;
 
-        /* And from here on it looks pretty much the same as for a
-         * system unit, hence let's use the same parser from here
-         * on. */
+        /* And from here on it looks pretty much the same as for a system unit, hence let's use the same
+         * parser. */
         return cg_path_get_unit(t, ret);
 }
 
-int cg_pid_get_user_unit(pid_t pid, char **unit) {
+int cg_pid_get_user_unit(pid_t pid, char **ret_unit) {
         _cleanup_free_ char *cgroup = NULL;
         int r;
 
-        assert(unit);
+        assert(ret_unit);
 
         r = cg_pid_get_path_shifted(pid, NULL, &cgroup);
         if (r < 0)
                 return r;
 
-        return cg_path_get_user_unit(cgroup, unit);
+        return cg_path_get_user_unit(cgroup, ret_unit);
 }
 
-int cg_path_get_machine_name(const char *path, char **machine) {
+int cg_path_get_machine_name(const char *path, char **ret_machine) {
         _cleanup_free_ char *u = NULL;
         const char *sl;
         int r;
@@ -1668,23 +1329,53 @@ int cg_path_get_machine_name(const char *path, char **machine) {
                 return r;
 
         sl = strjoina("/run/systemd/machines/unit:", u);
-        return readlink_malloc(sl, machine);
+        return readlink_malloc(sl, ret_machine);
 }
 
-int cg_pid_get_machine_name(pid_t pid, char **machine) {
+int cg_pid_get_machine_name(pid_t pid, char **ret_machine) {
         _cleanup_free_ char *cgroup = NULL;
         int r;
 
-        assert(machine);
+        assert(ret_machine);
 
         r = cg_pid_get_path_shifted(pid, NULL, &cgroup);
         if (r < 0)
                 return r;
 
-        return cg_path_get_machine_name(cgroup, machine);
+        return cg_path_get_machine_name(cgroup, ret_machine);
 }
 
-int cg_path_get_session(const char *path, char **session) {
+int cg_path_get_cgroupid(const char *path, uint64_t *ret) {
+        cg_file_handle fh = CG_FILE_HANDLE_INIT;
+        int mnt_id;
+
+        assert(path);
+        assert(ret);
+
+        /* This is cgroupfs so we know the size of the handle, thus no need to loop around like
+         * name_to_handle_at_loop() does in mountpoint-util.c */
+        if (name_to_handle_at(AT_FDCWD, path, &fh.file_handle, &mnt_id, 0) < 0)
+                return -errno;
+
+        *ret = CG_FILE_HANDLE_CGROUPID(fh);
+        return 0;
+}
+
+int cg_fd_get_cgroupid(int fd, uint64_t *ret) {
+        cg_file_handle fh = CG_FILE_HANDLE_INIT;
+        int mnt_id = -1;
+
+        assert(fd >= 0);
+        assert(ret);
+
+        if (name_to_handle_at(fd, "", &fh.file_handle, &mnt_id, AT_EMPTY_PATH) < 0)
+                return -errno;
+
+        *ret = CG_FILE_HANDLE_CGROUPID(fh);
+        return 0;
+}
+
+int cg_path_get_session(const char *path, char **ret_session) {
         _cleanup_free_ char *unit = NULL;
         char *start, *end;
         int r;
@@ -1706,20 +1397,13 @@ int cg_path_get_session(const char *path, char **session) {
         if (!session_id_valid(start))
                 return -ENXIO;
 
-        if (session) {
-                char *rr;
+        if (!ret_session)
+                return 0;
 
-                rr = strdup(start);
-                if (!rr)
-                        return -ENOMEM;
-
-                *session = rr;
-        }
-
-        return 0;
+        return strdup_to(ret_session, start);
 }
 
-int cg_pid_get_session(pid_t pid, char **session) {
+int cg_pid_get_session(pid_t pid, char **ret_session) {
         _cleanup_free_ char *cgroup = NULL;
         int r;
 
@@ -1727,10 +1411,10 @@ int cg_pid_get_session(pid_t pid, char **session) {
         if (r < 0)
                 return r;
 
-        return cg_path_get_session(cgroup, session);
+        return cg_path_get_session(cgroup, ret_session);
 }
 
-int cg_path_get_owner_uid(const char *path, uid_t *uid) {
+int cg_path_get_owner_uid(const char *path, uid_t *ret_uid) {
         _cleanup_free_ char *slice = NULL;
         char *start, *end;
         int r;
@@ -1744,18 +1428,19 @@ int cg_path_get_owner_uid(const char *path, uid_t *uid) {
         start = startswith(slice, "user-");
         if (!start)
                 return -ENXIO;
+
         end = endswith(start, ".slice");
         if (!end)
                 return -ENXIO;
 
         *end = 0;
-        if (parse_uid(start, uid) < 0)
+        if (parse_uid(start, ret_uid) < 0)
                 return -ENXIO;
 
         return 0;
 }
 
-int cg_pid_get_owner_uid(pid_t pid, uid_t *uid) {
+int cg_pid_get_owner_uid(pid_t pid, uid_t *ret_uid) {
         _cleanup_free_ char *cgroup = NULL;
         int r;
 
@@ -1763,134 +1448,138 @@ int cg_pid_get_owner_uid(pid_t pid, uid_t *uid) {
         if (r < 0)
                 return r;
 
-        return cg_path_get_owner_uid(cgroup, uid);
+        return cg_path_get_owner_uid(cgroup, ret_uid);
 }
 
-int cg_path_get_slice(const char *p, char **slice) {
+int cg_path_get_slice(const char *p, char **ret_slice) {
         const char *e = NULL;
 
         assert(p);
-        assert(slice);
+        assert(ret_slice);
 
-        /* Finds the right-most slice unit from the beginning, but
-         * stops before we come to the first non-slice unit. */
+        /* Finds the right-most slice unit from the beginning, but stops before we come to
+         * the first non-slice unit. */
 
         for (;;) {
-                size_t n;
+                const char *s;
+                int n;
 
-                p += strspn(p, "/");
+                n = path_find_first_component(&p, /* accept_dot_dot = */ false, &s);
+                if (n < 0)
+                        return n;
+                if (!valid_slice_name(s, n))
+                        break;
 
-                n = strcspn(p, "/");
-                if (!valid_slice_name(p, n)) {
-
-                        if (!e) {
-                                char *s;
-
-                                s = strdup(SPECIAL_ROOT_SLICE);
-                                if (!s)
-                                        return -ENOMEM;
-
-                                *slice = s;
-                                return 0;
-                        }
-
-                        return cg_path_decode_unit(e, slice);
-                }
-
-                e = p;
-                p += n;
+                e = s;
         }
+
+        if (e)
+                return cg_path_decode_unit(e, ret_slice);
+
+        return strdup_to(ret_slice, SPECIAL_ROOT_SLICE);
 }
 
-int cg_pid_get_slice(pid_t pid, char **slice) {
+int cg_pid_get_slice(pid_t pid, char **ret_slice) {
         _cleanup_free_ char *cgroup = NULL;
         int r;
 
-        assert(slice);
+        assert(ret_slice);
 
         r = cg_pid_get_path_shifted(pid, NULL, &cgroup);
         if (r < 0)
                 return r;
 
-        return cg_path_get_slice(cgroup, slice);
+        return cg_path_get_slice(cgroup, ret_slice);
 }
 
-int cg_path_get_user_slice(const char *p, char **slice) {
+int cg_path_get_user_slice(const char *p, char **ret_slice) {
         const char *t;
         assert(p);
-        assert(slice);
+        assert(ret_slice);
 
         t = skip_user_prefix(p);
         if (!t)
                 return -ENXIO;
 
-        /* And now it looks pretty much the same as for a system
-         * slice, so let's just use the same parser from here on. */
-        return cg_path_get_slice(t, slice);
+        /* And now it looks pretty much the same as for a system slice, so let's just use the same parser
+         * from here on. */
+        return cg_path_get_slice(t, ret_slice);
 }
 
-int cg_pid_get_user_slice(pid_t pid, char **slice) {
+int cg_pid_get_user_slice(pid_t pid, char **ret_slice) {
         _cleanup_free_ char *cgroup = NULL;
         int r;
 
-        assert(slice);
+        assert(ret_slice);
 
         r = cg_pid_get_path_shifted(pid, NULL, &cgroup);
         if (r < 0)
                 return r;
 
-        return cg_path_get_user_slice(cgroup, slice);
+        return cg_path_get_user_slice(cgroup, ret_slice);
 }
 
-char *cg_escape(const char *p) {
-        bool need_prefix = false;
+bool cg_needs_escape(const char *p) {
 
-        /* This implements very minimal escaping for names to be used
-         * as file names in the cgroup tree: any name which might
-         * conflict with a kernel name or is prefixed with '_' is
-         * prefixed with a '_'. That way, when reading cgroup names it
-         * is sufficient to remove a single prefixing underscore if
-         * there is one. */
+        /* Checks if the specified path is a valid cgroup name by our rules, or if it must be escaped. Note
+         * that we consider escaped cgroup names invalid here, as they need to be escaped a second time if
+         * they shall be used. Also note that various names cannot be made valid by escaping even if we
+         * return true here (because too long, or contain the forbidden character "/"). */
 
-        /* The return value of this function (unlike cg_unescape())
-         * needs free()! */
+        if (!filename_is_valid(p))
+                return true;
 
-        if (IN_SET(p[0], 0, '_', '.') ||
-            STR_IN_SET(p, "notify_on_release", "release_agent", "tasks") ||
-            startswith(p, "cgroup."))
-                need_prefix = true;
-        else {
-                const char *dot;
+        if (IN_SET(p[0], '_', '.'))
+                return true;
 
-                dot = strrchr(p, '.');
-                if (dot) {
-                        CGroupController c;
-                        size_t l = dot - p;
+        if (STR_IN_SET(p, "notify_on_release", "release_agent", "tasks"))
+                return true;
 
-                        for (c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
-                                const char *n;
+        if (startswith(p, "cgroup."))
+                return true;
 
-                                n = cgroup_controller_to_string(c);
+        for (CGroupController c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
+                const char *q;
 
-                                if (l != strlen(n))
-                                        continue;
+                q = startswith(p, cgroup_controller_to_string(c));
+                if (!q)
+                        continue;
 
-                                if (memcmp(p, n, l) != 0)
-                                        continue;
-
-                                need_prefix = true;
-                                break;
-                        }
-                }
+                if (q[0] == '.')
+                        return true;
         }
 
-        if (need_prefix)
-                return strappend("_", p);
-
-        return strdup(p);
+        return false;
 }
 
-char *cg_unescape(const char *p) {
+int cg_escape(const char *p, char **ret) {
+        _cleanup_free_ char *n = NULL;
+
+        /* This implements very minimal escaping for names to be used as file names in the cgroup tree: any
+         * name which might conflict with a kernel name or is prefixed with '_' is prefixed with a '_'. That
+         * way, when reading cgroup names it is sufficient to remove a single prefixing underscore if there
+         * is one. */
+
+        /* The return value of this function (unlike cg_unescape()) needs free()! */
+
+        if (cg_needs_escape(p)) {
+                n = strjoin("_", p);
+                if (!n)
+                        return -ENOMEM;
+
+                if (!filename_is_valid(n)) /* became invalid due to the prefixing? Or contained things like a slash that cannot be fixed by prefixing? */
+                        return -EINVAL;
+        } else {
+                n = strdup(p);
+                if (!n)
+                        return -ENOMEM;
+        }
+
+        *ret = TAKE_PTR(n);
+        return 0;
+}
+
+char* cg_unescape(const char *p) {
         assert(p);
 
         /* The return value of this function (unlike cg_escape())
@@ -1926,7 +1615,7 @@ bool cg_controller_is_valid(const char *p) {
                 if (!strchr(CONTROLLER_VALID, *t))
                         return false;
 
-        if (t - p > FILENAME_MAX)
+        if (t - p > NAME_MAX)
                 return false;
 
         return true;
@@ -1940,15 +1629,8 @@ int cg_slice_to_path(const char *unit, char **ret) {
         assert(unit);
         assert(ret);
 
-        if (streq(unit, SPECIAL_ROOT_SLICE)) {
-                char *x;
-
-                x = strdup("");
-                if (!x)
-                        return -ENOMEM;
-                *ret = x;
-                return 0;
-        }
+        if (streq(unit, SPECIAL_ROOT_SLICE))
+                return strdup_to(ret, "");
 
         if (!unit_name_is_valid(unit, UNIT_NAME_PLAIN))
                 return -EINVAL;
@@ -1972,7 +1654,7 @@ int cg_slice_to_path(const char *unit, char **ret) {
 
 #if HAS_FEATURE_MEMORY_SANITIZER
                 /* msan doesn't instrument stpncpy, so it thinks
-                 * n is later used unitialized:
+                 * n is later used uninitialized:
                  * https://github.com/google/sanitizers/issues/926
                  */
                 zero(n);
@@ -1986,26 +1668,49 @@ int cg_slice_to_path(const char *unit, char **ret) {
                 if (!unit_name_is_valid(n, UNIT_NAME_PLAIN))
                         return -EINVAL;
 
-                escaped = cg_escape(n);
-                if (!escaped)
-                        return -ENOMEM;
+                r = cg_escape(n, &escaped);
+                if (r < 0)
+                        return r;
 
-                if (!strextend(&s, escaped, "/", NULL))
+                if (!strextend(&s, escaped, "/"))
                         return -ENOMEM;
 
                 dash = strchr(dash+1, '-');
         }
 
-        e = cg_escape(unit);
-        if (!e)
-                return -ENOMEM;
+        r = cg_escape(unit, &e);
+        if (r < 0)
+                return r;
 
-        if (!strextend(&s, e, NULL))
+        if (!strextend(&s, e))
                 return -ENOMEM;
 
         *ret = TAKE_PTR(s);
-
         return 0;
+}
+
+int cg_is_threaded(const char *path) {
+        _cleanup_free_ char *fs = NULL, *contents = NULL;
+        _cleanup_strv_free_ char **v = NULL;
+        int r;
+
+        r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, path, "cgroup.type", &fs);
+        if (r < 0)
+                return r;
+
+        r = read_full_virtual_file(fs, &contents, NULL);
+        if (r == -ENOENT)
+                return false; /* Assume no. */
+        if (r < 0)
+                return r;
+
+        v = strv_split(contents, NULL);
+        if (!v)
+                return -ENOMEM;
+
+        /* If the cgroup is in the threaded mode, it contains "threaded".
+         * If one of the parents or siblings is in the threaded mode, it may contain "invalid". */
+        return strv_contains(v, "threaded") || strv_contains(v, "invalid");
 }
 
 int cg_set_attribute(const char *controller, const char *path, const char *attribute, const char *value) {
@@ -2030,12 +1735,81 @@ int cg_get_attribute(const char *controller, const char *path, const char *attri
         return read_one_line_file(p, ret);
 }
 
-int cg_get_keyed_attribute(
+int cg_get_attribute_as_uint64(const char *controller, const char *path, const char *attribute, uint64_t *ret) {
+        _cleanup_free_ char *value = NULL;
+        uint64_t v;
+        int r;
+
+        assert(ret);
+
+        r = cg_get_attribute(controller, path, attribute, &value);
+        if (r == -ENOENT)
+                return -ENODATA;
+        if (r < 0)
+                return r;
+
+        if (streq(value, "max")) {
+                *ret = CGROUP_LIMIT_MAX;
+                return 0;
+        }
+
+        r = safe_atou64(value, &v);
+        if (r < 0)
+                return r;
+
+        *ret = v;
+        return 0;
+}
+
+int cg_get_attribute_as_bool(const char *controller, const char *path, const char *attribute, bool *ret) {
+        _cleanup_free_ char *value = NULL;
+        int r;
+
+        assert(ret);
+
+        r = cg_get_attribute(controller, path, attribute, &value);
+        if (r == -ENOENT)
+                return -ENODATA;
+        if (r < 0)
+                return r;
+
+        r = parse_boolean(value);
+        if (r < 0)
+                return r;
+
+        *ret = r;
+        return 0;
+}
+
+int cg_get_owner(const char *path, uid_t *ret_uid) {
+        _cleanup_free_ char *f = NULL;
+        struct stat stats;
+        int r;
+
+        assert(ret_uid);
+
+        r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, path, NULL, &f);
+        if (r < 0)
+                return r;
+
+        if (stat(f, &stats) < 0)
+                return -errno;
+
+        r = stat_verify_directory(&stats);
+        if (r < 0)
+                return r;
+
+        *ret_uid = stats.st_uid;
+        return 0;
+}
+
+int cg_get_keyed_attribute_full(
                 const char *controller,
                 const char *path,
                 const char *attribute,
                 char **keys,
-                char **ret_values) {
+                char **ret_values,
+                CGroupKeyMode mode) {
 
         _cleanup_free_ char *filename = NULL, *contents = NULL;
         const char *p;
@@ -2047,7 +1821,8 @@ int cg_get_keyed_attribute(
          * all keys to retrieve. The 'ret_values' parameter should be passed as string size with the same number of
          * entries as 'keys'. On success each entry will be set to the value of the matching key.
          *
-         * If the attribute file doesn't exist at all returns ENOENT, if any key is not found returns ENXIO. */
+         * If the attribute file doesn't exist at all returns ENOENT, if any key is not found returns ENXIO. If mode
+         * is set to GG_KEY_MODE_GRACEFUL we ignore missing keys and return those that were parsed successfully. */
 
         r = cg_get_path(controller, path, attribute, &filename);
         if (r < 0)
@@ -2095,212 +1870,28 @@ int cg_get_keyed_attribute(
                 p += strspn(p, NEWLINE);
         }
 
+        if (mode & CG_KEY_MODE_GRACEFUL)
+                goto done;
+
         r = -ENXIO;
 
 fail:
-        for (i = 0; i < n; i++)
-                free(v[i]);
-
+        free_many_charp(v, n);
         return r;
 
 done:
         memcpy(ret_values, v, sizeof(char*) * n);
-        return 0;
-
-}
-
-int cg_create_everywhere(CGroupMask supported, CGroupMask mask, const char *path) {
-        CGroupController c;
-        CGroupMask done;
-        bool created;
-        int r;
-
-        /* This one will create a cgroup in our private tree, but also
-         * duplicate it in the trees specified in mask, and remove it
-         * in all others.
-         *
-         * Returns 0 if the group already existed in the systemd hierarchy,
-         * 1 on success, negative otherwise.
-         */
-
-        /* First create the cgroup in our own hierarchy. */
-        r = cg_create(SYSTEMD_CGROUP_CONTROLLER, path);
-        if (r < 0)
-                return r;
-        created = r;
-
-        /* If we are in the unified hierarchy, we are done now */
-        r = cg_all_unified();
-        if (r < 0)
-                return r;
-        if (r > 0)
-                return created;
-
-        supported &= CGROUP_MASK_V1;
-        mask = CGROUP_MASK_EXTEND_JOINED(mask);
-        done = 0;
-
-        /* Otherwise, do the same in the other hierarchies */
-        for (c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
-                CGroupMask bit = CGROUP_CONTROLLER_TO_MASK(c);
-                const char *n;
-
-                if (!FLAGS_SET(supported, bit))
-                        continue;
-
-                if (FLAGS_SET(done, bit))
-                        continue;
-
-                n = cgroup_controller_to_string(c);
-                if (FLAGS_SET(mask, bit))
-                        (void) cg_create(n, path);
-                else
-                        (void) cg_trim(n, path, true);
-
-                done |= CGROUP_MASK_EXTEND_JOINED(bit);
-        }
-
-        return created;
-}
-
-int cg_attach_everywhere(CGroupMask supported, const char *path, pid_t pid, cg_migrate_callback_t path_callback, void *userdata) {
-        CGroupController c;
-        CGroupMask done;
-        int r;
-
-        r = cg_attach(SYSTEMD_CGROUP_CONTROLLER, path, pid);
-        if (r < 0)
-                return r;
-
-        r = cg_all_unified();
-        if (r < 0)
-                return r;
-        if (r > 0)
-                return 0;
-
-        supported &= CGROUP_MASK_V1;
-        done = 0;
-
-        for (c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
-                CGroupMask bit = CGROUP_CONTROLLER_TO_MASK(c);
-                const char *p = NULL;
-
-                if (!FLAGS_SET(supported, bit))
-                        continue;
-
-                if (FLAGS_SET(done, bit))
-                        continue;
-
-                if (path_callback)
-                        p = path_callback(bit, userdata);
-                if (!p)
-                        p = path;
-
-                (void) cg_attach_fallback(cgroup_controller_to_string(c), p, pid);
-                done |= CGROUP_MASK_EXTEND_JOINED(bit);
-        }
+        if (mode & CG_KEY_MODE_GRACEFUL)
+                return n_done;
 
         return 0;
-}
-
-int cg_attach_many_everywhere(CGroupMask supported, const char *path, Set* pids, cg_migrate_callback_t path_callback, void *userdata) {
-        Iterator i;
-        void *pidp;
-        int r = 0;
-
-        SET_FOREACH(pidp, pids, i) {
-                pid_t pid = PTR_TO_PID(pidp);
-                int q;
-
-                q = cg_attach_everywhere(supported, path, pid, path_callback, userdata);
-                if (q < 0 && r >= 0)
-                        r = q;
-        }
-
-        return r;
-}
-
-int cg_migrate_everywhere(CGroupMask supported, const char *from, const char *to, cg_migrate_callback_t to_callback, void *userdata) {
-        CGroupController c;
-        CGroupMask done;
-        int r = 0, q;
-
-        if (!path_equal(from, to))  {
-                r = cg_migrate_recursive(SYSTEMD_CGROUP_CONTROLLER, from, SYSTEMD_CGROUP_CONTROLLER, to, CGROUP_REMOVE);
-                if (r < 0)
-                        return r;
-        }
-
-        q = cg_all_unified();
-        if (q < 0)
-                return q;
-        if (q > 0)
-                return r;
-
-        supported &= CGROUP_MASK_V1;
-        done = 0;
-
-        for (c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
-                CGroupMask bit = CGROUP_CONTROLLER_TO_MASK(c);
-                const char *p = NULL;
-
-                if (!FLAGS_SET(supported, bit))
-                        continue;
-
-                if (FLAGS_SET(done, bit))
-                        continue;
-
-                if (to_callback)
-                        p = to_callback(bit, userdata);
-                if (!p)
-                        p = to;
-
-                (void) cg_migrate_recursive_fallback(SYSTEMD_CGROUP_CONTROLLER, to, cgroup_controller_to_string(c), p, 0);
-                done |= CGROUP_MASK_EXTEND_JOINED(bit);
-        }
-
-        return r;
-}
-
-int cg_trim_everywhere(CGroupMask supported, const char *path, bool delete_root) {
-        CGroupController c;
-        CGroupMask done;
-        int r, q;
-
-        r = cg_trim(SYSTEMD_CGROUP_CONTROLLER, path, delete_root);
-        if (r < 0)
-                return r;
-
-        q = cg_all_unified();
-        if (q < 0)
-                return q;
-        if (q > 0)
-                return r;
-
-        supported &= CGROUP_MASK_V1;
-        done = 0;
-
-        for (c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
-                CGroupMask bit = CGROUP_CONTROLLER_TO_MASK(c);
-
-                if (!FLAGS_SET(supported, bit))
-                        continue;
-
-                if (FLAGS_SET(done, bit))
-                        continue;
-
-                (void) cg_trim(cgroup_controller_to_string(c), path, delete_root);
-                done |= CGROUP_MASK_EXTEND_JOINED(bit);
-        }
-
-        return r;
 }
 
 int cg_mask_to_string(CGroupMask mask, char **ret) {
         _cleanup_free_ char *s = NULL;
-        size_t n = 0, allocated = 0;
         bool space = false;
         CGroupController c;
+        size_t n = 0;
 
         assert(ret);
 
@@ -2319,7 +1910,7 @@ int cg_mask_to_string(CGroupMask mask, char **ret) {
                 k = cgroup_controller_to_string(c);
                 l = strlen(k);
 
-                if (!GREEDY_REALLOC(s, allocated, n + space + l + 1))
+                if (!GREEDY_REALLOC(s, n + space + l + 1))
                         return -ENOMEM;
 
                 if (space)
@@ -2366,7 +1957,7 @@ int cg_mask_from_string(const char *value, CGroupMask *ret) {
         return 0;
 }
 
-int cg_mask_supported(CGroupMask *ret) {
+int cg_mask_supported_subtree(const char *root, CGroupMask *ret) {
         CGroupMask mask;
         int r;
 
@@ -2378,15 +1969,10 @@ int cg_mask_supported(CGroupMask *ret) {
         if (r < 0)
                 return r;
         if (r > 0) {
-                _cleanup_free_ char *root = NULL, *controllers = NULL, *path = NULL;
+                _cleanup_free_ char *controllers = NULL, *path = NULL;
 
-                /* In the unified hierarchy we can read the supported
-                 * and accessible controllers from a the top-level
-                 * cgroup attribute */
-
-                r = cg_get_root_path(&root);
-                if (r < 0)
-                        return r;
+                /* In the unified hierarchy we can read the supported and accessible controllers from
+                 * the top-level cgroup attribute */
 
                 r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, root, "cgroup.controllers", &path);
                 if (r < 0)
@@ -2400,14 +1986,13 @@ int cg_mask_supported(CGroupMask *ret) {
                 if (r < 0)
                         return r;
 
-                /* Currently, we support the cpu, memory, io and pids controller in the unified hierarchy, mask
-                 * everything else off. */
+                /* Mask controllers that are not supported in unified hierarchy. */
                 mask &= CGROUP_MASK_V2;
 
         } else {
                 CGroupController c;
 
-                /* In the legacy hierarchy, we check which hierarchies are mounted. */
+                /* In the legacy hierarchy, we check which hierarchies are accessible. */
 
                 mask = 0;
                 for (c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
@@ -2418,7 +2003,7 @@ int cg_mask_supported(CGroupMask *ret) {
                                 continue;
 
                         n = cgroup_controller_to_string(c);
-                        if (controller_is_accessible(n) >= 0)
+                        if (controller_is_v1_accessible(root, n) >= 0)
                                 mask |= bit;
                 }
         }
@@ -2427,8 +2012,19 @@ int cg_mask_supported(CGroupMask *ret) {
         return 0;
 }
 
+int cg_mask_supported(CGroupMask *ret) {
+        _cleanup_free_ char *root = NULL;
+        int r;
+
+        r = cg_get_root_path(&root);
+        if (r < 0)
+                return r;
+
+        return cg_mask_supported_subtree(root, ret);
+}
+
 int cg_kernel_controllers(Set **ret) {
-        _cleanup_set_free_free_ Set *controllers = NULL;
+        _cleanup_set_free_ Set *controllers = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         int r;
 
@@ -2438,52 +2034,39 @@ int cg_kernel_controllers(Set **ret) {
          * and controllers that aren't currently accessible (because not mounted). This does not include "name="
          * pseudo-controllers. */
 
-        controllers = set_new(&string_hash_ops);
-        if (!controllers)
-                return -ENOMEM;
-
-        f = fopen("/proc/cgroups", "re");
-        if (!f) {
-                if (errno == ENOENT) {
-                        *ret = NULL;
-                        return 0;
-                }
-
-                return -errno;
+        r = fopen_unlocked("/proc/cgroups", "re", &f);
+        if (r == -ENOENT) {
+                *ret = NULL;
+                return 0;
         }
-
-        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
+        if (r < 0)
+                return r;
 
         /* Ignore the header line */
-        (void) read_line(f, (size_t) -1, NULL);
+        (void) read_line(f, SIZE_MAX, NULL);
 
         for (;;) {
-                char *controller;
+                _cleanup_free_ char *controller = NULL;
                 int enabled = 0;
 
-                errno = 0;
                 if (fscanf(f, "%ms %*i %*i %i", &controller, &enabled) != 2) {
+
+                        if (ferror(f))
+                                return -errno;
 
                         if (feof(f))
                                 break;
 
-                        if (ferror(f) && errno > 0)
-                                return -errno;
-
                         return -EBADMSG;
                 }
 
-                if (!enabled) {
-                        free(controller);
+                if (!enabled)
                         continue;
-                }
 
-                if (!cg_controller_is_valid(controller)) {
-                        free(controller);
+                if (!cg_controller_is_valid(controller))
                         return -EBADMSG;
-                }
 
-                r = set_consume(controllers, controller);
+                r = set_ensure_consume(&controllers, &string_hash_ops_free, TAKE_PTR(controller));
                 if (r < 0)
                         return r;
         }
@@ -2493,20 +2076,20 @@ int cg_kernel_controllers(Set **ret) {
         return 0;
 }
 
-static thread_local CGroupUnified unified_cache = CGROUP_UNIFIED_UNKNOWN;
-
-/* The hybrid mode was initially implemented in v232 and simply mounted cgroup2 on /sys/fs/cgroup/systemd.  This
- * unfortunately broke other tools (such as docker) which expected the v1 "name=systemd" hierarchy on
- * /sys/fs/cgroup/systemd.  From v233 and on, the hybrid mode mountnbs v2 on /sys/fs/cgroup/unified and maintains
- * "name=systemd" hierarchy on /sys/fs/cgroup/systemd for compatibility with other tools.
+/* The hybrid mode was initially implemented in v232 and simply mounted cgroup2 on
+ * /sys/fs/cgroup/systemd. This unfortunately broke other tools (such as docker) which expected the v1
+ * "name=systemd" hierarchy on /sys/fs/cgroup/systemd. From v233 and on, the hybrid mode mounts v2 on
+ * /sys/fs/cgroup/unified and maintains "name=systemd" hierarchy on /sys/fs/cgroup/systemd for compatibility
+ * with other tools.
  *
- * To keep live upgrade working, we detect and support v232 layout.  When v232 layout is detected, to keep cgroup v2
- * process management but disable the compat dual layout, we return %true on
- * cg_unified_controller(SYSTEMD_CGROUP_CONTROLLER) and %false on cg_hybrid_unified().
+ * To keep live upgrade working, we detect and support v232 layout. When v232 layout is detected, to keep
+ * cgroup v2 process management but disable the compat dual layout, we return true on
+ * cg_unified_controller(SYSTEMD_CGROUP_CONTROLLER) and false on cg_hybrid_unified().
  */
 static thread_local bool unified_systemd_v232;
 
-static int cg_unified_update(void) {
+int cg_unified_cached(bool flush) {
+        static thread_local CGroupUnified unified_cache = CGROUP_UNIFIED_UNKNOWN;
 
         struct statfs fs;
 
@@ -2515,8 +2098,10 @@ static int cg_unified_update(void) {
          * have any other trouble determining if the unified hierarchy
          * is supported. */
 
-        if (unified_cache >= CGROUP_UNIFIED_NONE)
-                return 0;
+        if (flush)
+                unified_cache = CGROUP_UNIFIED_UNKNOWN;
+        else if (unified_cache >= CGROUP_UNIFIED_NONE)
+                return unified_cache;
 
         if (statfs("/sys/fs/cgroup/", &fs) < 0)
                 return log_debug_errno(errno, "statfs(\"/sys/fs/cgroup/\") failed: %m");
@@ -2531,8 +2116,14 @@ static int cg_unified_update(void) {
                         unified_cache = CGROUP_UNIFIED_SYSTEMD;
                         unified_systemd_v232 = false;
                 } else {
-                        if (statfs("/sys/fs/cgroup/systemd/", &fs) < 0)
+                        if (statfs("/sys/fs/cgroup/systemd/", &fs) < 0) {
+                                if (errno == ENOENT) {
+                                        /* Some other software may have set up /sys/fs/cgroup in a configuration we do not recognize. */
+                                        log_debug_errno(errno, "Unsupported cgroupsv1 setup detected: name=systemd hierarchy not found.");
+                                        return -ENOMEDIUM;
+                                }
                                 return log_debug_errno(errno, "statfs(\"/sys/fs/cgroup/systemd\" failed: %m");
+                        }
 
                         if (F_TYPE_EQUAL(fs.f_type, CGROUP2_SUPER_MAGIC)) {
                                 log_debug("Found cgroup2 on /sys/fs/cgroup/systemd, unified hierarchy for systemd controller (v232 variant)");
@@ -2547,25 +2138,28 @@ static int cg_unified_update(void) {
                                 unified_cache = CGROUP_UNIFIED_NONE;
                         }
                 }
+        } else if (F_TYPE_EQUAL(fs.f_type, SYSFS_MAGIC)) {
+                return log_debug_errno(SYNTHETIC_ERRNO(ENOMEDIUM),
+                                       "No filesystem is currently mounted on /sys/fs/cgroup.");
         } else
                 return log_debug_errno(SYNTHETIC_ERRNO(ENOMEDIUM),
                                        "Unknown filesystem type %llx mounted on /sys/fs/cgroup.",
                                        (unsigned long long)fs.f_type);
 
-        return 0;
+        return unified_cache;
 }
 
 int cg_unified_controller(const char *controller) {
         int r;
 
-        r = cg_unified_update();
+        r = cg_unified_cached(false);
         if (r < 0)
                 return r;
 
-        if (unified_cache == CGROUP_UNIFIED_NONE)
+        if (r == CGROUP_UNIFIED_NONE)
                 return false;
 
-        if (unified_cache >= CGROUP_UNIFIED_ALL)
+        if (r >= CGROUP_UNIFIED_ALL)
                 return true;
 
         return streq_ptr(controller, SYSTEMD_CGROUP_CONTROLLER);
@@ -2574,231 +2168,62 @@ int cg_unified_controller(const char *controller) {
 int cg_all_unified(void) {
         int r;
 
-        r = cg_unified_update();
+        r = cg_unified_cached(false);
         if (r < 0)
                 return r;
 
-        return unified_cache >= CGROUP_UNIFIED_ALL;
+        return r >= CGROUP_UNIFIED_ALL;
 }
 
 int cg_hybrid_unified(void) {
         int r;
 
-        r = cg_unified_update();
+        r = cg_unified_cached(false);
         if (r < 0)
                 return r;
 
-        return unified_cache == CGROUP_UNIFIED_SYSTEMD && !unified_systemd_v232;
+        return r == CGROUP_UNIFIED_SYSTEMD && !unified_systemd_v232;
 }
 
-int cg_unified_flush(void) {
-        unified_cache = CGROUP_UNIFIED_UNKNOWN;
-
-        return cg_unified_update();
-}
-
-int cg_enable_everywhere(
-                CGroupMask supported,
-                CGroupMask mask,
-                const char *p,
-                CGroupMask *ret_result_mask) {
-
-        _cleanup_fclose_ FILE *f = NULL;
-        _cleanup_free_ char *fs = NULL;
-        CGroupController c;
-        CGroupMask ret = 0;
+int cg_is_delegated(const char *path) {
         int r;
 
-        assert(p);
+        assert(path);
 
-        if (supported == 0) {
-                if (ret_result_mask)
-                        *ret_result_mask = 0;
-                return 0;
-        }
-
-        r = cg_all_unified();
-        if (r < 0)
-                return r;
-        if (r == 0) {
-                /* On the legacy hiearchy there's no concept of "enabling" controllers in cgroups defined. Let's claim
-                 * complete success right away. (If you wonder why we return the full mask here, rather than zero: the
-                 * caller tends to use the returned mask later on to compare if all controllers where properly joined,
-                 * and if not requeues realization. This use is the primary purpose of the return value, hence let's
-                 * minimize surprises here and reduce triggers for re-realization by always saying we fully
-                 * succeeded.) */
-                if (ret_result_mask)
-                        *ret_result_mask = mask & supported & CGROUP_MASK_V2; /* If you wonder why we mask this with
-                                                                               * CGROUP_MASK_V2: The 'supported' mask
-                                                                               * might contain pure-V1 or BPF
-                                                                               * controllers, and we never want to
-                                                                               * claim that we could enable those with
-                                                                               * cgroup.subtree_control */
-                return 0;
-        }
-
-        r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, p, "cgroup.subtree_control", &fs);
-        if (r < 0)
+        r = cg_get_xattr_bool(path, "trusted.delegate");
+        if (!ERRNO_IS_NEG_XATTR_ABSENT(r))
                 return r;
 
-        for (c = 0; c < _CGROUP_CONTROLLER_MAX; c++) {
-                CGroupMask bit = CGROUP_CONTROLLER_TO_MASK(c);
-                const char *n;
-
-                if (!FLAGS_SET(CGROUP_MASK_V2, bit))
-                        continue;
-
-                if (!FLAGS_SET(supported, bit))
-                        continue;
-
-                n = cgroup_controller_to_string(c);
-                {
-                        char s[1 + strlen(n) + 1];
-
-                        s[0] = FLAGS_SET(mask, bit) ? '+' : '-';
-                        strcpy(s + 1, n);
-
-                        if (!f) {
-                                f = fopen(fs, "we");
-                                if (!f)
-                                        return log_debug_errno(errno, "Failed to open cgroup.subtree_control file of %s: %m", p);
-                        }
-
-                        r = write_string_stream(f, s, WRITE_STRING_FILE_DISABLE_BUFFER);
-                        if (r < 0) {
-                                log_debug_errno(r, "Failed to %s controller %s for %s (%s): %m",
-                                                FLAGS_SET(mask, bit) ? "enable" : "disable", n, p, fs);
-                                clearerr(f);
-
-                                /* If we can't turn off a controller, leave it on in the reported resulting mask. This
-                                 * happens for example when we attempt to turn off a controller up in the tree that is
-                                 * used down in the tree. */
-                                if (!FLAGS_SET(mask, bit) && r == -EBUSY) /* You might wonder why we check for EBUSY
-                                                                           * only here, and not follow the same logic
-                                                                           * for other errors such as EINVAL or
-                                                                           * EOPNOTSUPP or anything else. That's
-                                                                           * because EBUSY indicates that the
-                                                                           * controllers is currently enabled and
-                                                                           * cannot be disabled because something down
-                                                                           * the hierarchy is still using it. Any other
-                                                                           * error most likely means something like "I
-                                                                           * never heard of this controller" or
-                                                                           * similar. In the former case it's hence
-                                                                           * safe to assume the controller is still on
-                                                                           * after the failed operation, while in the
-                                                                           * latter case it's safer to assume the
-                                                                           * controller is unknown and hence certainly
-                                                                           * not enabled. */
-                                        ret |= bit;
-                        } else {
-                                /* Otherwise, if we managed to turn on a controller, set the bit reflecting that. */
-                                if (FLAGS_SET(mask, bit))
-                                        ret |= bit;
-                        }
-                }
-        }
-
-        /* Let's return the precise set of controllers now enabled for the cgroup. */
-        if (ret_result_mask)
-                *ret_result_mask = ret;
-
-        return 0;
+        /* If the trusted xattr isn't set (preferred), then check the untrusted one. Under the assumption
+         * that whoever is trusted enough to own the cgroup, is also trusted enough to decide if it is
+         * delegated or not this should be safe. */
+        r = cg_get_xattr_bool(path, "user.delegate");
+        return ERRNO_IS_NEG_XATTR_ABSENT(r) ? false : r;
 }
 
-bool cg_is_unified_wanted(void) {
-        static thread_local int wanted = -1;
-        int r;
-        bool b;
-        const bool is_default = DEFAULT_HIERARCHY == CGROUP_UNIFIED_ALL;
-        _cleanup_free_ char *c = NULL;
-
-        /* If we have a cached value, return that. */
-        if (wanted >= 0)
-                return wanted;
-
-        /* If the hierarchy is already mounted, then follow whatever
-         * was chosen for it. */
-        if (cg_unified_flush() >= 0)
-                return (wanted = unified_cache >= CGROUP_UNIFIED_ALL);
-
-        /* If we were explicitly passed systemd.unified_cgroup_hierarchy,
-         * respect that. */
-        r = proc_cmdline_get_bool("systemd.unified_cgroup_hierarchy", &b);
-        if (r > 0)
-                return (wanted = b);
-
-        /* If we passed cgroup_no_v1=all with no other instructions, it seems
-         * highly unlikely that we want to use hybrid or legacy hierarchy. */
-        r = proc_cmdline_get_key("cgroup_no_v1", 0, &c);
-        if (r > 0 && streq_ptr(c, "all"))
-                return (wanted = true);
-
-        return (wanted = is_default);
-}
-
-bool cg_is_legacy_wanted(void) {
-        static thread_local int wanted = -1;
-
-        /* If we have a cached value, return that. */
-        if (wanted >= 0)
-                return wanted;
-
-        /* Check if we have cgroup v2 already mounted. */
-        if (cg_unified_flush() >= 0 &&
-            unified_cache == CGROUP_UNIFIED_ALL)
-                return (wanted = false);
-
-        /* Otherwise, assume that at least partial legacy is wanted,
-         * since cgroup v2 should already be mounted at this point. */
-        return (wanted = true);
-}
-
-bool cg_is_hybrid_wanted(void) {
-        static thread_local int wanted = -1;
-        int r;
-        bool b;
-        const bool is_default = DEFAULT_HIERARCHY >= CGROUP_UNIFIED_SYSTEMD;
-        /* We default to true if the default is "hybrid", obviously,
-         * but also when the default is "unified", because if we get
-         * called, it means that unified hierarchy was not mounted. */
-
-        /* If we have a cached value, return that. */
-        if (wanted >= 0)
-                return wanted;
-
-        /* If the hierarchy is already mounted, then follow whatever
-         * was chosen for it. */
-        if (cg_unified_flush() >= 0 &&
-            unified_cache == CGROUP_UNIFIED_ALL)
-                return (wanted = false);
-
-        /* Otherwise, let's see what the kernel command line has to say.
-         * Since checking is expensive, cache a non-error result. */
-        r = proc_cmdline_get_bool("systemd.legacy_systemd_cgroup_controller", &b);
-
-        /* The meaning of the kernel option is reversed wrt. to the return value
-         * of this function, hence the negation. */
-        return (wanted = r > 0 ? !b : is_default);
-}
-
-int cg_weight_parse(const char *s, uint64_t *ret) {
-        uint64_t u;
+int cg_is_delegated_fd(int fd) {
         int r;
 
-        if (isempty(s)) {
-                *ret = CGROUP_WEIGHT_INVALID;
-                return 0;
-        }
+        assert(fd >= 0);
 
-        r = safe_atou64(s, &u);
-        if (r < 0)
+        r = getxattr_at_bool(fd, /* path= */ NULL, "trusted.delegate", /* flags= */ 0);
+        if (!ERRNO_IS_NEG_XATTR_ABSENT(r))
                 return r;
 
-        if (u < CGROUP_WEIGHT_MIN || u > CGROUP_WEIGHT_MAX)
-                return -ERANGE;
+        r = getxattr_at_bool(fd, /* path= */ NULL, "user.delegate", /* flags= */ 0);
+        return ERRNO_IS_NEG_XATTR_ABSENT(r) ? false : r;
+}
 
-        *ret = u;
-        return 0;
+int cg_has_coredump_receive(const char *path) {
+        int r;
+
+        assert(path);
+
+        r = cg_get_xattr_bool(path, "user.coredump_receive");
+        if (ERRNO_IS_NEG_XATTR_ABSENT(r))
+                return false;
+
+        return r;
 }
 
 const uint64_t cgroup_io_limit_defaults[_CGROUP_IO_LIMIT_TYPE_MAX] = {
@@ -2817,46 +2242,6 @@ static const char* const cgroup_io_limit_type_table[_CGROUP_IO_LIMIT_TYPE_MAX] =
 
 DEFINE_STRING_TABLE_LOOKUP(cgroup_io_limit_type, CGroupIOLimitType);
 
-int cg_cpu_shares_parse(const char *s, uint64_t *ret) {
-        uint64_t u;
-        int r;
-
-        if (isempty(s)) {
-                *ret = CGROUP_CPU_SHARES_INVALID;
-                return 0;
-        }
-
-        r = safe_atou64(s, &u);
-        if (r < 0)
-                return r;
-
-        if (u < CGROUP_CPU_SHARES_MIN || u > CGROUP_CPU_SHARES_MAX)
-                return -ERANGE;
-
-        *ret = u;
-        return 0;
-}
-
-int cg_blkio_weight_parse(const char *s, uint64_t *ret) {
-        uint64_t u;
-        int r;
-
-        if (isempty(s)) {
-                *ret = CGROUP_BLKIO_WEIGHT_INVALID;
-                return 0;
-        }
-
-        r = safe_atou64(s, &u);
-        if (r < 0)
-                return r;
-
-        if (u < CGROUP_BLKIO_WEIGHT_MIN || u > CGROUP_BLKIO_WEIGHT_MAX)
-                return -ERANGE;
-
-        *ret = u;
-        return 0;
-}
-
 bool is_cgroup_fs(const struct statfs *s) {
         return is_fs_type(s, CGROUP_SUPER_MAGIC) ||
                is_fs_type(s, CGROUP2_SUPER_MAGIC);
@@ -2871,9 +2256,10 @@ bool fd_is_cgroup_fs(int fd) {
         return is_cgroup_fs(&s);
 }
 
-static const char *cgroup_controller_table[_CGROUP_CONTROLLER_MAX] = {
+static const char *const cgroup_controller_table[_CGROUP_CONTROLLER_MAX] = {
         [CGROUP_CONTROLLER_CPU] = "cpu",
         [CGROUP_CONTROLLER_CPUACCT] = "cpuacct",
+        [CGROUP_CONTROLLER_CPUSET] = "cpuset",
         [CGROUP_CONTROLLER_IO] = "io",
         [CGROUP_CONTROLLER_BLKIO] = "blkio",
         [CGROUP_CONTROLLER_MEMORY] = "memory",
@@ -2881,6 +2267,9 @@ static const char *cgroup_controller_table[_CGROUP_CONTROLLER_MAX] = {
         [CGROUP_CONTROLLER_PIDS] = "pids",
         [CGROUP_CONTROLLER_BPF_FIREWALL] = "bpf-firewall",
         [CGROUP_CONTROLLER_BPF_DEVICES] = "bpf-devices",
+        [CGROUP_CONTROLLER_BPF_FOREIGN] = "bpf-foreign",
+        [CGROUP_CONTROLLER_BPF_SOCKET_BIND] = "bpf-socket-bind",
+        [CGROUP_CONTROLLER_BPF_RESTRICT_NETWORK_INTERFACES] = "bpf-restrict-network-interfaces",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(cgroup_controller, CGroupController);
@@ -2921,7 +2310,7 @@ CGroupMask get_cpu_accounting_mask(void) {
                         struct utsname u;
                         assert_se(uname(&u) >= 0);
 
-                        if (str_verscmp(u.release, "4.15") < 0)
+                        if (strverscmp_improved(u.release, "4.15") < 0)
                                 needed_mask = CGROUP_MASK_CPU;
                         else
                                 needed_mask = 0;
@@ -2935,3 +2324,18 @@ CGroupMask get_cpu_accounting_mask(void) {
 bool cpu_accounting_is_cheap(void) {
         return get_cpu_accounting_mask() == 0;
 }
+
+static const char* const managed_oom_mode_table[_MANAGED_OOM_MODE_MAX] = {
+        [MANAGED_OOM_AUTO] = "auto",
+        [MANAGED_OOM_KILL] = "kill",
+};
+
+DEFINE_STRING_TABLE_LOOKUP(managed_oom_mode, ManagedOOMMode);
+
+static const char* const managed_oom_preference_table[_MANAGED_OOM_PREFERENCE_MAX] = {
+        [MANAGED_OOM_PREFERENCE_NONE] = "none",
+        [MANAGED_OOM_PREFERENCE_AVOID] = "avoid",
+        [MANAGED_OOM_PREFERENCE_OMIT] = "omit",
+};
+
+DEFINE_STRING_TABLE_LOOKUP(managed_oom_preference, ManagedOOMPreference);

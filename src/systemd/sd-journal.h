@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #ifndef foosdjournalhfoo
 #define foosdjournalhfoo
 
@@ -14,7 +14,7 @@
   Lesser General Public License for more details.
 
   You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
+  along with systemd; If not, see <https://www.gnu.org/licenses/>.
 ***/
 
 #include <inttypes.h>
@@ -57,6 +57,7 @@ int sd_journal_perror_with_location(const char *file, const char *line, const ch
 #endif
 
 int sd_journal_stream_fd(const char *identifier, int priority, int level_prefix);
+int sd_journal_stream_fd_with_namespace(const char *name_space, const char *identifier, int priority, int level_prefix);
 
 /* Browse journal stream */
 
@@ -64,13 +65,17 @@ typedef struct sd_journal sd_journal;
 
 /* Open flags */
 enum {
-        SD_JOURNAL_LOCAL_ONLY   = 1 << 0,
-        SD_JOURNAL_RUNTIME_ONLY = 1 << 1,
-        SD_JOURNAL_SYSTEM       = 1 << 2,
-        SD_JOURNAL_CURRENT_USER = 1 << 3,
-        SD_JOURNAL_OS_ROOT      = 1 << 4,
+        SD_JOURNAL_LOCAL_ONLY                = 1 << 0,
+        SD_JOURNAL_RUNTIME_ONLY              = 1 << 1,
+        SD_JOURNAL_SYSTEM                    = 1 << 2,
+        SD_JOURNAL_CURRENT_USER              = 1 << 3,
+        SD_JOURNAL_OS_ROOT                   = 1 << 4,
+        SD_JOURNAL_ALL_NAMESPACES            = 1 << 5, /* Show all namespaces, not just the default or specified one */
+        SD_JOURNAL_INCLUDE_DEFAULT_NAMESPACE = 1 << 6, /* Show default namespace in addition to specified one */
+        SD_JOURNAL_TAKE_DIRECTORY_FD         = 1 << 7, /* sd_journal_open_directory_fd() will take ownership of the provided file descriptor. */
+        SD_JOURNAL_ASSUME_IMMUTABLE          = 1 << 8, /* Assume the opened journal files are immutable. Journal entries added later may be ignored. */
 
-        SD_JOURNAL_SYSTEM_ONLY = SD_JOURNAL_SYSTEM /* deprecated name */
+        SD_JOURNAL_SYSTEM_ONLY _sd_deprecated_ = SD_JOURNAL_SYSTEM /* old name */
 };
 
 /* Wakeup event types */
@@ -81,27 +86,31 @@ enum {
 };
 
 int sd_journal_open(sd_journal **ret, int flags);
+int sd_journal_open_namespace(sd_journal **ret, const char *name_space, int flags);
 int sd_journal_open_directory(sd_journal **ret, const char *path, int flags);
 int sd_journal_open_directory_fd(sd_journal **ret, int fd, int flags);
 int sd_journal_open_files(sd_journal **ret, const char **paths, int flags);
 int sd_journal_open_files_fd(sd_journal **ret, int fds[], unsigned n_fds, int flags);
-int sd_journal_open_container(sd_journal **ret, const char *machine, int flags); /* deprecated */
+int sd_journal_open_container(sd_journal **ret, const char *machine, int flags) _sd_deprecated_;
 void sd_journal_close(sd_journal *j);
 
 int sd_journal_previous(sd_journal *j);
 int sd_journal_next(sd_journal *j);
+int sd_journal_step_one(sd_journal *j, int advanced);
 
 int sd_journal_previous_skip(sd_journal *j, uint64_t skip);
 int sd_journal_next_skip(sd_journal *j, uint64_t skip);
 
 int sd_journal_get_realtime_usec(sd_journal *j, uint64_t *ret);
 int sd_journal_get_monotonic_usec(sd_journal *j, uint64_t *ret, sd_id128_t *ret_boot_id);
+int sd_journal_get_seqnum(sd_journal *j, uint64_t *ret_seqnum, sd_id128_t *ret_seqnum_id);
 
 int sd_journal_set_data_threshold(sd_journal *j, size_t sz);
 int sd_journal_get_data_threshold(sd_journal *j, size_t *sz);
 
 int sd_journal_get_data(sd_journal *j, const char *field, const void **data, size_t *l);
 int sd_journal_enumerate_data(sd_journal *j, const void **data, size_t *l);
+int sd_journal_enumerate_available_data(sd_journal *j, const void **data, size_t *l);
 void sd_journal_restart_data(sd_journal *j);
 
 int sd_journal_add_match(sd_journal *j, const void *data, size_t size);
@@ -125,6 +134,7 @@ int sd_journal_get_usage(sd_journal *j, uint64_t *bytes);
 
 int sd_journal_query_unique(sd_journal *j, const char *field);
 int sd_journal_enumerate_unique(sd_journal *j, const void **data, size_t *l);
+int sd_journal_enumerate_available_unique(sd_journal *j, const void **data, size_t *l);
 void sd_journal_restart_unique(sd_journal *j);
 
 int sd_journal_enumerate_fields(sd_journal *j, const char **field);
@@ -153,13 +163,13 @@ int sd_journal_has_persistent_files(sd_journal *j);
         if (sd_journal_seek_tail(j) < 0) { }                            \
         else while (sd_journal_previous(j) > 0)
 
-/* Iterate through the data fields of the current journal entry */
+/* Iterate through all available data fields of the current journal entry */
 #define SD_JOURNAL_FOREACH_DATA(j, data, l)                             \
-        for (sd_journal_restart_data(j); sd_journal_enumerate_data((j), &(data), &(l)) > 0; )
+        for (sd_journal_restart_data(j); sd_journal_enumerate_available_data((j), &(data), &(l)) > 0; )
 
-/* Iterate through the all known values of a specific field */
+/* Iterate through all available values of a specific field */
 #define SD_JOURNAL_FOREACH_UNIQUE(j, data, l)                           \
-        for (sd_journal_restart_unique(j); sd_journal_enumerate_unique((j), &(data), &(l)) > 0; )
+        for (sd_journal_restart_unique(j); sd_journal_enumerate_available_unique((j), &(data), &(l)) > 0; )
 
 /* Iterate through all known field names */
 #define SD_JOURNAL_FOREACH_FIELD(j, field) \

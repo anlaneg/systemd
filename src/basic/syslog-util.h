@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include <stdbool.h>
@@ -12,3 +12,5 @@ int log_level_from_string(const char *s);
 bool log_level_is_valid(int level);
 
 int syslog_parse_priority(const char **p, int *priority, bool with_facility);
+
+bool log_namespace_name_valid(const char *s);

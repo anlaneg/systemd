@@ -1,134 +1,93 @@
-# SPDX-License-Identifier: LGPL-2.1+
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
-libcore_la_sources = '''
-        audit-fd.c
-        audit-fd.h
-        automount.c
-        automount.h
-        bpf-devices.c
-        bpf-devices.h
-        bpf-firewall.c
-        bpf-firewall.h
-        cgroup.c
-        cgroup.h
-        chown-recursive.c
-        chown-recursive.h
-        dbus-automount.c
-        dbus-automount.h
-        dbus-cgroup.c
-        dbus-cgroup.h
-        dbus-device.c
-        dbus-device.h
-        dbus-execute.c
-        dbus-execute.h
-        dbus-job.c
-        dbus-job.h
-        dbus-kill.c
-        dbus-kill.h
-        dbus-manager.c
-        dbus-manager.h
-        dbus-mount.c
-        dbus-mount.h
-        dbus-path.c
-        dbus-path.h
-        dbus-scope.c
-        dbus-scope.h
-        dbus-service.c
-        dbus-service.h
-        dbus-slice.c
-        dbus-slice.h
-        dbus-socket.c
-        dbus-socket.h
-        dbus-swap.c
-        dbus-swap.h
-        dbus-target.c
-        dbus-target.h
-        dbus-timer.c
-        dbus-timer.h
-        dbus-unit.c
-        dbus-unit.h
-        dbus-util.c
-        dbus-util.h
-        dbus.c
-        dbus.h
-        device.c
-        device.h
-        dynamic-user.c
-        dynamic-user.h
-        emergency-action.c
-        emergency-action.h
-        execute.c
-        execute.h
-        hostname-setup.c
-        hostname-setup.h
-        ima-setup.c
-        ima-setup.h
-        ip-address-access.c
-        ip-address-access.h
-        job.c
-        job.h
-        kill.c
-        kill.h
-        killall.c
-        killall.h
-        kmod-setup.c
-        kmod-setup.h
-        load-dropin.c
-        load-dropin.h
-        load-fragment.c
-        load-fragment.h
-        locale-setup.c
-        locale-setup.h
-        loopback-setup.c
-        loopback-setup.h
-        machine-id-setup.c
-        machine-id-setup.h
-        manager.c
-        manager.h
-        mount-setup.c
-        mount-setup.h
-        mount.c
-        mount.h
-        namespace.c
-        namespace.h
-        path.c
-        path.h
-        scope.c
-        scope.h
-        selinux-access.c
-        selinux-access.h
-        selinux-setup.c
-        selinux-setup.h
-        service.c
-        service.h
-        show-status.c
-        show-status.h
-        slice.c
-        slice.h
-        smack-setup.c
-        smack-setup.h
-        socket.c
-        socket.h
-        swap.c
-        swap.h
-        target.c
-        target.h
-        timer.c
-        timer.h
-        transaction.c
-        transaction.h
-        unit-printf.c
-        unit-printf.h
-        unit.c
-        unit.h
-'''.split()
+libcore_sources = files(
+        'audit-fd.c',
+        'automount.c',
+        'bpf-devices.c',
+        'bpf-firewall.c',
+        'bpf-foreign.c',
+        'bpf-restrict-fs.c',
+        'bpf-restrict-ifaces.c',
+        'bpf-socket-bind.c',
+        'cgroup.c',
+        'core-varlink.c',
+        'dbus-automount.c',
+        'dbus-cgroup.c',
+        'dbus-device.c',
+        'dbus-execute.c',
+        'dbus-job.c',
+        'dbus-kill.c',
+        'dbus-manager.c',
+        'dbus-mount.c',
+        'dbus-path.c',
+        'dbus-scope.c',
+        'dbus-service.c',
+        'dbus-slice.c',
+        'dbus-socket.c',
+        'dbus-swap.c',
+        'dbus-target.c',
+        'dbus-timer.c',
+        'dbus-unit.c',
+        'dbus-util.c',
+        'dbus.c',
+        'device.c',
+        'dynamic-user.c',
+        'efi-random.c',
+        'emergency-action.c',
+        'exec-credential.c',
+        'execute.c',
+        'execute-serialize.c',
+        'generator-setup.c',
+        'import-creds.c',
+        'job.c',
+        'kill.c',
+        'load-dropin.c',
+        'load-fragment.c',
+        'manager-dump.c',
+        'manager-serialize.c',
+        'manager.c',
+        'mount.c',
+        'namespace.c',
+        'path.c',
+        'scope.c',
+        'selinux-access.c',
+        'service.c',
+        'show-status.c',
+        'slice.c',
+        'socket.c',
+        'swap.c',
+        'taint.c',
+        'target.c',
+        'timer.c',
+        'transaction.c',
+        'unit-dependency-atom.c',
+        'unit-printf.c',
+        'unit-serialize.c',
+        'unit.c',
+)
+
+if conf.get('BPF_FRAMEWORK') == 1
+        libcore_sources += files(
+                'bpf-util.c',
+        )
+endif
+
+subdir('bpf/socket_bind')
+subdir('bpf/restrict_fs')
+subdir('bpf/restrict_ifaces')
+
+if conf.get('BPF_FRAMEWORK') == 1
+        libcore_sources += [
+                socket_bind_skel_h,
+                restrict_fs_skel_h,
+                restrict_ifaces_skel_h]
+endif
 
 load_fragment_gperf_gperf = custom_target(
         'load-fragment-gperf.gperf',
-        input : 'load-fragment-gperf.gperf.m4',
+        input : 'load-fragment-gperf.gperf.in',
         output: 'load-fragment-gperf.gperf',
-        command : [meson_apply_m4, config_h, '@INPUT@'],
-        capture : true)
+        command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'])
 
 load_fragment_gperf_c = custom_target(
         'load-fragment-gperf.c',
@@ -144,76 +103,178 @@ load_fragment_gperf_nulstr_c = custom_target(
         command : [awk, '-f', '@INPUT0@', '@INPUT1@'],
         capture : true)
 
-libcore = static_library(
-        'core',
-        libcore_la_sources,
+libcore_name = 'systemd-core-@0@'.format(shared_lib_tag)
+
+libcore_static = static_library(
+        libcore_name,
+        libcore_sources,
         load_fragment_gperf_c,
         load_fragment_gperf_nulstr_c,
         include_directories : includes,
-        dependencies : [versiondep,
-                        threads,
+        c_args : ['-fvisibility=default'],
+        dependencies : [libacl,
+                        libaudit,
+                        libblkid,
+                        libdl,
+                        libm,
+                        libmount,
+                        libpam,
                         librt,
                         libseccomp,
-                        libpam,
-                        libaudit,
-                        libkmod,
-                        libapparmor,
                         libselinux,
-                        libmount])
+                        threads,
+                        userspace],
+        build_by_default : false)
 
-systemd_sources = files('main.c')
+libcore = shared_library(
+        libcore_name,
+        c_args : ['-fvisibility=default'],
+        link_args : ['-shared',
+                     '-Wl,--version-script=' + libshared_sym_path],
+        link_depends : libshared_sym_path,
+        link_whole: libcore_static,
+        link_with : libshared,
+        install : true,
+        install_dir : pkglibdir)
 
-systemd_shutdown_sources = files('''
-        shutdown.c
-        umount.c
-        umount.h
-        mount-setup.c
-        mount-setup.h
-        killall.c
-        killall.h
-'''.split())
+core_includes = [includes, include_directories('.')]
 
-in_files = [['macros.systemd',   rpmmacrosdir],
-            ['system.conf',      pkgsysconfdir],
-            ['systemd.pc',       pkgconfigdatadir],
-            ['triggers.systemd', '']]
+systemd_sources = files(
+        'main.c',
+        'crash-handler.c',
+        'clock-warp.c',
+        'kmod-setup.c',
+        'apparmor-setup.c',
+        'ima-setup.c',
+        'ipe-setup.c',
+        'selinux-setup.c',
+        'smack-setup.c',
+)
+
+systemd_executor_sources = files(
+        'executor.c',
+        'exec-invoke.c',
+)
+
+executor_libs = get_option('link-executor-shared') ? \
+        [
+                libcore,
+                libshared,
+        ] : [
+                libcore_static,
+                libshared_static,
+                libbasic_static,
+                libsystemd_static,
+        ]
+
+executables += [
+        libexec_template + {
+                'name' : 'systemd',
+                'dbus' : true,
+                'public' : true,
+                'sources' : systemd_sources,
+                'link_with' : [
+                        libcore,
+                        libshared,
+                ],
+                'dependencies' : [
+                        libapparmor,
+                        libkmod_cflags,
+                        libseccomp,
+                        libselinux,
+                ],
+        },
+        libexec_template + {
+                'name' : 'systemd-executor',
+                'public' : true,
+                'sources' : systemd_executor_sources,
+                'include_directories' : core_includes,
+                'link_with' : executor_libs,
+                'dependencies' : [
+                        libapparmor,
+                        libpam,
+                        libseccomp,
+                        libselinux,
+                ],
+        },
+        fuzz_template + {
+                'sources' : files('fuzz-unit-file.c'),
+                'link_with' : [
+                        libcore,
+                        libshared
+                ],
+                'dependencies' : libmount,
+        },
+        fuzz_template + {
+                'sources' : files('fuzz-manager-serialize.c'),
+                'link_with' : [
+                        libcore,
+                        libshared
+                ],
+        },
+        fuzz_template + {
+                'sources' : files('fuzz-execute-serialize.c'),
+                'link_with' : [
+                        libcore,
+                        libshared
+                ],
+        },
+]
+
+in_files = [['system.conf',                     pkgconfigfiledir],
+            ['user.conf',                       pkgconfigfiledir],
+            ['org.freedesktop.systemd1.policy', polkitpolicydir]]
 
 foreach item : in_files
         file = item[0]
         dir = item[1]
 
-        configure_file(
+        custom_target(
+                file,
                 input : file + '.in',
-                output : file,
-                configuration : substs,
-                install_dir : dir == 'no' ? '' : dir)
+                output: file,
+                command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
+                install : (dir == pkgconfigfiledir) ? install_sysconfdir_samples : (dir != 'no'),
+                install_dir : dir)
 endforeach
+
+systemd_pc = custom_target(
+        'systemd.pc',
+        input : 'systemd.pc.in',
+        output : 'systemd.pc',
+        command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
+        install : pkgconfigdatadir != 'no',
+        install_tag : 'devel',
+        install_dir : pkgconfigdatadir)
 
 install_data('org.freedesktop.systemd1.conf',
              install_dir : dbuspolicydir)
 install_data('org.freedesktop.systemd1.service',
              install_dir : dbussystemservicedir)
 
-policy = configure_file(
-        input : 'org.freedesktop.systemd1.policy.in',
-        output : 'org.freedesktop.systemd1.policy',
-        configuration : substs)
-install_data(policy,
-             install_dir : polkitpolicydir)
+install_emptydir(systemshutdowndir)
+install_emptydir(systemsleepdir)
+install_emptydir(systemgeneratordir)
+install_emptydir(usergeneratordir)
 
-install_data('user.conf',
-             install_dir : pkgsysconfdir)
+if install_sysconfdir
+        install_emptydir(pkgsysconfdir / 'system')
+        install_emptydir(pkgsysconfdir / 'user')
+        install_emptydir(sysconfdir / 'xdg/systemd')
+        meson.add_install_script(sh, '-c', ln_s.format(pkgsysconfdir / 'user',
+                                                       sysconfdir / 'xdg/systemd/user'))
+endif
 
-meson.add_install_script('sh', '-c', mkdir_p.format(systemshutdowndir))
-meson.add_install_script('sh', '-c', mkdir_p.format(systemsleepdir))
-meson.add_install_script('sh', '-c', mkdir_p.format(systemgeneratordir))
-meson.add_install_script('sh', '-c', mkdir_p.format(usergeneratordir))
+install_emptydir(sbindir)
+meson.add_install_script(sh, '-c', ln_s.format(libexecdir / 'systemd', sbindir / 'init'))
 
-meson.add_install_script('sh', '-c',
-                         mkdir_p.format(join_paths(pkgsysconfdir, 'system/multi-user.target.wants')))
-meson.add_install_script('sh', '-c',
-                         mkdir_p.format(join_paths(pkgsysconfdir, 'system/getty.target.wants')))
-meson.add_install_script('sh', '-c',
-                         mkdir_p.format(join_paths(pkgsysconfdir, 'user')))
-meson.add_install_script('sh', '-c',
-                         mkdir_p.format(join_paths(sysconfdir, 'xdg/systemd')))
+############################################################
+
+core_test_template = test_template + {
+        'link_with' : [
+                libcore,
+                libshared,
+        ],
+        'include_directories' : core_includes,
+        'suite' : 'core',
+}

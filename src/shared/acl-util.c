@@ -1,21 +1,26 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <stdbool.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include "acl-util.h"
 #include "alloc-util.h"
+#include "errno-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "user-util.h"
-#include "util.h"
 
-int acl_find_uid(acl_t acl, uid_t uid, acl_entry_t *entry) {
+#if HAVE_ACL
+
+int acl_find_uid(acl_t acl, uid_t uid, acl_entry_t *ret_entry) {
         acl_entry_t i;
         int r;
 
         assert(acl);
-        assert(entry);
+        assert(uid_is_valid(uid));
+        assert(ret_entry);
 
         for (r = acl_get_entry(acl, ACL_FIRST_ENTRY, &i);
              r > 0;
@@ -39,13 +44,14 @@ int acl_find_uid(acl_t acl, uid_t uid, acl_entry_t *entry) {
                 acl_free(u);
 
                 if (b) {
-                        *entry = i;
+                        *ret_entry = i;
                         return 1;
                 }
         }
         if (r < 0)
                 return -errno;
 
+        *ret_entry = NULL;
         return 0;
 }
 
@@ -87,6 +93,7 @@ int add_base_acls_if_needed(acl_t *acl_p, const char *path) {
         _cleanup_(acl_freep) acl_t basic = NULL;
 
         assert(acl_p);
+        assert(path);
 
         for (r = acl_get_entry(*acl_p, ACL_FIRST_ENTRY, &i);
              r > 0;
@@ -205,31 +212,65 @@ int acl_search_groups(const char *path, char ***ret_groups) {
         return ret;
 }
 
-int parse_acl(const char *text, acl_t *acl_access, acl_t *acl_default, bool want_mask) {
-        _cleanup_free_ char **a = NULL, **d = NULL; /* strings are not freed */
-        _cleanup_strv_free_ char **split;
-        char **entry;
-        int r = -EINVAL;
-        _cleanup_(acl_freep) acl_t a_acl = NULL, d_acl = NULL;
+int parse_acl(
+                const char *text,
+                acl_t *ret_acl_access,
+                acl_t *ret_acl_access_exec, /* extra rules to apply to inodes subject to uppercase X handling */
+                acl_t *ret_acl_default,
+                bool want_mask) {
+
+        _cleanup_strv_free_ char **a = NULL, **e = NULL, **d = NULL, **split = NULL;
+        _cleanup_(acl_freep) acl_t a_acl = NULL, e_acl = NULL, d_acl = NULL;
+        int r;
+
+        assert(text);
+        assert(ret_acl_access);
+        assert(ret_acl_access_exec);
+        assert(ret_acl_default);
 
         split = strv_split(text, ",");
         if (!split)
                 return -ENOMEM;
 
         STRV_FOREACH(entry, split) {
-                char *p;
+                _cleanup_strv_free_ char **entry_split = NULL;
+                _cleanup_free_ char *entry_join = NULL;
+                int n;
 
-                p = STARTSWITH_SET(*entry, "default:", "d:");
-                if (p)
-                        r = strv_push(&d, p);
-                else
-                        r = strv_push(&a, *entry);
+                n = strv_split_full(&entry_split, *entry, ":", EXTRACT_DONT_COALESCE_SEPARATORS|EXTRACT_RETAIN_ESCAPE);
+                if (n < 0)
+                        return n;
+
+                if (n < 3 || n > 4)
+                        return -EINVAL;
+
+                string_replace_char(entry_split[n-1], 'X', 'x');
+
+                if (n == 4) {
+                        if (!STR_IN_SET(entry_split[0], "default", "d"))
+                                return -EINVAL;
+
+                        entry_join = strv_join(entry_split + 1, ":");
+                        if (!entry_join)
+                                return -ENOMEM;
+
+                        r = strv_consume(&d, TAKE_PTR(entry_join));
+                } else { /* n == 3 */
+                        entry_join = strv_join(entry_split, ":");
+                        if (!entry_join)
+                                return -ENOMEM;
+
+                        if (!streq(*entry, entry_join))
+                                r = strv_consume(&e, TAKE_PTR(entry_join));
+                        else
+                                r = strv_consume(&a, TAKE_PTR(entry_join));
+                }
                 if (r < 0)
                         return r;
         }
 
         if (!strv_isempty(a)) {
-                _cleanup_free_ char *join;
+                _cleanup_free_ char *join = NULL;
 
                 join = strv_join(a, ",");
                 if (!join)
@@ -246,8 +287,22 @@ int parse_acl(const char *text, acl_t *acl_access, acl_t *acl_default, bool want
                 }
         }
 
+        if (!strv_isempty(e)) {
+                _cleanup_free_ char *join = NULL;
+
+                join = strv_join(e, ",");
+                if (!join)
+                        return -ENOMEM;
+
+                e_acl = acl_from_text(join);
+                if (!e_acl)
+                        return -errno;
+
+                /* The mask must be calculated after deciding whether the execute bit should be set. */
+        }
+
         if (!strv_isempty(d)) {
-                _cleanup_free_ char *join;
+                _cleanup_free_ char *join = NULL;
 
                 join = strv_join(d, ",");
                 if (!join)
@@ -264,8 +319,9 @@ int parse_acl(const char *text, acl_t *acl_access, acl_t *acl_default, bool want
                 }
         }
 
-        *acl_access = TAKE_PTR(a_acl);
-        *acl_default = TAKE_PTR(d_acl);
+        *ret_acl_access = TAKE_PTR(a_acl);
+        *ret_acl_access_exec = TAKE_PTR(e_acl);
+        *ret_acl_default = TAKE_PTR(d_acl);
 
         return 0;
 }
@@ -316,11 +372,11 @@ static int acl_entry_equal(acl_entry_t a, acl_entry_t b) {
                 return *gid_a == *gid_b;
         }
         default:
-                assert_not_reached("Unknown acl tag type");
+                assert_not_reached();
         }
 }
 
-static int find_acl_entry(acl_t acl, acl_entry_t entry, acl_entry_t *out) {
+static int find_acl_entry(acl_t acl, acl_entry_t entry, acl_entry_t *ret) {
         acl_entry_t i;
         int r;
 
@@ -332,36 +388,40 @@ static int find_acl_entry(acl_t acl, acl_entry_t entry, acl_entry_t *out) {
                 if (r < 0)
                         return r;
                 if (r > 0) {
-                        *out = i;
-                        return 1;
+                        if (ret)
+                                *ret = i;
+                        return 0;
                 }
         }
         if (r < 0)
                 return -errno;
-        return 0;
+
+        return -ENOENT;
 }
 
-int acls_for_file(const char *path, acl_type_t type, acl_t new, acl_t *acl) {
-        _cleanup_(acl_freep) acl_t old;
+int acls_for_file(const char *path, acl_type_t type, acl_t acl, acl_t *ret) {
+        _cleanup_(acl_freep) acl_t applied = NULL;
         acl_entry_t i;
         int r;
 
-        old = acl_get_file(path, type);
-        if (!old)
+        assert(path);
+
+        applied = acl_get_file(path, type);
+        if (!applied)
                 return -errno;
 
-        for (r = acl_get_entry(new, ACL_FIRST_ENTRY, &i);
+        for (r = acl_get_entry(acl, ACL_FIRST_ENTRY, &i);
              r > 0;
-             r = acl_get_entry(new, ACL_NEXT_ENTRY, &i)) {
+             r = acl_get_entry(acl, ACL_NEXT_ENTRY, &i)) {
 
                 acl_entry_t j;
 
-                r = find_acl_entry(old, i, &j);
-                if (r < 0)
-                        return r;
-                if (r == 0)
-                        if (acl_create_entry(&old, &j) < 0)
+                r = find_acl_entry(applied, i, &j);
+                if (r == -ENOENT) {
+                        if (acl_create_entry(&applied, &j) < 0)
                                 return -errno;
+                } else if (r < 0)
+                        return r;
 
                 if (acl_copy_entry(j, i) < 0)
                         return -errno;
@@ -369,16 +429,37 @@ int acls_for_file(const char *path, acl_type_t type, acl_t new, acl_t *acl) {
         if (r < 0)
                 return -errno;
 
-        *acl = TAKE_PTR(old);
+        if (ret)
+                *ret = TAKE_PTR(applied);
 
         return 0;
 }
 
-int add_acls_for_user(int fd, uid_t uid) {
+/* POSIX says that ACL_{READ,WRITE,EXECUTE} don't have to be bitmasks. But that is a natural thing to do and
+ * all extant implementations do it. Let's make sure that we fail verbosely in the (imho unlikely) scenario
+ * that we get a new implementation that does not satisfy this. */
+assert_cc(!(ACL_READ & ACL_WRITE));
+assert_cc(!(ACL_WRITE & ACL_EXECUTE));
+assert_cc(!(ACL_EXECUTE & ACL_READ));
+assert_cc((unsigned) ACL_READ == ACL_READ);
+assert_cc((unsigned) ACL_WRITE == ACL_WRITE);
+assert_cc((unsigned) ACL_EXECUTE == ACL_EXECUTE);
+
+int fd_add_uid_acl_permission(
+                int fd,
+                uid_t uid,
+                unsigned mask) {
+
         _cleanup_(acl_freep) acl_t acl = NULL;
-        acl_entry_t entry;
         acl_permset_t permset;
+        acl_entry_t entry;
         int r;
+
+        /* Adds an ACL entry for the specified file to allow the indicated access to the specified
+         * user. Operates purely incrementally. */
+
+        assert(fd >= 0);
+        assert(uid_is_valid(uid));
 
         acl = acl_get_fd(fd);
         if (!acl)
@@ -392,15 +473,180 @@ int add_acls_for_user(int fd, uid_t uid) {
                         return -errno;
         }
 
-        /* We do not recalculate the mask unconditionally here,
-         * so that the fchmod() mask above stays intact. */
-        if (acl_get_permset(entry, &permset) < 0 ||
-            acl_add_perm(permset, ACL_READ) < 0)
+        if (acl_get_permset(entry, &permset) < 0)
+                return -errno;
+
+        if ((mask & ACL_READ) && acl_add_perm(permset, ACL_READ) < 0)
+                return -errno;
+        if ((mask & ACL_WRITE) && acl_add_perm(permset, ACL_WRITE) < 0)
+                return -errno;
+        if ((mask & ACL_EXECUTE) && acl_add_perm(permset, ACL_EXECUTE) < 0)
                 return -errno;
 
         r = calc_acl_mask_if_needed(&acl);
         if (r < 0)
                 return r;
 
-        return acl_set_fd(fd, acl);
+        if (acl_set_fd(fd, acl) < 0)
+                return -errno;
+
+        return 0;
+}
+
+int fd_acl_make_read_only(int fd) {
+        _cleanup_(acl_freep) acl_t acl = NULL;
+        bool changed = false;
+        acl_entry_t i;
+        int r;
+
+        assert(fd >= 0);
+
+        /* Safely drops all W bits from all relevant ACL entries of the file, without changing entries which
+         * are masked by the ACL mask */
+
+        acl = acl_get_fd(fd);
+        if (!acl) {
+
+                if (!ERRNO_IS_NOT_SUPPORTED(errno))
+                        return -errno;
+
+                /* No ACLs? Then just update the regular mode_t */
+                return fd_acl_make_read_only_fallback(fd);
+        }
+
+        for (r = acl_get_entry(acl, ACL_FIRST_ENTRY, &i);
+             r > 0;
+             r = acl_get_entry(acl, ACL_NEXT_ENTRY, &i)) {
+                acl_permset_t permset;
+                acl_tag_t tag;
+                int b;
+
+                if (acl_get_tag_type(i, &tag) < 0)
+                        return -errno;
+
+                /* These three control the x bits overall (as ACL_MASK affects all remaining tags) */
+                if (!IN_SET(tag, ACL_USER_OBJ, ACL_MASK, ACL_OTHER))
+                        continue;
+
+                if (acl_get_permset(i, &permset) < 0)
+                        return -errno;
+
+                b = acl_get_perm(permset, ACL_WRITE);
+                if (b < 0)
+                        return -errno;
+
+                if (b) {
+                        if (acl_delete_perm(permset, ACL_WRITE) < 0)
+                                return -errno;
+
+                        changed = true;
+                }
+        }
+        if (r < 0)
+                return -errno;
+
+        if (!changed)
+                return 0;
+
+        if (acl_set_fd(fd, acl) < 0) {
+                if (!ERRNO_IS_NOT_SUPPORTED(errno))
+                        return -errno;
+
+                return fd_acl_make_read_only_fallback(fd);
+        }
+
+        return 1;
+}
+
+int fd_acl_make_writable(int fd) {
+        _cleanup_(acl_freep) acl_t acl = NULL;
+        acl_entry_t i;
+        int r;
+
+        /* Safely adds the writable bit to the owner's ACL entry of this inode. (And only the owner's! – This
+         * not the obvious inverse of fd_acl_make_read_only() hence!) */
+
+        acl = acl_get_fd(fd);
+        if (!acl) {
+                if (!ERRNO_IS_NOT_SUPPORTED(errno))
+                        return -errno;
+
+                /* No ACLs? Then just update the regular mode_t */
+                return fd_acl_make_writable_fallback(fd);
+        }
+
+        for (r = acl_get_entry(acl, ACL_FIRST_ENTRY, &i);
+             r > 0;
+             r = acl_get_entry(acl, ACL_NEXT_ENTRY, &i)) {
+                acl_permset_t permset;
+                acl_tag_t tag;
+                int b;
+
+                if (acl_get_tag_type(i, &tag) < 0)
+                        return -errno;
+
+                if (tag != ACL_USER_OBJ)
+                        continue;
+
+                if (acl_get_permset(i, &permset) < 0)
+                        return -errno;
+
+                b = acl_get_perm(permset, ACL_WRITE);
+                if (b < 0)
+                        return -errno;
+
+                if (b)
+                        return 0; /* Already set? Then there's nothing to do. */
+
+                if (acl_add_perm(permset, ACL_WRITE) < 0)
+                        return -errno;
+
+                break;
+        }
+        if (r < 0)
+                return -errno;
+
+        if (acl_set_fd(fd, acl) < 0) {
+                if (!ERRNO_IS_NOT_SUPPORTED(errno))
+                        return -errno;
+
+                return fd_acl_make_writable_fallback(fd);
+        }
+
+        return 1;
+}
+#endif
+
+int fd_acl_make_read_only_fallback(int fd) {
+        struct stat st;
+
+        assert(fd >= 0);
+
+        if (fstat(fd, &st) < 0)
+                return -errno;
+
+        if ((st.st_mode & 0222) == 0)
+                return 0;
+
+        if (fchmod(fd, st.st_mode & 0555) < 0)
+                return -errno;
+
+        return 1;
+}
+
+int fd_acl_make_writable_fallback(int fd) {
+        struct stat st;
+
+        assert(fd >= 0);
+
+        if (fstat(fd, &st) < 0)
+                return -errno;
+
+        if ((st.st_mode & 0200) != 0) /* already set */
+                return 0;
+
+        if (fchmod(fd, (st.st_mode & 07777) | 0200) < 0)
+                return -errno;
+
+        return 1;
 }

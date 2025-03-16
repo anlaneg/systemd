@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -6,10 +6,11 @@
 #include "sd-bus.h"
 
 #include "bus-internal.h"
-#include "bus-util.h"
 #include "log.h"
 #include "macro.h"
-#include "util.h"
+#include "memory-util.h"
+#include "string-util.h"
+#include "tests.h"
 
 struct context {
         int fds[2];
@@ -21,9 +22,8 @@ struct context {
         bool server_anonymous_auth;
 };
 
-static void *server(void *p) {
-        struct context *c = p;
-        sd_bus *bus = NULL;
+static int _server(struct context *c) {
+        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         sd_id128_t id;
         bool quit = false;
         int r;
@@ -41,18 +41,13 @@ static void *server(void *p) {
                 _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL, *reply = NULL;
 
                 r = sd_bus_process(bus, &m);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to process requests: %m");
-                        goto fail;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Failed to process requests: %m");
 
                 if (r == 0) {
-                        r = sd_bus_wait(bus, (uint64_t) -1);
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to wait: %m");
-                                goto fail;
-                        }
-
+                        r = sd_bus_wait(bus, UINT64_MAX);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to wait: %m");
                         continue;
                 }
 
@@ -67,10 +62,8 @@ static void *server(void *p) {
                                   (c->server_negotiate_unix_fds && c->client_negotiate_unix_fds));
 
                         r = sd_bus_message_new_method_return(m, &reply);
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to allocate return: %m");
-                                goto fail;
-                        }
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to allocate return: %m");
 
                         quit = true;
 
@@ -79,36 +72,28 @@ static void *server(void *p) {
                                         m,
                                         &reply,
                                         &SD_BUS_ERROR_MAKE_CONST(SD_BUS_ERROR_UNKNOWN_METHOD, "Unknown method."));
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to allocate return: %m");
-                                goto fail;
-                        }
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to allocate return: %m");
                 }
 
                 if (reply) {
                         r = sd_bus_send(bus, reply, NULL);
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to send reply: %m");
-                                goto fail;
-                        }
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to send reply: %m");
                 }
         }
 
-        r = 0;
+        return 0;
+}
 
-fail:
-        if (bus) {
-                sd_bus_flush(bus);
-                sd_bus_unref(bus);
-        }
-
-        return INT_TO_PTR(r);
+static void* server(void *p) {
+        return INT_TO_PTR(_server(p));
 }
 
 static int client(struct context *c) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL, *reply = NULL;
         _cleanup_(sd_bus_unrefp) sd_bus *bus = NULL;
-        sd_bus_error error = SD_BUS_ERROR_NULL;
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r;
 
         assert_se(sd_bus_new(&bus) >= 0);
@@ -129,7 +114,7 @@ static int client(struct context *c) {
 
         r = sd_bus_call(bus, m, 0, &error, &reply);
         if (r < 0)
-                return log_error_errno(r, "Failed to issue method call: %s", bus_error_message(&error, -r));
+                return log_error_errno(r, "Failed to issue method call: %s", bus_error_message(&error, r));
 
         return 0;
 }
@@ -172,6 +157,8 @@ static int test_one(bool client_negotiate_unix_fds, bool server_negotiate_unix_f
 
 int main(int argc, char *argv[]) {
         int r;
+
+        test_setup_logging(LOG_DEBUG);
 
         r = test_one(true, true, false, false);
         assert_se(r >= 0);

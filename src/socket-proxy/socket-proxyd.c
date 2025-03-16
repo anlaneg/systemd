@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -6,8 +6,6 @@
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -16,6 +14,9 @@
 #include "sd-resolve.h"
 
 #include "alloc-util.h"
+#include "build.h"
+#include "daemon-util.h"
+#include "errno-util.h"
 #include "fd-util.h"
 #include "log.h"
 #include "main-func.h"
@@ -26,16 +27,17 @@
 #include "set.h"
 #include "socket-util.h"
 #include "string-util.h"
-#include "util.h"
 
 #define BUFFER_SIZE (256 * 1024)
-static unsigned arg_connections_max = 256;
 
+static unsigned arg_connections_max = 256;
 static const char *arg_remote_host = NULL;
+static usec_t arg_exit_idle_time = USEC_INFINITY;
 
 typedef struct Context {
         sd_event *event;
         sd_resolve *resolve;
+        sd_event_source *idle_time;
 
         Set *listen;
         Set *connections;
@@ -76,6 +78,50 @@ static void connection_free(Connection *c) {
         free(c);
 }
 
+static int idle_time_cb(sd_event_source *s, uint64_t usec, void *userdata) {
+        Context *c = userdata;
+        int r;
+
+        if (!set_isempty(c->connections)) {
+                log_warning("Idle timer fired even though there are connections, ignoring");
+                return 0;
+        }
+
+        r = sd_event_exit(c->event, 0);
+        if (r < 0) {
+                log_warning_errno(r, "Error while stopping event loop, ignoring: %m");
+                return 0;
+        }
+        return 0;
+}
+
+static int connection_release(Connection *c) {
+        Context *context = ASSERT_PTR(ASSERT_PTR(c)->context);
+        int r;
+
+        connection_free(c);
+
+        if (arg_exit_idle_time < USEC_INFINITY && set_isempty(context->connections)) {
+                if (context->idle_time) {
+                        r = sd_event_source_set_time_relative(context->idle_time, arg_exit_idle_time);
+                        if (r < 0)
+                                return log_error_errno(r, "Error while setting idle time: %m");
+
+                        r = sd_event_source_set_enabled(context->idle_time, SD_EVENT_ONESHOT);
+                        if (r < 0)
+                                return log_error_errno(r, "Error while enabling idle time: %m");
+                } else {
+                        r = sd_event_add_time_relative(
+                                        context->event, &context->idle_time, CLOCK_MONOTONIC,
+                                        arg_exit_idle_time, 0, idle_time_cb, context);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to create idle timer: %m");
+                }
+        }
+
+        return 0;
+}
+
 static void context_clear(Context *context) {
         assert(context);
 
@@ -84,6 +130,7 @@ static void context_clear(Context *context) {
 
         sd_event_unref(context->event);
         sd_resolve_unref(context->resolve);
+        sd_event_source_unref(context->idle_time);
 }
 
 static int connection_create_pipes(Connection *c, int buffer[static 2], size_t *sz) {
@@ -141,10 +188,10 @@ static int connection_shovel(
                         if (z > 0) {
                                 *full += z;
                                 shoveled = true;
-                        } else if (z == 0 || IN_SET(errno, EPIPE, ECONNRESET)) {
+                        } else if (z == 0 || ERRNO_IS_DISCONNECT(errno)) {
                                 *from_source = sd_event_source_unref(*from_source);
                                 *from = safe_close(*from);
-                        } else if (!IN_SET(errno, EAGAIN, EINTR))
+                        } else if (!ERRNO_IS_TRANSIENT(errno))
                                 return log_error_errno(errno, "Failed to splice: %m");
                 }
 
@@ -153,10 +200,10 @@ static int connection_shovel(
                         if (z > 0) {
                                 *full -= z;
                                 shoveled = true;
-                        } else if (z == 0 || IN_SET(errno, EPIPE, ECONNRESET)) {
+                        } else if (z == 0 || ERRNO_IS_DISCONNECT(errno)) {
                                 *to_source = sd_event_source_unref(*to_source);
                                 *to = safe_close(*to);
-                        } else if (!IN_SET(errno, EAGAIN, EINTR))
+                        } else if (!ERRNO_IS_TRANSIENT(errno))
                                 return log_error_errno(errno, "Failed to splice: %m");
                 }
         } while (shoveled);
@@ -167,12 +214,11 @@ static int connection_shovel(
 static int connection_enable_event_sources(Connection *c);
 
 static int traffic_cb(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
-        Connection *c = userdata;
+        Connection *c = ASSERT_PTR(userdata);
         int r;
 
         assert(s);
         assert(fd >= 0);
-        assert(c);
 
         r = connection_shovel(c,
                               &c->server_fd, c->server_to_client_buffer, &c->client_fd,
@@ -189,15 +235,15 @@ static int traffic_cb(sd_event_source *s, int fd, uint32_t revents, void *userda
                 goto quit;
 
         /* EOF on both sides? */
-        if (c->server_fd == -1 && c->client_fd == -1)
+        if (c->server_fd < 0 && c->client_fd < 0)
                 goto quit;
 
         /* Server closed, and all data written to client? */
-        if (c->server_fd == -1 && c->server_to_client_buffer_full <= 0)
+        if (c->server_fd < 0 && c->server_to_client_buffer_full <= 0)
                 goto quit;
 
         /* Client closed, and all data written to server? */
-        if (c->client_fd == -1 && c->client_to_server_buffer_full <= 0)
+        if (c->client_fd < 0 && c->client_to_server_buffer_full <= 0)
                 goto quit;
 
         r = connection_enable_event_sources(c);
@@ -207,7 +253,7 @@ static int traffic_cb(sd_event_source *s, int fd, uint32_t revents, void *userda
         return 1;
 
 quit:
-        connection_free(c);
+        connection_release(c);
         return 0; /* ignore errors, continue serving */
 }
 
@@ -270,18 +316,17 @@ static int connection_complete(Connection *c) {
         return 0;
 
 fail:
-        connection_free(c);
+        connection_release(c);
         return 0; /* ignore errors, continue serving */
 }
 
 static int connect_cb(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
-        Connection *c = userdata;
+        Connection *c = ASSERT_PTR(userdata);
         socklen_t solen;
         int error, r;
 
         assert(s);
         assert(fd >= 0);
-        assert(c);
 
         solen = sizeof(error);
         r = getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &solen);
@@ -300,7 +345,7 @@ static int connect_cb(sd_event_source *s, int fd, uint32_t revents, void *userda
         return connection_complete(c);
 
 fail:
-        connection_free(c);
+        connection_release(c);
         return 0; /* ignore errors, continue serving */
 }
 
@@ -344,7 +389,7 @@ static int connection_start(Connection *c, struct sockaddr *sa, socklen_t salen)
         return 0;
 
 fail:
-        connection_free(c);
+        connection_release(c);
         return 0; /* ignore errors, continue serving */
 }
 
@@ -362,7 +407,7 @@ static int resolve_handler(sd_resolve_query *q, int ret, const struct addrinfo *
         return connection_start(c, ai->ai_addr, ai->ai_addrlen);
 
 fail:
-        connection_free(c);
+        connection_release(c);
         return 0; /* ignore errors, continue serving */
 }
 
@@ -371,28 +416,29 @@ static int resolve_remote(Connection *c) {
         static const struct addrinfo hints = {
                 .ai_family = AF_UNSPEC,
                 .ai_socktype = SOCK_STREAM,
-                .ai_flags = AI_ADDRCONFIG
         };
 
-        union sockaddr_union sa = {};
         const char *node, *service;
         int r;
 
         if (IN_SET(arg_remote_host[0], '/', '@')) {
-                int salen;
+                union sockaddr_union sa;
+                int sa_len;
 
-                salen = sockaddr_un_set_path(&sa.un, arg_remote_host);
-                if (salen < 0) {
-                        log_error_errno(salen, "Specified address doesn't fit in an AF_UNIX address, refusing: %m");
+                r = sockaddr_un_set_path(&sa.un, arg_remote_host);
+                if (r < 0) {
+                        log_error_errno(r, "Specified address doesn't fit in an AF_UNIX address, refusing: %m");
                         goto fail;
                 }
+                sa_len = r;
 
-                return connection_start(c, &sa.sa, salen);
+                return connection_start(c, &sa.sa, sa_len);
         }
 
         service = strrchr(arg_remote_host, ':');
         if (service) {
-                node = strndupa(arg_remote_host, service - arg_remote_host);
+                node = strndupa_safe(arg_remote_host,
+                                     service - arg_remote_host);
                 service++;
         } else {
                 node = arg_remote_host;
@@ -409,7 +455,7 @@ static int resolve_remote(Connection *c) {
         return 0;
 
 fail:
-        connection_free(c);
+        connection_release(c);
         return 0; /* ignore errors, continue serving */
 }
 
@@ -426,25 +472,25 @@ static int add_connection_socket(Context *context, int fd) {
                 return 0;
         }
 
-        r = set_ensure_allocated(&context->connections, NULL);
-        if (r < 0) {
-                log_oom();
-                return 0;
-        }
+        r = sd_event_source_set_enabled(context->idle_time, SD_EVENT_OFF);
+        if (r < 0)
+                log_warning_errno(r, "Unable to disable idle timer, continuing: %m");
 
-        c = new0(Connection, 1);
+        c = new(Connection, 1);
         if (!c) {
                 log_oom();
                 return 0;
         }
 
-        c->context = context;
-        c->server_fd = fd;
-        c->client_fd = -1;
-        c->server_to_client_buffer[0] = c->server_to_client_buffer[1] = -1;
-        c->client_to_server_buffer[0] = c->client_to_server_buffer[1] = -1;
+        *c = (Connection) {
+               .context = context,
+               .server_fd = fd,
+               .client_fd = -EBADF,
+               .server_to_client_buffer = EBADF_PAIR,
+               .client_to_server_buffer = EBADF_PAIR,
+        };
 
-        r = set_put(context->connections, c);
+        r = set_ensure_put(&context->connections, NULL, c);
         if (r < 0) {
                 free(c);
                 log_oom();
@@ -456,35 +502,31 @@ static int add_connection_socket(Context *context, int fd) {
 
 static int accept_cb(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
         _cleanup_free_ char *peer = NULL;
-        Context *context = userdata;
-        int nfd = -1, r;
+        Context *context = ASSERT_PTR(userdata);
+        int nfd = -EBADF, r;
 
         assert(s);
         assert(fd >= 0);
         assert(revents & EPOLLIN);
-        assert(context);
 
         nfd = accept4(fd, NULL, NULL, SOCK_NONBLOCK|SOCK_CLOEXEC);
         if (nfd < 0) {
-                if (errno != -EAGAIN)
+                if (!ERRNO_IS_ACCEPT_AGAIN(errno))
                         log_warning_errno(errno, "Failed to accept() socket: %m");
         } else {
-                getpeername_pretty(nfd, true, &peer);
+                (void) getpeername_pretty(nfd, true, &peer);
                 log_debug("New connection from %s", strna(peer));
 
                 r = add_connection_socket(context, nfd);
                 if (r < 0) {
-                        log_error_errno(r, "Failed to accept connection, ignoring: %m");
-                        safe_close(fd);
+                        log_warning_errno(r, "Failed to accept connection, ignoring: %m");
+                        safe_close(nfd);
                 }
         }
 
         r = sd_event_source_set_enabled(s, SD_EVENT_ONESHOT);
-        if (r < 0) {
-                log_error_errno(r, "Error while re-enabling listener with ONESHOT: %m");
-                sd_event_exit(context->event, r);
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Error while re-enabling listener with ONESHOT: %m");
 
         return 1;
 }
@@ -495,12 +537,6 @@ static int add_listen_socket(Context *context, int fd) {
 
         assert(context);
         assert(fd >= 0);
-
-        r = set_ensure_allocated(&context->listen, NULL);
-        if (r < 0) {
-                log_oom();
-                return r;
-        }
 
         r = sd_is_socket(fd, 0, SOCK_STREAM, 1);
         if (r < 0)
@@ -517,12 +553,15 @@ static int add_listen_socket(Context *context, int fd) {
         if (r < 0)
                 return log_error_errno(r, "Failed to add event source: %m");
 
-        r = set_put(context->listen, source);
+        r = set_ensure_put(&context->listen, NULL, source);
         if (r < 0) {
-                log_error_errno(r, "Failed to add source to set: %m");
                 sd_event_source_unref(source);
-                return r;
+                return log_error_errno(r, "Failed to add source to set: %m");
         }
+
+        r = sd_event_source_set_exit_on_failure(source, true);
+        if (r < 0)
+                return log_error_errno(r, "Failed to enable exit-on-failure logic: %m");
 
         /* Set the watcher to oneshot in case other processes are also
          * watching to accept(). */
@@ -535,9 +574,13 @@ static int add_listen_socket(Context *context, int fd) {
 
 static int help(void) {
         _cleanup_free_ char *link = NULL;
+        _cleanup_free_ char *time_link = NULL;
         int r;
 
         r = terminal_urlify_man("systemd-socket-proxyd", "8", &link);
+        if (r < 0)
+                return log_oom();
+        r = terminal_urlify_man("systemd.time", "7", &time_link);
         if (r < 0)
                 return log_oom();
 
@@ -545,12 +588,14 @@ static int help(void) {
                "%1$s [SOCKET]\n\n"
                "Bidirectionally proxy local sockets to another (possibly remote) socket.\n\n"
                "  -c --connections-max=  Set the maximum number of connections to be accepted\n"
+               "     --exit-idle-time=   Exit when without a connection for this duration. See\n"
+               "                         the %3$s for time span format\n"
                "  -h --help              Show this help\n"
                "     --version           Show package version\n"
-               "\nSee the %2$s for details.\n"
-               , program_invocation_short_name
-               , link
-        );
+               "\nSee the %2$s for details.\n",
+               program_invocation_short_name,
+               link,
+               time_link);
 
         return 0;
 }
@@ -559,11 +604,13 @@ static int parse_argv(int argc, char *argv[]) {
 
         enum {
                 ARG_VERSION = 0x100,
+                ARG_EXIT_IDLE,
                 ARG_IGNORE_ENV
         };
 
         static const struct option options[] = {
                 { "connections-max", required_argument, NULL, 'c'           },
+                { "exit-idle-time",  required_argument, NULL, ARG_EXIT_IDLE },
                 { "help",            no_argument,       NULL, 'h'           },
                 { "version",         no_argument,       NULL, ARG_VERSION   },
                 {}
@@ -597,11 +644,17 @@ static int parse_argv(int argc, char *argv[]) {
 
                         break;
 
+                case ARG_EXIT_IDLE:
+                        r = parse_sec(optarg, &arg_exit_idle_time);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse --exit-idle-time= argument: %s", optarg);
+                        break;
+
                 case '?':
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
 
         if (optind >= argc)
@@ -618,10 +671,10 @@ static int parse_argv(int argc, char *argv[]) {
 
 static int run(int argc, char *argv[]) {
         _cleanup_(context_clear) Context context = {};
+        _unused_ _cleanup_(notify_on_cleanup) const char *notify_stop = NULL;
         int r, n, fd;
 
-        log_parse_environment();
-        log_open();
+        log_setup();
 
         r = parse_argv(argc, argv);
         if (r <= 0)
@@ -655,6 +708,7 @@ static int run(int argc, char *argv[]) {
                         return r;
         }
 
+        notify_stop = notify_start(NOTIFY_READY, NOTIFY_STOPPING);
         r = sd_event_loop(context.event);
         if (r < 0)
                 return log_error_errno(r, "Failed to run event loop: %m");

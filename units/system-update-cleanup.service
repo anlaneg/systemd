@@ -1,4 +1,4 @@
-#  SPDX-License-Identifier: LGPL-2.1+
+#  SPDX-License-Identifier: LGPL-2.1-or-later
 #
 #  This file is part of systemd.
 #
@@ -8,8 +8,8 @@
 #  (at your option) any later version.
 
 [Unit]
-Description=Remove the Offline System Updates symlink
-Documentation=man:systemd.special(5) man:systemd.offline-updates(7)
+Description=Remove the Offline System Updates Symlink
+Documentation=man:systemd.special(7) man:systemd.offline-updates(7)
 After=system-update.target
 DefaultDependencies=no
 Conflicts=shutdown.target
@@ -29,7 +29,9 @@ SuccessAction=reboot
 # reboot or some other action on its own.
 ConditionPathExists=|/system-update
 ConditionPathIsSymbolicLink=|/system-update
+ConditionPathExists=|/etc/system-update
+ConditionPathIsSymbolicLink=|/etc/system-update
 
 [Service]
 Type=oneshot
-ExecStart=/bin/rm -fv /system-update
+ExecStart=rm -fv /system-update /etc/system-update

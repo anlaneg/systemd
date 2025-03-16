@@ -1,14 +1,15 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include <inttypes.h>
 #include <stdbool.h>
 #include <sys/types.h>
 
-#include "sd-lldp.h"
+#include "sd-json.h"
+#include "sd-lldp-rx.h"
 
 #include "hash-funcs.h"
-#include "lldp-internal.h"
+#include "lldp-rx-internal.h"
 #include "time-util.h"
 
 typedef struct LLDPNeighborID {
@@ -21,8 +22,8 @@ typedef struct LLDPNeighborID {
 } LLDPNeighborID;
 
 struct sd_lldp_neighbor {
-        /* Neighbor objects stay around as long as they are linked into an "sd_lldp" object or n_ref > 0. */
-        sd_lldp *lldp;
+        /* Neighbor objects stay around as long as they are linked into an "sd_lldp_rx" object or n_ref > 0. */
+        sd_lldp_rx *lldp_rx;
         unsigned n_ref;
 
         triple_timestamp timestamp;
@@ -54,6 +55,7 @@ struct sd_lldp_neighbor {
         char *port_description;
         char *system_name;
         char *system_description;
+        char *mud_url;
 
         uint16_t port_vlan_id;
 
@@ -89,3 +91,4 @@ sd_lldp_neighbor *lldp_neighbor_new(size_t raw_size);
 int lldp_neighbor_parse(sd_lldp_neighbor *n);
 void lldp_neighbor_start_ttl(sd_lldp_neighbor *n);
 bool lldp_neighbor_equal(const sd_lldp_neighbor *a, const sd_lldp_neighbor *b);
+int lldp_neighbor_build_json(sd_lldp_neighbor *n, sd_json_variant **ret);

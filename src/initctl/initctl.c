@@ -1,9 +1,11 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <sys/epoll.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "sd-bus.h"
@@ -11,16 +13,20 @@
 
 #include "alloc-util.h"
 #include "bus-error.h"
+#include "bus-locator.h"
 #include "bus-util.h"
-#include "def.h"
+#include "constants.h"
+#include "daemon-util.h"
 #include "fd-util.h"
 #include "format-util.h"
 #include "initreq.h"
 #include "list.h"
 #include "log.h"
-#include "special.h"
-#include "util.h"
+#include "main-func.h"
+#include "memory-util.h"
 #include "process-util.h"
+#include "reboot-util.h"
+#include "special.h"
 
 #define SERVER_FD_MAX 16
 #define TIMEOUT_MSEC ((int) (DEFAULT_EXIT_USEC/USEC_PER_MSEC))
@@ -66,16 +72,14 @@ static const char *translate_runlevel(int runlevel, bool *isolate) {
                 { '6', SPECIAL_REBOOT_TARGET,     false },
         };
 
-        unsigned i;
-
         assert(isolate);
 
-        for (i = 0; i < ELEMENTSOF(table); i++)
-                if (table[i].runlevel == runlevel) {
-                        *isolate = table[i].isolate;
+        FOREACH_ELEMENT(i, table)
+                if (i->runlevel == runlevel) {
+                        *isolate = i->isolate;
                         if (runlevel == '6' && kexec_loaded())
                                 return SPECIAL_KEXEC_TARGET;
-                        return table[i].special;
+                        return i->special;
                 }
 
         return NULL;
@@ -101,19 +105,11 @@ static int change_runlevel(Server *s, int runlevel) {
         else
                 mode = "replace-irreversibly";
 
-        log_debug("Running request %s/start/%s", target, mode);
+        log_debug("Requesting %s/start/%s", target, mode);
 
-        r = sd_bus_call_method(
-                        s->bus,
-                        "org.freedesktop.systemd1",
-                        "/org/freedesktop/systemd1",
-                        "org.freedesktop.systemd1.Manager",
-                        "StartUnit",
-                        &error,
-                        NULL,
-                        "ss", target, mode);
+        r = bus_call_method(s->bus, bus_systemd_mgr, "StartUnit", &error, NULL, "ss", target, mode);
         if (r < 0)
-                return log_error_errno(r, "Failed to change runlevel: %s", bus_error_message(&error, -r));
+                return log_error_errno(r, "Failed to change runlevel: %s", bus_error_message(&error, r));
 
         return 0;
 }
@@ -208,8 +204,9 @@ static int fifo_process(Fifo *f) {
         return 0;
 }
 
-static void fifo_free(Fifo *f) {
-        assert(f);
+static Fifo* fifo_free(Fifo *f) {
+        if (!f)
+                return NULL;
 
         if (f->server) {
                 assert(f->server->n_fifos > 0);
@@ -219,13 +216,14 @@ static void fifo_free(Fifo *f) {
 
         if (f->fd >= 0) {
                 if (f->server)
-                        epoll_ctl(f->server->epoll_fd, EPOLL_CTL_DEL, f->fd, NULL);
+                        (void) epoll_ctl(f->server->epoll_fd, EPOLL_CTL_DEL, f->fd, NULL);
 
                 safe_close(f->fd);
         }
 
-        free(f);
+        return mfree(f);
 }
+DEFINE_TRIVIAL_CLEANUP_FUNC(Fifo*, fifo_free);
 
 static void server_done(Server *s) {
         assert(s);
@@ -239,84 +237,57 @@ static void server_done(Server *s) {
 
 static int server_init(Server *s, unsigned n_sockets) {
         int r;
-        unsigned i;
+
+        /* This function will leave s partially initialized on failure. Caller needs to clean up. */
 
         assert(s);
         assert(n_sockets > 0);
 
-        zero(*s);
-
         s->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-        if (s->epoll_fd < 0) {
-                r = log_error_errno(errno,
-                                    "Failed to create epoll object: %m");
-                goto fail;
-        }
+        if (s->epoll_fd < 0)
+                return log_error_errno(errno, "Failed to create epoll object: %m");
 
-        for (i = 0; i < n_sockets; i++) {
-                struct epoll_event ev;
-                Fifo *f;
-                int fd;
-
-                fd = SD_LISTEN_FDS_START+i;
+        for (unsigned i = 0; i < n_sockets; i++) {
+                _cleanup_(fifo_freep) Fifo *f = NULL;
+                int fd = SD_LISTEN_FDS_START + i;
 
                 r = sd_is_fifo(fd, NULL);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to determine file descriptor type: %m");
-                        goto fail;
-                }
-
-                if (!r) {
-                        log_error("Wrong file descriptor type.");
-                        r = -EINVAL;
-                        goto fail;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Failed to determine file descriptor type: %m");
+                if (!r)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Wrong file descriptor type.");
 
                 f = new0(Fifo, 1);
-                if (!f) {
-                        r = -ENOMEM;
-                        log_error_errno(errno, "Failed to create fifo object: %m");
-                        goto fail;
-                }
+                if (!f)
+                        return log_oom();
 
-                f->fd = -1;
+                struct epoll_event ev = {
+                        .events = EPOLLIN,
+                        .data.ptr = f,
+                };
 
-                zero(ev);
-                ev.events = EPOLLIN;
-                ev.data.ptr = f;
-                if (epoll_ctl(s->epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
-                        r = -errno;
-                        fifo_free(f);
-                        log_error_errno(errno, "Failed to add fifo fd to epoll object: %m");
-                        goto fail;
-                }
+                if (epoll_ctl(s->epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0)
+                        return log_error_errno(errno, "Failed to add fifo fd to epoll object: %m");
 
                 f->fd = fd;
-                LIST_PREPEND(fifo, s->fifos, f);
                 f->server = s;
+                LIST_PREPEND(fifo, s->fifos, TAKE_PTR(f));
                 s->n_fifos++;
         }
 
         r = bus_connect_system_systemd(&s->bus);
-        if (r < 0) {
-                log_error_errno(r, "Failed to get D-Bus connection: %m");
-                r = -EIO;
-                goto fail;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to get D-Bus connection: %m");
 
         return 0;
-
-fail:
-        server_done(s);
-
-        return r;
 }
 
 static int process_event(Server *s, struct epoll_event *ev) {
         int r;
-        Fifo *f;
+        _cleanup_(fifo_freep) Fifo *f = NULL;
 
         assert(s);
+        assert(ev);
 
         if (!(ev->events & EPOLLIN))
                 return log_info_errno(SYNTHETIC_ERRNO(EIO),
@@ -324,52 +295,41 @@ static int process_event(Server *s, struct epoll_event *ev) {
 
         f = (Fifo*) ev->data.ptr;
         r = fifo_process(f);
-        if (r < 0) {
-                log_info_errno(r, "Got error on fifo: %m");
-                fifo_free(f);
-                return r;
-        }
+        if (r < 0)
+                return log_info_errno(r, "Got error on fifo: %m");
+
+        TAKE_PTR(f);
 
         return 0;
 }
 
-int main(int argc, char *argv[]) {
-        Server server;
-        int r = EXIT_FAILURE, n;
+static int run(int argc, char *argv[]) {
+        _cleanup_(server_done) Server server = { .epoll_fd = -EBADF };
+        _unused_ _cleanup_(notify_on_cleanup) const char *notify_stop = NULL;
+        int r, n;
 
-        if (getppid() != 1) {
-                log_error("This program should be invoked by init only.");
-                return EXIT_FAILURE;
-        }
+        if (argc > 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "This program does not take arguments.");
 
-        if (argc > 1) {
-                log_error("This program does not take arguments.");
-                return EXIT_FAILURE;
-        }
-
-        log_setup_service();
+        log_setup();
 
         umask(0022);
 
         n = sd_listen_fds(true);
-        if (n < 0) {
-                log_error_errno(r, "Failed to read listening file descriptors from environment: %m");
-                return EXIT_FAILURE;
-        }
+        if (n < 0)
+                return log_error_errno(errno,
+                                       "Failed to read listening file descriptors from environment: %m");
 
-        if (n <= 0 || n > SERVER_FD_MAX) {
-                log_error("No or too many file descriptors passed.");
-                return EXIT_FAILURE;
-        }
+        if (n <= 0 || n > SERVER_FD_MAX)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "No or too many file descriptors passed.");
 
-        if (server_init(&server, (unsigned) n) < 0)
-                return EXIT_FAILURE;
+        r = server_init(&server, (unsigned) n);
+        if (r < 0)
+                return r;
 
-        log_debug("systemd-initctl running as pid "PID_FMT, getpid_cached());
-
-        sd_notify(false,
-                  "READY=1\n"
-                  "STATUS=Processing requests...");
+        notify_stop = notify_start(NOTIFY_READY, NOTIFY_STOPPING);
 
         while (!server.quit) {
                 struct epoll_event event;
@@ -379,27 +339,17 @@ int main(int argc, char *argv[]) {
                 if (k < 0) {
                         if (errno == EINTR)
                                 continue;
-                        log_error_errno(errno, "epoll_wait() failed: %m");
-                        goto fail;
+                        return log_error_errno(errno, "epoll_wait() failed: %m");
                 }
-
-                if (k <= 0)
+                if (k == 0)
                         break;
 
-                if (process_event(&server, &event) < 0)
-                        goto fail;
+                r = process_event(&server, &event);
+                if (r < 0)
+                        return r;
         }
 
-        r = EXIT_SUCCESS;
-
-        log_debug("systemd-initctl stopped as pid "PID_FMT, getpid_cached());
-
-fail:
-        sd_notify(false,
-                  "STOPPING=1\n"
-                  "STATUS=Shutting down...");
-
-        server_done(&server);
-
-        return r;
+        return 0;
 }
+
+DEFINE_MAIN_FUNCTION(run);

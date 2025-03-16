@@ -1,12 +1,14 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "alloc-util.h"
+#include "build.h"
 #include "log.h"
 #include "main-func.h"
+#include "path-util.h"
 #include "pretty-print.h"
 #include "string-util.h"
 #include "strv.h"
@@ -40,10 +42,9 @@ static int help(void) {
                "  -u --unescape           Unescape strings\n"
                "  -m --mangle             Mangle strings\n"
                "  -p --path               When escaping/unescaping assume the string is a path\n"
-               "\nSee the %s for details.\n"
-               , program_invocation_short_name
-               , link
-        );
+               "\nSee the %s for details.\n",
+               program_invocation_short_name,
+               link);
 
         return 0;
 }
@@ -83,17 +84,16 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_VERSION:
                         return version();
 
-                case ARG_SUFFIX:
-
-                        if (unit_type_from_string(optarg) < 0)
-                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                                       "Invalid unit suffix type %s.", optarg);
+                case ARG_SUFFIX: {
+                        UnitType t = unit_type_from_string(optarg);
+                        if (t < 0)
+                                return log_error_errno(t, "Invalid unit suffix type \"%s\".", optarg);
 
                         arg_suffix = optarg;
                         break;
+                }
 
                 case ARG_TEMPLATE:
-
                         if (!unit_name_is_valid(optarg, UNIT_NAME_TEMPLATE))
                                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                                        "Template name %s is not valid.", optarg);
@@ -121,7 +121,7 @@ static int parse_argv(int argc, char *argv[]) {
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached();
                 }
 
         if (optind >= argc)
@@ -156,11 +156,9 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 static int run(int argc, char *argv[]) {
-        char **i;
         int r;
 
-        log_parse_environment();
-        log_open();
+        log_setup();
 
         r = parse_argv(argc, argv);
         if (r <= 0)
@@ -174,8 +172,36 @@ static int run(int argc, char *argv[]) {
                 case ACTION_ESCAPE:
                         if (arg_path) {
                                 r = unit_name_path_escape(*i, &e);
-                                if (r < 0)
+                                if (r < 0) {
+                                        if (r == -EINVAL) {
+                                                /* If escaping failed because the string was invalid, let's print a
+                                                 * friendly message about it. Catch these specific error cases
+                                                 * explicitly. */
+
+                                                if (!path_is_valid(*i))
+                                                        return log_error_errno(r, "Input '%s' is not a valid file system path, failed to escape.", *i);
+                                                if (!path_is_absolute(*i))
+                                                        return log_error_errno(r, "Input '%s' is not an absolute file system path, failed to escape.", *i);
+                                                if (!path_is_normalized(*i))
+                                                        return log_error_errno(r, "Input '%s' is not a normalized file system path, failed to escape.", *i);
+                                        }
+
+                                        /* All other error cases. */
                                         return log_error_errno(r, "Failed to escape string: %m");
+                                }
+
+                                /* If the escaping worked, then still warn if the path is not like we'd like
+                                 * it. Because that means escaping is not necessarily reversible. */
+
+                                if (!path_is_valid(*i))
+                                        log_warning("Input '%s' is not a valid file system path, escaping is likely not going to be reversible.", *i);
+                                else if (!path_is_absolute(*i))
+                                        log_warning("Input '%s' is not an absolute file system path, escaping is likely not going to be reversible.", *i);
+
+                                /* Note that we don't complain about paths not being normalized here, because
+                                 * some forms of non-normalization is actually OK, such as a series // and
+                                 * unit_name_path_escape() will clean those up silently, and the reversal is
+                                 * "close enough" to be OK. */
                         } else {
                                 e = unit_name_escape(*i);
                                 if (!e)
@@ -191,13 +217,8 @@ static int run(int argc, char *argv[]) {
 
                                 free_and_replace(e, x);
                         } else if (arg_suffix) {
-                                char *x;
-
-                                x = strjoin(e, ".", arg_suffix);
-                                if (!x)
+                                if (!strextend(&e, ".", arg_suffix))
                                         return log_oom();
-
-                                free_and_replace(e, x);
                         }
 
                         break;
@@ -212,14 +233,16 @@ static int run(int argc, char *argv[]) {
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to extract instance: %m");
                                 if (isempty(name))
-                                        return log_error("Unit %s is missing the instance name.", *i);
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Unit %s is missing the instance name.", *i);
 
                                 r = unit_name_template(*i, &template);
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to extract template: %m");
                                 if (arg_template && !streq(arg_template, template))
-                                        return log_error("Unit %s template %s does not match specified template %s.",
-                                                         *i, template, arg_template);
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                               "Unit %s template %s does not match specified template %s.",
+                                                               *i, template, arg_template);
                         } else {
                                 name = strdup(*i);
                                 if (!name)

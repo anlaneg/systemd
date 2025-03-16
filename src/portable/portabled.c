@@ -1,16 +1,22 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include "sd-bus.h"
-#include "sd-daemon.h"
 
 #include "alloc-util.h"
-#include "bus-util.h"
-#include "def.h"
+#include "bus-log-control-api.h"
+#include "bus-polkit.h"
+#include "common-signal.h"
+#include "constants.h"
+#include "daemon-util.h"
 #include "main-func.h"
 #include "portabled-bus.h"
 #include "portabled-image-bus.h"
 #include "portabled.h"
 #include "process-util.h"
+#include "service-util.h"
 #include "signal-util.h"
 
 static Manager* manager_unref(Manager *m);
@@ -30,13 +36,17 @@ static int manager_new(Manager **ret) {
         if (r < 0)
                 return r;
 
-        r = sd_event_add_signal(m->event, NULL, SIGINT, NULL, NULL);
+        r = sd_event_set_signal_exit(m->event, true);
         if (r < 0)
                 return r;
 
-        r = sd_event_add_signal(m->event, NULL, SIGTERM, NULL, NULL);
+        r = sd_event_add_signal(m->event, /* ret_event_source= */ NULL, (SIGRTMIN+18)|SD_EVENT_SIGNAL_PROCMASK, sigrtmin18_handler, /* userdata= */ NULL);
         if (r < 0)
                 return r;
+
+        r = sd_event_add_memory_pressure(m->event, NULL, NULL, NULL);
+        if (r < 0)
+                log_debug_errno(r, "Failed allocate memory pressure event source, ignoring: %m");
 
         (void) sd_event_set_watchdog(m->event, true);
 
@@ -51,7 +61,7 @@ static Manager* manager_unref(Manager *m) {
 
         sd_event_source_unref(m->image_cache_defer_event);
 
-        bus_verify_polkit_async_registry_free(m->polkit_registry);
+        hashmap_free(m->polkit_registry);
 
         sd_bus_flush_close_unref(m->bus);
         sd_event_unref(m->event);
@@ -69,17 +79,13 @@ static int manager_connect_bus(Manager *m) {
         if (r < 0)
                 return log_error_errno(r, "Failed to connect to system bus: %m");
 
-        r = sd_bus_add_object_vtable(m->bus, NULL, "/org/freedesktop/portable1", "org.freedesktop.portable1.Manager", manager_vtable, m);
+        r = bus_add_implementation(m->bus, &manager_object, m);
         if (r < 0)
-                return log_error_errno(r, "Failed to add manager object vtable: %m");
+                return r;
 
-        r = sd_bus_add_fallback_vtable(m->bus, NULL, "/org/freedesktop/portable1/image", "org.freedesktop.portable1.Image", image_vtable, bus_image_object_find, m);
+        r = bus_log_control_api_register(m->bus);
         if (r < 0)
-                return log_error_errno(r, "Failed to add image object vtable: %m");
-
-        r = sd_bus_add_node_enumerator(m->bus, NULL, "/org/freedesktop/portable1/image", bus_image_node_enumerator, m);
-        if (r < 0)
-                return log_error_errno(r, "Failed to add image enumerator: %m");
+                return r;
 
         r = sd_bus_request_name_async(m->bus, NULL, "org.freedesktop.portable1", 0, NULL, NULL);
         if (r < 0)
@@ -107,36 +113,32 @@ static int manager_startup(Manager *m) {
 }
 
 static bool check_idle(void *userdata) {
-        Manager *m = userdata;
+        Manager *m = ASSERT_PTR(userdata);
 
-        return !m->operations;
-}
-
-static int manager_run(Manager *m) {
-        assert(m);
-
-        return bus_event_loop_with_idle(
-                        m->event,
-                        m->bus,
-                        "org.freedesktop.portable1",
-                        DEFAULT_EXIT_USEC,
-                        check_idle, m);
+        return !m->operations &&
+                hashmap_isempty(m->polkit_registry);
 }
 
 static int run(int argc, char *argv[]) {
         _cleanup_(manager_unrefp) Manager *m = NULL;
         int r;
 
-        log_setup_service();
+        log_setup();
+
+        r = service_parse_argv("systemd-portabled.service",
+                               "Manage registrations of portable images.",
+                               BUS_IMPLEMENTATIONS(&manager_object,
+                                                   &log_control_object),
+                               argc, argv);
+        if (r <= 0)
+                return r;
 
         umask(0022);
 
-        if (argc != 1) {
-                log_error("This program takes no arguments.");
-                return -EINVAL;
-        }
+        if (argc != 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "This program takes no arguments.");
 
-        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGCHLD, SIGTERM, SIGINT, -1) >= 0);
+        assert_se(sigprocmask_many(SIG_BLOCK, /* ret_old_mask= */ NULL, SIGCHLD) >= 0);
 
         r = manager_new(&m);
         if (r < 0)
@@ -146,18 +148,20 @@ static int run(int argc, char *argv[]) {
         if (r < 0)
                 return log_error_errno(r, "Failed to fully start up daemon: %m");
 
-        log_debug("systemd-portabled running as pid " PID_FMT, getpid_cached());
-        sd_notify(false,
-                  "READY=1\n"
-                  "STATUS=Processing requests...");
+        r = sd_notify(false, NOTIFY_READY);
+        if (r < 0)
+                log_warning_errno(r, "Failed to send readiness notification, ignoring: %m");
 
-        r = manager_run(m);
+        r = bus_event_loop_with_idle(
+                        m->event,
+                        m->bus,
+                        "org.freedesktop.portable1",
+                        DEFAULT_EXIT_USEC,
+                        check_idle, m);
+        if (r < 0)
+                return log_error_errno(r, "Failed to run main loop: %m");
 
-        (void) sd_notify(false,
-                         "STOPPING=1\n"
-                         "STATUS=Shutting down...");
-        log_debug("systemd-portabled stopped as pid " PID_FMT, getpid_cached());
-        return r;
+        return 0;
 }
 
 DEFINE_MAIN_FUNCTION(run);

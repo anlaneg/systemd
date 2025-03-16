@@ -1,8 +1,9 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
 #include "sd-bus.h"
 
+#include "dissect-image.h"
 #include "unit.h"
 
 int bus_property_get_triggered_unit(sd_bus *bus, const char *path, const char *interface, const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *error);
@@ -127,7 +128,8 @@ int bus_property_get_triggered_unit(sd_bus *bus, const char *path, const char *i
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {                    \
                         *p = (cast_type) v;                             \
                         unit_write_settingf(u, flags, name,             \
-                                            "%s=%s", name, s);          \
+                                            "%s=%s",                    \
+                                            name, strempty(s));         \
                 }                                                       \
                                                                         \
                 return 1;                                               \
@@ -235,10 +237,12 @@ int bus_property_get_triggered_unit(sd_bus *bus, const char *path, const char *i
 
 int bus_set_transient_mode_t(Unit *u, const char *name, mode_t *p, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error);
 int bus_set_transient_unsigned(Unit *u, const char *name, unsigned *p, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error);
-int bus_set_transient_user(Unit *u, const char *name, char **p, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error);
+int bus_set_transient_user_relaxed(Unit *u, const char *name, char **p, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error);
 int bus_set_transient_path(Unit *u, const char *name, char **p, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error);
+int bus_set_transient_reboot_parameter(Unit *u, const char *name, char **p, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error);
 int bus_set_transient_string(Unit *u, const char *name, char **p, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error);
 int bus_set_transient_bool(Unit *u, const char *name, bool *p, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error);
+int bus_set_transient_tristate(Unit *u, const char *name, int *p, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error);
 int bus_set_transient_usec_internal(Unit *u, const char *name, usec_t *p, bool fix_0, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error);
 static inline int bus_set_transient_usec(Unit *u, const char *name, usec_t *p, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error) {
         return bus_set_transient_usec_internal(u, name, p, false, message, flags, error);
@@ -246,3 +250,20 @@ static inline int bus_set_transient_usec(Unit *u, const char *name, usec_t *p, s
 static inline int bus_set_transient_usec_fix_0(Unit *u, const char *name, usec_t *p, sd_bus_message *message, UnitWriteFlags flags, sd_bus_error *error) {
         return bus_set_transient_usec_internal(u, name, p, true, message, flags, error);
 }
+
+int bus_verify_manage_units_async_impl(Manager *manager, const char *id, const char *verb, const char *polkit_message, sd_bus_message *call, sd_bus_error *error);
+static inline int bus_verify_manage_units_async_full(Unit *u, const char *verb, const char *polkit_message, sd_bus_message *call, sd_bus_error *error) {
+        assert(u);
+        return bus_verify_manage_units_async_impl(u->manager, u->id, verb, polkit_message, call, error);
+}
+static inline int bus_verify_manage_units_async(Manager *manager, sd_bus_message *call, sd_bus_error *error) {
+        return bus_verify_manage_units_async_impl(manager, NULL, NULL, NULL, call, error);
+}
+int bus_verify_manage_unit_files_async(Manager *m, sd_bus_message *call, sd_bus_error *error);
+int bus_verify_reload_daemon_async(Manager *m, sd_bus_message *call, sd_bus_error *error);
+int bus_verify_set_environment_async(Manager *m, sd_bus_message *call, sd_bus_error *error);
+int bus_verify_bypass_dump_ratelimit_async(Manager *m, sd_bus_message *call, sd_bus_error *error);
+
+int bus_read_mount_options(sd_bus_message *message, sd_bus_error *error, MountOptions **ret_options, char **ret_format_str, const char *separator);
+
+int bus_property_get_activation_details(sd_bus *bus, const char *path, const char *interface, const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *error);

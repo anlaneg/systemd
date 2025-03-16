@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1+ */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #if HAVE_VALGRIND_MEMCHECK_H
 #include <valgrind/memcheck.h>
@@ -13,8 +13,8 @@
 #include "bus-control.h"
 #include "bus-internal.h"
 #include "bus-message.h"
-#include "bus-util.h"
 #include "capability-util.h"
+#include "fd-util.h"
 #include "process-util.h"
 #include "stdio-util.h"
 #include "string-util.h"
@@ -27,7 +27,7 @@ _public_ int sd_bus_get_unique_name(sd_bus *bus, const char **unique) {
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
         assert_return(unique, -EINVAL);
-        assert_return(!bus_pid_changed(bus), -ECHILD);
+        assert_return(!bus_origin_changed(bus), -ECHILD);
 
         if (!bus->bus_client)
                 return -EINVAL;
@@ -90,7 +90,7 @@ _public_ int sd_bus_request_name(
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
         assert_return(name, -EINVAL);
-        assert_return(!bus_pid_changed(bus), -ECHILD);
+        assert_return(!bus_origin_changed(bus), -ECHILD);
 
         r = validate_request_name_parameters(bus, name, flags, &param);
         if (r < 0)
@@ -194,7 +194,7 @@ _public_ int sd_bus_request_name_async(
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
         assert_return(name, -EINVAL);
-        assert_return(!bus_pid_changed(bus), -ECHILD);
+        assert_return(!bus_origin_changed(bus), -ECHILD);
 
         r = validate_request_name_parameters(bus, name, flags, &param);
         if (r < 0)
@@ -248,7 +248,7 @@ _public_ int sd_bus_release_name(
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
         assert_return(name, -EINVAL);
-        assert_return(!bus_pid_changed(bus), -ECHILD);
+        assert_return(!bus_origin_changed(bus), -ECHILD);
 
         r = validate_release_name_parameters(bus, name);
         if (r < 0)
@@ -341,7 +341,7 @@ _public_ int sd_bus_release_name_async(
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
         assert_return(name, -EINVAL);
-        assert_return(!bus_pid_changed(bus), -ECHILD);
+        assert_return(!bus_origin_changed(bus), -ECHILD);
 
         r = validate_release_name_parameters(bus, name);
         if (r < 0)
@@ -368,7 +368,7 @@ _public_ int sd_bus_list_names(sd_bus *bus, char ***acquired, char ***activatabl
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
         assert_return(acquired || activatable, -EINVAL);
-        assert_return(!bus_pid_changed(bus), -ECHILD);
+        assert_return(!bus_origin_changed(bus), -ECHILD);
 
         if (!bus->bus_client)
                 return -EINVAL;
@@ -431,7 +431,6 @@ _public_ int sd_bus_get_name_creds(
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply_unique = NULL, *reply = NULL;
         _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *c = NULL;
         const char *unique;
-        pid_t pid = 0;
         int r;
 
         assert_return(bus, -EINVAL);
@@ -439,7 +438,7 @@ _public_ int sd_bus_get_name_creds(
         assert_return(name, -EINVAL);
         assert_return((mask & ~SD_BUS_CREDS_AUGMENT) <= _SD_BUS_CREDS_ALL, -EOPNOTSUPP);
         assert_return(mask == 0 || creds, -EINVAL);
-        assert_return(!bus_pid_changed(bus), -ECHILD);
+        assert_return(!bus_origin_changed(bus), -ECHILD);
         assert_return(service_name_is_valid(name), -EINVAL);
 
         if (!bus->bus_client)
@@ -484,8 +483,9 @@ _public_ int sd_bus_get_name_creds(
         }
 
         if (mask != 0) {
+                bool need_pid, need_uid, need_gids, need_selinux, need_separate_calls, need_pidfd, need_augment;
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-                bool need_pid, need_uid, need_selinux, need_separate_calls;
+                _cleanup_(pidref_done) PidRef pidref = PIDREF_NULL;
 
                 c = bus_creds_new();
                 if (!c)
@@ -499,20 +499,25 @@ _public_ int sd_bus_get_name_creds(
                         c->mask |= SD_BUS_CREDS_UNIQUE_NAME;
                 }
 
-                need_pid = (mask & SD_BUS_CREDS_PID) ||
-                        ((mask & SD_BUS_CREDS_AUGMENT) &&
-                         (mask & (SD_BUS_CREDS_UID|SD_BUS_CREDS_SUID|SD_BUS_CREDS_FSUID|
-                                  SD_BUS_CREDS_GID|SD_BUS_CREDS_EGID|SD_BUS_CREDS_SGID|SD_BUS_CREDS_FSGID|
-                                  SD_BUS_CREDS_SUPPLEMENTARY_GIDS|
-                                  SD_BUS_CREDS_COMM|SD_BUS_CREDS_EXE|SD_BUS_CREDS_CMDLINE|
-                                  SD_BUS_CREDS_CGROUP|SD_BUS_CREDS_UNIT|SD_BUS_CREDS_USER_UNIT|SD_BUS_CREDS_SLICE|SD_BUS_CREDS_SESSION|SD_BUS_CREDS_OWNER_UID|
-                                  SD_BUS_CREDS_EFFECTIVE_CAPS|SD_BUS_CREDS_PERMITTED_CAPS|SD_BUS_CREDS_INHERITABLE_CAPS|SD_BUS_CREDS_BOUNDING_CAPS|
-                                  SD_BUS_CREDS_SELINUX_CONTEXT|
-                                  SD_BUS_CREDS_AUDIT_SESSION_ID|SD_BUS_CREDS_AUDIT_LOGIN_UID)));
-                need_uid = mask & SD_BUS_CREDS_EUID;
-                need_selinux = mask & SD_BUS_CREDS_SELINUX_CONTEXT;
+                need_augment =
+                        (mask & SD_BUS_CREDS_AUGMENT) &&
+                        (mask & (SD_BUS_CREDS_UID|SD_BUS_CREDS_SUID|SD_BUS_CREDS_FSUID|
+                                 SD_BUS_CREDS_GID|SD_BUS_CREDS_EGID|SD_BUS_CREDS_SGID|SD_BUS_CREDS_FSGID|
+                                 SD_BUS_CREDS_SUPPLEMENTARY_GIDS|
+                                 SD_BUS_CREDS_COMM|SD_BUS_CREDS_EXE|SD_BUS_CREDS_CMDLINE|
+                                 SD_BUS_CREDS_CGROUP|SD_BUS_CREDS_UNIT|SD_BUS_CREDS_USER_UNIT|SD_BUS_CREDS_SLICE|SD_BUS_CREDS_SESSION|SD_BUS_CREDS_OWNER_UID|
+                                 SD_BUS_CREDS_EFFECTIVE_CAPS|SD_BUS_CREDS_PERMITTED_CAPS|SD_BUS_CREDS_INHERITABLE_CAPS|SD_BUS_CREDS_BOUNDING_CAPS|
+                                 SD_BUS_CREDS_SELINUX_CONTEXT|
+                                 SD_BUS_CREDS_AUDIT_SESSION_ID|SD_BUS_CREDS_AUDIT_LOGIN_UID|
+                                 SD_BUS_CREDS_PIDFD));
 
-                if (need_pid + need_uid + need_selinux > 1) {
+                need_pid = (mask & SD_BUS_CREDS_PID) || need_augment;
+                need_uid = mask & SD_BUS_CREDS_EUID;
+                need_gids = mask & SD_BUS_CREDS_SUPPLEMENTARY_GIDS;
+                need_selinux = mask & SD_BUS_CREDS_SELINUX_CONTEXT;
+                need_pidfd = (mask & SD_BUS_CREDS_PIDFD) || need_augment;
+
+                if (need_pid + need_uid + need_selinux + need_pidfd + need_gids > 1) {
 
                         /* If we need more than one of the credentials, then use GetConnectionCredentials() */
 
@@ -532,7 +537,7 @@ _public_ int sd_bus_get_name_creds(
                                 if (!sd_bus_error_has_name(&error, SD_BUS_ERROR_UNKNOWN_METHOD))
                                         return r;
 
-                                /* If we got an unknown method error, fall back to the invidual calls... */
+                                /* If we got an unknown method error, fall back to the individual calls... */
                                 need_separate_calls = true;
                                 sd_bus_error_free(&error);
 
@@ -573,7 +578,9 @@ _public_ int sd_bus_get_name_creds(
                                                 if (r < 0)
                                                         return r;
 
-                                                pid = p;
+                                                if (!pidref_is_set(&pidref))
+                                                        pidref = PIDREF_MAKE_FROM_PID(p);
+
                                                 if (mask & SD_BUS_CREDS_PID) {
                                                         c->pid = p;
                                                         c->mask |= SD_BUS_CREDS_PID;
@@ -591,16 +598,78 @@ _public_ int sd_bus_get_name_creds(
                                                 if (r < 0)
                                                         return r;
 
-                                                free(c->label);
-                                                c->label = strndup(p, sz);
-                                                if (!c->label)
-                                                        return -ENOMEM;
+                                                r = free_and_strndup(&c->label, p, sz);
+                                                if (r < 0)
+                                                        return r;
 
                                                 c->mask |= SD_BUS_CREDS_SELINUX_CONTEXT;
 
                                                 r = sd_bus_message_exit_container(reply);
                                                 if (r < 0)
                                                         return r;
+                                        } else if (need_pidfd && streq(m, "ProcessFD")) {
+                                                int fd;
+
+                                                r = sd_bus_message_read(reply, "v", "h", &fd);
+                                                if (r < 0)
+                                                        return r;
+
+                                                pidref_done(&pidref);
+                                                r = pidref_set_pidfd(&pidref, fd);
+                                                if (r < 0)
+                                                        return r;
+
+                                                if (mask & SD_BUS_CREDS_PIDFD) {
+                                                        fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+                                                        if (fd < 0)
+                                                                return -errno;
+
+                                                        close_and_replace(c->pidfd, fd);
+                                                        c->mask |= SD_BUS_CREDS_PIDFD;
+                                                }
+                                        } else if (need_gids && streq(m, "UnixGroupIDs")) {
+
+                                                /* Note that D-Bus actually only gives us a combined list of
+                                                 * primary gid and supplementary gids. And we don't know
+                                                 * which one the primary one is. We'll take the whole shebang
+                                                 * hence and use it as the supplementary group list, and not
+                                                 * initialize the primary gid field. This is slightly
+                                                 * incorrect of course, but only slightly, as in effect if
+                                                 * the primary gid is also listed in the supplementary gid
+                                                 * it has zero effect. */
+
+                                                r = sd_bus_message_enter_container(reply, 'v', "au");
+                                                if (r < 0)
+                                                        return r;
+
+                                                r = sd_bus_message_enter_container(reply, 'a', "u");
+                                                if (r < 0)
+                                                        return r;
+
+                                                for (;;) {
+                                                        uint32_t u;
+
+                                                        r = sd_bus_message_read(reply, "u", &u);
+                                                        if (r < 0)
+                                                                return r;
+                                                        if (r == 0)
+                                                                break;
+
+                                                        if (!GREEDY_REALLOC(c->supplementary_gids, c->n_supplementary_gids+1))
+                                                                return -ENOMEM;
+
+                                                        c->supplementary_gids[c->n_supplementary_gids++] = (gid_t) u;
+                                                }
+
+                                                r = sd_bus_message_exit_container(reply);
+                                                if (r < 0)
+                                                        return r;
+
+                                                r = sd_bus_message_exit_container(reply);
+                                                if (r < 0)
+                                                        return r;
+
+                                                c->mask |= SD_BUS_CREDS_SUPPLEMENTARY_GIDS;
                                         } else {
                                                 r = sd_bus_message_skip(reply, "v");
                                                 if (r < 0)
@@ -616,7 +685,7 @@ _public_ int sd_bus_get_name_creds(
                                 if (r < 0)
                                         return r;
 
-                                if (need_pid && pid == 0)
+                                if (need_pid && !pidref_is_set(&pidref))
                                         return -EPROTO;
                         }
 
@@ -644,7 +713,9 @@ _public_ int sd_bus_get_name_creds(
                                 if (r < 0)
                                         return r;
 
-                                pid = u;
+                                if (!pidref_is_set(&pidref))
+                                        pidref = PIDREF_MAKE_FROM_PID(u);
+
                                 if (mask & SD_BUS_CREDS_PID) {
                                         c->pid = u;
                                         c->mask |= SD_BUS_CREDS_PID;
@@ -694,7 +765,7 @@ _public_ int sd_bus_get_name_creds(
                                                 "s",
                                                 unique ?: name);
                                 if (r < 0) {
-                                        if (!sd_bus_error_has_name(&error, "org.freedesktop.DBus.Error.SELinuxSecurityContextUnknown"))
+                                        if (!sd_bus_error_has_name(&error, SD_BUS_ERROR_SELINUX_SECURITY_CONTEXT_UNKNOWN))
                                                 return r;
 
                                         /* no data is fine */
@@ -712,9 +783,11 @@ _public_ int sd_bus_get_name_creds(
                         }
                 }
 
-                r = bus_creds_add_more(c, mask, pid, 0);
-                if (r < 0)
-                        return r;
+                if (pidref_is_set(&pidref)) {
+                        r = bus_creds_add_more(c, mask, &pidref, 0);
+                        if (r < 0 && r != -ESRCH) /* Return the error, but ignore ESRCH which just means the process is already gone */
+                                return r;
+                }
         }
 
         if (creds)
@@ -723,17 +796,59 @@ _public_ int sd_bus_get_name_creds(
         return 0;
 }
 
+static int parse_sockaddr_string(const char *t, char **ret_comm, char **ret_description) {
+        _cleanup_free_ char *comm = NULL, *description = NULL;
+        const char *e, *sl;
+
+        assert(t);
+        assert(ret_comm);
+        assert(ret_description);
+
+        e = strstrafter(t, "/bus/");
+        if (!e) {
+                log_debug("Didn't find /bus/ substring in peer socket address, ignoring.");
+                goto not_found;
+        }
+
+        sl = strchr(e, '/');
+        if (!sl) {
+                log_debug("Didn't find / substring after /bus/ in peer socket address, ignoring.");
+                goto not_found;
+        }
+
+        if (sl - e > 0) {
+                comm = strndup(e, sl - e);
+                if (!comm)
+                        return -ENOMEM;
+        }
+
+        sl++;
+        if (!isempty(sl)) {
+                description = strdup(sl);
+                if (!description)
+                        return -ENOMEM;
+        }
+
+        *ret_comm = TAKE_PTR(comm);
+        *ret_description = TAKE_PTR(description);
+        return 0;
+
+not_found:
+        *ret_comm = *ret_description = NULL;
+        return 0;
+}
+
 _public_ int sd_bus_get_owner_creds(sd_bus *bus, uint64_t mask, sd_bus_creds **ret) {
         _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *c = NULL;
-        bool do_label, do_groups;
-        pid_t pid = 0;
+        _cleanup_(pidref_done) PidRef pidref = PIDREF_NULL;
+        bool do_label, do_groups, do_sockaddr_peer, do_pidfd;
         int r;
 
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
         assert_return((mask & ~SD_BUS_CREDS_AUGMENT) <= _SD_BUS_CREDS_ALL, -EOPNOTSUPP);
         assert_return(ret, -EINVAL);
-        assert_return(!bus_pid_changed(bus), -ECHILD);
+        assert_return(!bus_origin_changed(bus), -ECHILD);
 
         if (!BUS_IS_OPEN(bus->state))
                 return -ENOTCONN;
@@ -742,10 +857,14 @@ _public_ int sd_bus_get_owner_creds(sd_bus *bus, uint64_t mask, sd_bus_creds **r
                 mask &= ~SD_BUS_CREDS_AUGMENT;
 
         do_label = bus->label && (mask & SD_BUS_CREDS_SELINUX_CONTEXT);
-        do_groups = bus->n_groups != (size_t) -1 && (mask & SD_BUS_CREDS_SUPPLEMENTARY_GIDS);
+        do_groups = bus->n_groups != SIZE_MAX && (mask & SD_BUS_CREDS_SUPPLEMENTARY_GIDS);
+        do_sockaddr_peer = bus->sockaddr_size_peer >= offsetof(struct sockaddr_un, sun_path) + 1 &&
+                bus->sockaddr_peer.sa.sa_family == AF_UNIX &&
+                bus->sockaddr_peer.un.sun_path[0] == 0;
+        do_pidfd = bus->pidfd >= 0 && (mask & SD_BUS_CREDS_PIDFD);
 
         /* Avoid allocating anything if we have no chance of returning useful data */
-        if (!bus->ucred_valid && !do_label && !do_groups)
+        if (!bus->ucred_valid && !do_label && !do_groups && !do_sockaddr_peer && !do_pidfd)
                 return -ENODATA;
 
         c = bus_creds_new();
@@ -754,8 +873,10 @@ _public_ int sd_bus_get_owner_creds(sd_bus *bus, uint64_t mask, sd_bus_creds **r
 
         if (bus->ucred_valid) {
                 if (pid_is_valid(bus->ucred.pid)) {
-                        pid = c->pid = bus->ucred.pid;
+                        c->pid = bus->ucred.pid;
                         c->mask |= SD_BUS_CREDS_PID & mask;
+
+                        pidref = PIDREF_MAKE_FROM_PID(c->pid);
                 }
 
                 if (uid_is_valid(bus->ucred.uid)) {
@@ -787,8 +908,50 @@ _public_ int sd_bus_get_owner_creds(sd_bus *bus, uint64_t mask, sd_bus_creds **r
                 c->mask |= SD_BUS_CREDS_SUPPLEMENTARY_GIDS;
         }
 
-        r = bus_creds_add_more(c, mask, pid, 0);
-        if (r < 0)
+        if (do_sockaddr_peer) {
+                _cleanup_free_ char *t = NULL;
+
+                assert(bus->sockaddr_size_peer >= offsetof(struct sockaddr_un, sun_path) + 1);
+                assert(bus->sockaddr_peer.sa.sa_family == AF_UNIX);
+                assert(bus->sockaddr_peer.un.sun_path[0] == 0);
+
+                /* So this is an abstract namespace socket, good. Now let's find the data we are interested in */
+                r = make_cstring(bus->sockaddr_peer.un.sun_path + 1,
+                                 bus->sockaddr_size_peer - offsetof(struct sockaddr_un, sun_path) - 1,
+                                 MAKE_CSTRING_ALLOW_TRAILING_NUL,
+                                 &t);
+                if (r == -ENOMEM)
+                        return r;
+                if (r < 0)
+                        log_debug_errno(r, "Can't extract string from peer socket address, ignoring: %m");
+                else {
+                        r = parse_sockaddr_string(t, &c->comm, &c->description);
+                        if (r < 0)
+                                return r;
+
+                        if (c->comm)
+                                c->mask |= SD_BUS_CREDS_COMM & mask;
+
+                        if (c->description)
+                                c->mask |= SD_BUS_CREDS_DESCRIPTION & mask;
+                }
+        }
+
+        if (do_pidfd) {
+                c->pidfd = fcntl(bus->pidfd, F_DUPFD_CLOEXEC, 3);
+                if (c->pidfd < 0)
+                        return -errno;
+
+                pidref_done(&pidref);
+                r = pidref_set_pidfd(&pidref, bus->pidfd);
+                if (r < 0)
+                        return r;
+
+                c->mask |= SD_BUS_CREDS_PIDFD;
+        }
+
+        r = bus_creds_add_more(c, mask, &pidref, 0);
+        if (r < 0 && r != -ESRCH) /* If the process vanished, then don't complain, just return what we got */
                 return r;
 
         *ret = TAKE_PTR(c);
@@ -803,9 +966,13 @@ _public_ int sd_bus_get_owner_creds(sd_bus *bus, uint64_t mask, sd_bus_creds **r
 
 int bus_add_match_internal(
                 sd_bus *bus,
-                const char *match) {
+                const char *match,
+                uint64_t timeout_usec,
+                uint64_t *ret_counter) {
 
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL, *reply = NULL;
         const char *e;
+        int r;
 
         assert(bus);
 
@@ -814,25 +981,47 @@ int bus_add_match_internal(
 
         e = append_eavesdrop(bus, match);
 
-        return sd_bus_call_method(
+        r = sd_bus_message_new_method_call(
                         bus,
+                        &m,
                         "org.freedesktop.DBus",
                         "/org/freedesktop/DBus",
                         "org.freedesktop.DBus",
-                        "AddMatch",
+                        "AddMatch");
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_append(m, "s", e);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_call(
+                        bus,
+                        m,
+                        timeout_usec,
                         NULL,
-                        NULL,
-                        "s",
-                        e);
+                        &reply);
+        if (r < 0)
+                return r;
+
+        /* If the caller asked for it, return the read counter of the reply */
+        if (ret_counter)
+                *ret_counter = reply->read_counter;
+
+        return r;
 }
+
 int bus_add_match_internal_async(
                 sd_bus *bus,
                 sd_bus_slot **ret_slot,
                 const char *match,
                 sd_bus_message_handler_t callback,
-                void *userdata) {
+                void *userdata,
+                uint64_t timeout_usec) {
 
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
         const char *e;
+        int r;
 
         assert(bus);
 
@@ -841,17 +1030,27 @@ int bus_add_match_internal_async(
 
         e = append_eavesdrop(bus, match);
 
-        return sd_bus_call_method_async(
+        r = sd_bus_message_new_method_call(
                         bus,
-                        ret_slot,
+                        &m,
                         "org.freedesktop.DBus",
                         "/org/freedesktop/DBus",
                         "org.freedesktop.DBus",
-                        "AddMatch",
+                        "AddMatch");
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_append(m, "s", e);
+        if (r < 0)
+                return r;
+
+        return sd_bus_call_async(
+                        bus,
+                        ret_slot,
+                        m,
                         callback,
                         userdata,
-                        "s",
-                        e);
+                        timeout_usec);
 }
 
 int bus_remove_match_internal(
@@ -892,7 +1091,7 @@ _public_ int sd_bus_get_name_machine_id(sd_bus *bus, const char *name, sd_id128_
         assert_return(bus = bus_resolve(bus), -ENOPKG);
         assert_return(name, -EINVAL);
         assert_return(machine, -EINVAL);
-        assert_return(!bus_pid_changed(bus), -ECHILD);
+        assert_return(!bus_origin_changed(bus), -ECHILD);
         assert_return(service_name_is_valid(name), -EINVAL);
 
         if (!bus->bus_client)
